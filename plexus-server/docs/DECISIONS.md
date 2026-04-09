@@ -288,3 +288,38 @@
 Kept separate because they serve different trust boundaries — a user might trust their prod server to access internal services but not their laptop. Admin can also set a global whitelist (company-wide internal ranges) that applies to all users.
 
 **Outcome:** Default is secure (all private IPs blocked). Users opt in to specific ranges they need — responsibility is on them. Per-device granularity for client-side, per-user for server-side.
+
+---
+
+## ADR-25: DB reload per agent loop iteration (no history caching)
+
+**Context:** The agent loop builds the LLM prompt each iteration by loading message history. An early optimization cached the history before the loop and only appended new messages in memory. This caused a critical bug: the cached history never included tool call results saved to DB by previous iterations, so the LLM received identical payloads every iteration (infinite loop).
+
+**Options:**
+- Cache history before loop, append in memory each iteration -- fast but fragile. Must manually track every DB insert and mirror it in the cache. Easy to desync.
+- Reload from DB each iteration -- one extra SELECT per iteration. Simple, always correct, doubles as crash recovery (ADR-9).
+
+**Decision:** Reload from DB each iteration. No in-memory history cache.
+
+**Outcome:** The LLM bottleneck (seconds per call) dwarfs the DB query cost (sub-millisecond). Even at 200 iterations, that's 200 queries -- trivial. The simplicity eliminates an entire class of cache-coherence bugs. DB history also serves as a crash recovery checkpoint: if the server restarts mid-loop, the next run picks up where it left off.
+
+---
+
+## ADR-26: Session context in system prompt (channel, partner, sender)
+
+**Context:** The agent had no awareness of who it was talking to, which channel the message came from, or what chat_id to use when calling the message tool. This caused the agent to fail at basic tasks like sending files back to the user.
+
+**Decision:** `ChannelIdentity` builds a "Current Conversation" section injected into every system prompt:
+
+```
+## Current Conversation
+Channel: discord
+Chat ID: dm/1491709638092263465
+Your partner: zpoteiti (discord ID: 815971492167942155)
+Sender: zpoteiti (partner)
+To reply here, respond with text directly. To send media, use the message tool with the channel and chat_id above.
+```
+
+Each channel (Discord, Telegram, Gateway) constructs a `ChannelIdentity` with sender info and whether the sender is the partner or an authorized non-partner. For non-partner senders, the prompt includes a security warning. Gateway/cron default to partner identity.
+
+**Outcome:** The agent knows who it's talking to, can address them by name, and has the exact channel + chat_id needed for the message tool. Non-partner users get an untrusted-input wrapper on their messages plus a system prompt warning -- defense in depth against prompt injection via authorized guests.
