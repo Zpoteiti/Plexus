@@ -157,6 +157,7 @@ pub async fn deliver(state: &AppState, event: &OutboundEvent) {
     let mut msg = serde_json::json!({
         "type": "send",
         "chat_id": event.chat_id,
+        "session_id": event.session_id,
         "content": event.content,
     });
 
