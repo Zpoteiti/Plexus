@@ -1,0 +1,30 @@
+[package]
+name = "plexus-gateway"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace", "limit"] }
+futures-util = "0.3"
+jsonwebtoken = "9"
+subtle = "2"
+dashmap = "6"
+reqwest = { version = "0.12", features = ["json"] }
+dotenvy = "0.15"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+plexus-common = { path = "../plexus-common", features = ["axum"] }
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+
+[lints.rust]
+unsafe_code = "forbid"

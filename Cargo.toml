@@ -1,5 +1,5 @@
 [workspace]
-members = ["plexus-common", "plexus-client", "plexus-server"]
+members = ["plexus-common", "plexus-client", "plexus-server", "plexus-gateway"]
 resolver = "2"
 
 [workspace.package]

@@ -1,14 +1,21 @@
 # M3 — Gateway + Frontend Design
 
-**Status:** r3 — docs aligned after second Codex review, ready for plan write
+**Status:** r4 — simplified after implementation brainstorm, ready for plan write
 **Date:** 2026-04-10
 **Scope:** Build `plexus-gateway` (Rust) and `plexus-frontend` (React) from scratch
 
 ## Revision History
 
+**2026-04-10 (r4):** Simplified after implementation brainstorm. Architecture unchanged; r4 removes over-engineering that doesn't pay off at M3 scale.
+- **Single outbound channel:** merged `data_tx` / `ctrl_tx` into one `mpsc::channel(64)`. `OutboundFrame` enum now includes `Ping` alongside `Message`, `Progress`, `Error`. At M3 scale (≤1,000 browsers), a backed-up queue cannot realistically starve pings because keepalive fires every 30s and the channel drains sub-millisecond per frame. If a channel is genuinely full for 2+ minutes, the browser is dead anyway and gets evicted.
+- **Simple missed-pong counter:** replaced `AtomicI64` timestamp tracking with `AtomicU32` counter. Ping increments it, pong resets it. If counter > 3 (~2 min of silence), cancel the connection. No timestamp math.
+- **No sender_id fallback scan:** routing uses direct `chat_id` lookup only. If no match, warn and drop. Cron job outputs are still saved to DB by plexus-server regardless of gateway delivery; users see them via `GET /api/sessions/{id}/messages`. Fallback scan is M4.
+- **Simple response body limit:** `reqwest .bytes()` with a length check rather than streaming byte counter. Sufficient for M3 payload sizes.
+- **Public REST prefix widened:** JWT validation skipped for all `/api/auth/*` paths (not just `/api/auth/login` and `/api/auth/register`), so future auth endpoints like password reset work without gateway changes.
+
 **2026-04-10 (r3):** Tightened after second Codex review. The architecture is unchanged; r3 closes implementation-detail gaps identified during r2 plan review.
 - **Per-connection `CancellationToken`:** each browser gets a child token of `state.shutdown`. The reader, writer, and keepalive tasks all `select!` on it. Shutdown, eviction, keepalive timeout, and graceful signals all trigger the same exit path without ordering pitfalls.
-- **Separate control channel for keepalive:** pings and close signals use a dedicated bounded `mpsc::channel(4)` distinct from the data channel. A backed-up data queue cannot starve keepalives.
+- **Separate control channel for keepalive:** replaced in r4 with single channel.
 - **Plexus-side keepalive removed:** TCP keepalive + plexus-server reconnect loop are sufficient for M3. PROTOCOL.md r3 no longer mentions `/ws/plexus` app-level ping/pong. Revisit if ops experience shows it's needed.
 - **Progress overflow wording:** aligned to "drop on full" (tokio mpsc `try_send` drops the newest). No more "drop oldest" claim.
 - **Frontend merge semantics:** claim narrowed from "dedup" to "initial-load merge with no clobber." We do not claim REST/WS can both render the same assistant message only once, because WS final messages currently get client-assigned IDs.
@@ -79,7 +86,7 @@ plexus-gateway/
     ├── jwt.rs            — JWT validation, Claims struct
     ├── proxy.rs          — /api/* REST passthrough
     ├── static_files.rs   — frontend serving with SPA fallback
-    ├── routing.rs        — chat_id → browser lookup, sender_id fallback
+    ├── routing.rs        — chat_id → browser lookup, try_send dispatch
     └── ws/
         ├── mod.rs        — shared WS types (BrowserConnection, PlexusConnection)
         ├── chat.rs       — /ws/chat (browser WS handler)
@@ -115,7 +122,7 @@ tokio-tungstenite = { version = "0.26", features = ["native-tls"] }  # only for 
 
 The gateway is deliberately **stateless w.r.t. sessions** — it only holds the live WebSocket connection table.
 
-Each browser connection has two bounded mpsc channels and a per-connection `CancellationToken`. A dedicated writer task owns the WebSocket sink and `select!`s over both channels plus the cancel token. Reader, writer, and keepalive tasks all `select!` on the same cancel token, so any exit condition (disconnect, eviction, keepalive timeout, graceful shutdown) propagates cleanly to all three.
+Each browser connection has a single bounded mpsc channel and a per-connection `CancellationToken`. A dedicated writer task owns the WebSocket sink and `select!`s over the channel plus the cancel token. Reader, writer, and keepalive tasks all `select!` on the same cancel token, so any exit condition (disconnect, eviction, keepalive timeout, graceful shutdown) propagates cleanly to all three.
 
 ```rust
 pub struct AppState {
@@ -128,9 +135,8 @@ pub struct AppState {
 
 #[derive(Clone)]
 pub struct BrowserConnection {
-    pub data_tx: tokio::sync::mpsc::Sender<OutboundFrame>,   // bounded(64): message + progress + error
-    pub ctrl_tx: tokio::sync::mpsc::Sender<CtrlFrame>,       // bounded(4): ping only — never starved by data
-    pub user_id: String,                                     // from JWT; needed for sender_id fallback
+    pub tx: tokio::sync::mpsc::Sender<OutboundFrame>,        // bounded(64): all outbound frames
+    pub user_id: String,                                     // from JWT
     pub cancel:  tokio_util::sync::CancellationToken,        // child of state.shutdown; triggers full teardown
 }
 
@@ -138,10 +144,7 @@ pub enum OutboundFrame {
     Message(serde_json::Value),  // final message — on queue-full, evict the browser
     Progress(serde_json::Value), // ephemeral — on queue-full, drop silently (tokio mpsc drops newest)
     Error(serde_json::Value),    // in-band error reply — sent by reader loop, never evicts
-}
-
-pub enum CtrlFrame {
-    Ping,  // sent by keepalive task; writer emits `{"type":"ping"}`
+    Ping,                        // sent by keepalive task; writer emits `{"type":"ping"}`
 }
 ```
 
@@ -149,21 +152,19 @@ pub enum CtrlFrame {
 
 **No session state at the gateway.** The browser supplies `session_id` in every `message` frame. The gateway validates the prefix (`gateway:{user_id}:` where `user_id` matches the JWT `sub`) and forwards it to plexus-server. Plexus-server creates the DB row on first use (same pattern as Discord and Telegram channels). This makes gateway restarts trivially safe — no session state is lost because the gateway never owned it.
 
-**Task lifecycle rules (prevents leaks and guarantees control-frame delivery):**
+**Task lifecycle rules (prevents leaks):**
 
-1. On connect, the reader creates `(data_tx, data_rx)`, `(ctrl_tx, ctrl_rx)`, and `conn_cancel = state.shutdown.child_token()`. It inserts `BrowserConnection { data_tx.clone(), ctrl_tx.clone(), user_id, cancel: conn_cancel.clone() }` into `state.browsers`.
-2. Spawn the writer task with `(ws_sink, data_rx, ctrl_rx, conn_cancel.clone())`. Writer does `select!` over all three: cancel, ctrl_rx (higher priority via `biased;`), data_rx.
-3. Spawn the keepalive task with `(ctrl_tx.clone(), last_pong_atomic, conn_cancel.clone())`. It sends `CtrlFrame::Ping` every 30s via `ctrl_tx.try_send(...)`. If `try_send` fails because the ctrl channel is full (4 unread pings ≈ 2 min of no writer progress), it calls `conn_cancel.cancel()`. It checks `last_pong >= last_ping_sent_at` after each ping and calls `conn_cancel.cancel()` on timeout (15 s after the most recent ping). On cancel, the keepalive exits its loop.
-4. Reader loop uses `select!` over `conn_cancel.cancelled()` and `ws_stream.next()`. On cancel or stream end, fall through to cleanup.
+1. On connect, the reader creates `(tx, rx)` and `conn_cancel = state.shutdown.child_token()`. It inserts `BrowserConnection { tx: tx.clone(), user_id, cancel: conn_cancel.clone() }` into `state.browsers`.
+2. Spawn the writer task with `(ws_sink, rx, conn_cancel.clone())`. Writer does `select!` over cancel and rx.
+3. Spawn the keepalive task with `(tx.clone(), missed_pongs: Arc<AtomicU32>, conn_cancel.clone())`. It sends `OutboundFrame::Ping` every 30s via `tx.try_send(...)`. Increments `missed_pongs` on each ping. If `missed_pongs > 3` (~2 min of silence) or `try_send` fails (channel full), calls `conn_cancel.cancel()`. On cancel, the keepalive exits its loop.
+4. Reader loop uses `select!` over `conn_cancel.cancelled()` and `ws_stream.next()`. On incoming `pong`, resets `missed_pongs.store(0, Relaxed)`. On cancel or stream end, fall through to cleanup.
 5. Cleanup order on disconnect:
-   a. `state.browsers.remove(chat_id)` drops the stored `data_tx` + `ctrl_tx` clones.
+   a. `state.browsers.remove(chat_id)` drops the stored `tx` clone.
    b. `conn_cancel.cancel()` — signals writer and keepalive.
-   c. `drop(data_tx); drop(ctrl_tx)` on the reader's local clones.
+   c. `drop(tx)` on the reader's local clone.
    d. `writer.await` — writer exits via cancel arm of `select!` (it does not need all senders dropped, because the cancel token wins).
    e. Keepalive will exit on its own via cancel; no need to await it.
 6. Routing (see "Routing" below) may hold short-lived handle clones. It only uses `try_send`, never awaits, and does not hold the DashMap shard guard across any operation.
-
-**Why a separate ctrl channel:** Codex r2 flagged that sharing the data channel for pings lets a backed-up queue starve keepalives. With a dedicated ctrl channel (buffer 4), the writer's `biased;` `select!` checks ctrl first on every wakeup, guaranteeing pings go out even when data is saturated. The keepalive sender is only held by the keepalive task; on disconnect, `conn_cancel.cancel()` terminates keepalive, the reader drops its clones, and the writer exits without waiting for any sender refcount to drop to zero.
 
 **Writer select contract:**
 
@@ -173,18 +174,14 @@ loop {
     tokio::select! {
         biased;
         _ = conn_cancel.cancelled() => break,
-        Some(ctrl) = ctrl_rx.recv() => {
-            match ctrl {
-                CtrlFrame::Ping => sink.send(Text("{\"type\":\"ping\"}")).await?,
-            }
-        }
-        Some(frame) = data_rx.recv() => {
-            let json = match frame {
-                OutboundFrame::Message(v) | OutboundFrame::Progress(v) | OutboundFrame::Error(v) => v,
+        Some(frame) = rx.recv() => {
+            let text = match frame {
+                OutboundFrame::Ping => "{\"type\":\"ping\"}".to_string(),
+                OutboundFrame::Message(v) | OutboundFrame::Progress(v) | OutboundFrame::Error(v) => v.to_string(),
             };
-            sink.send(Text(json.to_string())).await?;
+            sink.send(Text(text)).await?;
         }
-        else => break, // both recv's returned None
+        else => break, // recv returned None
     }
 }
 // On exit: send a close frame, best effort.
@@ -214,26 +211,26 @@ Handler lives in `ws/chat.rs`. Flow:
 
 1. **Origin check.** Read the `Origin` header. If `Config::origin_allowed(Some(origin))` returns false, return HTTP 403 before upgrade.
 2. **JWT validation.** Extract the `token` query parameter (browsers cannot set `Authorization` on WS upgrade). Validate via `jwt::validate()`. On failure → HTTP 401 before upgrade; no resources allocated.
-3. **Upgrade and set up per-connection state.** Allocate `chat_id = Uuid::new_v4()`. Create `(data_tx, data_rx)` with buffer 64 and `(ctrl_tx, ctrl_rx)` with buffer 4. Create `conn_cancel = state.shutdown.child_token()`. Insert a `BrowserConnection` clone into `state.browsers[chat_id]`.
-4. **Spawn writer task.** Owns the WebSocket sink, drains ctrl_rx (priority) and data_rx via `select!`, and watches `conn_cancel`. On cancel or both channels closed, sends a WebSocket close frame and exits.
-5. **Spawn keepalive task.** Sends `CtrlFrame::Ping` every 30 seconds via `ctrl_tx.try_send(...)`. Tracks `last_pong: AtomicI64` (updated by reader on incoming `pong`). After each ping, checks whether `last_pong >= last_ping_sent_at` with a 15-second grace; on timeout, calls `conn_cancel.cancel()`. If `ctrl_tx.try_send(Ping)` fails because the ctrl channel is already full (4 unread pings means the writer has been stuck for over 2 minutes), immediately cancels `conn_cancel`.
+3. **Upgrade and set up per-connection state.** Allocate `chat_id = Uuid::new_v4()`. Create `(tx, rx)` with buffer 64. Create `conn_cancel = state.shutdown.child_token()`. Insert a `BrowserConnection` clone into `state.browsers[chat_id]`.
+4. **Spawn writer task.** Owns the WebSocket sink, drains rx via `select!`, and watches `conn_cancel`. On cancel or channel closed, sends a WebSocket close frame and exits.
+5. **Spawn keepalive task.** Sends `OutboundFrame::Ping` every 30 seconds via `tx.try_send(...)`. Tracks `missed_pongs: Arc<AtomicU32>` (reset by reader on incoming `pong`). Increments the counter on each ping. If `missed_pongs > 3` (~2 min of silence) or `tx.try_send(Ping)` fails (channel full), immediately calls `conn_cancel.cancel()`.
 6. **Reader loop.** `select!` over `conn_cancel.cancelled()` and `ws_stream.next()`. Dispatch incoming JSON by `type`:
-   - `message` → validate `session_id` starts with `gateway:{user_id}:` (strict string prefix check). On mismatch, enqueue `OutboundFrame::Error(json!({"type":"error","reason":"invalid session_id"}))` via `data_tx.try_send` and continue. On match, call `routing::forward_to_plexus(&state, &chat_id, &user_id, &parsed, &data_tx)`. If plexus is not connected, the forward routine enqueues an `Error` frame instead.
-   - `pong` → `last_pong.store(now_ms(), Relaxed)`; no reply.
+   - `message` → validate `session_id` starts with `gateway:{user_id}:` (strict string prefix check). On mismatch, enqueue `OutboundFrame::Error(json!({"type":"error","reason":"invalid session_id"}))` via `tx.try_send` and continue. On match, call `routing::forward_to_plexus(&state, &chat_id, &user_id, &parsed, &tx)`. If plexus is not connected, the forward routine enqueues an `Error` frame instead.
+   - `pong` → `missed_pongs.store(0, Relaxed)`; no reply.
    - Unknown type → log warn, ignore.
 7. **Cleanup on disconnect / cancel / shutdown signal.** Order:
-   1. `state.browsers.remove(&chat_id)` — drops stored sender clones.
+   1. `state.browsers.remove(&chat_id)` — drops stored sender clone.
    2. `conn_cancel.cancel()` — signals writer and keepalive (idempotent if already cancelled).
-   3. `drop(data_tx); drop(ctrl_tx)` on the reader's local clones.
+   3. `drop(tx)` on the reader's local clone.
    4. `writer.await` — writer wakes via cancel arm immediately and exits.
    5. Keepalive exits via cancel on its own; no `await` or `abort` needed.
 
 **No session bookkeeping.** The gateway does not remember "current session per chat_id". There are no `new_session` / `switch_session` / `session_created` / `session_switched` messages. The browser is responsible for its own session state.
 
 **Per-connection backpressure.**
-- **Progress frames:** routing does `conn.data_tx.try_send(OutboundFrame::Progress(...))`. On `Full`, the frame is silently dropped. Tokio mpsc's `try_send` drops the newest on full (not the oldest). This is acceptable because progress is ephemeral and the user already has a recent hint on screen.
-- **Final frames:** routing does `conn.data_tx.try_send(OutboundFrame::Message(...))`. On `Full`, the browser is evicted: `state.browsers.remove(chat_id)` and `conn.cancel.cancel()`. The writer and keepalive tasks exit via cancel. This prevents one slow consumer from head-of-line blocking the `/ws/plexus` reader loop.
-- **Error frames (reader-originated):** the reader uses `data_tx.try_send` for in-band error replies. On `Full`, the error is dropped and we rely on the eviction path to clean up. The error-reply drop is acceptable because a client in that state is already unhealthy.
+- **Progress frames:** routing does `conn.tx.try_send(OutboundFrame::Progress(...))`. On `Full`, the frame is silently dropped. Tokio mpsc's `try_send` drops the newest on full (not the oldest). This is acceptable because progress is ephemeral and the user already has a recent hint on screen.
+- **Final frames:** routing does `conn.tx.try_send(OutboundFrame::Message(...))`. On `Full`, the browser is evicted: `state.browsers.remove(chat_id)` and `conn.cancel.cancel()`. The writer and keepalive tasks exit via cancel. This prevents one slow consumer from head-of-line blocking the `/ws/plexus` reader loop.
+- **Error frames (reader-originated):** the reader uses `tx.try_send` for in-band error replies. On `Full`, the error is dropped and we rely on the eviction path to clean up. The error-reply drop is acceptable because a client in that state is already unhealthy.
 
 ### WebSocket: `/ws/plexus` (plexus-server, exactly one)
 
@@ -258,12 +255,11 @@ Flow:
 
 ### Routing
 
-Handler lives in `routing.rs`. The contract is: **`route_send` is a synchronous `fn` with no `await`s.** Any blocking here stalls the entire `/ws/plexus` reader.
+Handler lives in `routing.rs`. The contract is: **`route_send` is a synchronous `fn` with no `await`s.** Any blocking here stalls the entire `/ws/plexus` reader. No `sender_id` fallback scan — direct `chat_id` lookup only. If no match, warn and drop. Cron job outputs are saved to DB by plexus-server regardless; users can see them via `GET /api/sessions/{id}/messages`.
 
 ```rust
 pub enum RouteResult {
     DirectHit,
-    SenderFallback,
     NoMatch,
     Evicted, // browser queue was full on a final message; connection was evicted
 }
@@ -280,18 +276,19 @@ pub fn route_send(state: &Arc<AppState>, msg: &Value) -> RouteResult {
         return try_dispatch(state, chat_id, conn, frame);
     }
 
-    // 5. Fallback: scan for sender_id match (collect clones synchronously).
-    // ...
+    // 5. No match — warn and drop.
+    tracing::warn!("routing: no browser for chat_id={chat_id}");
+    RouteResult::NoMatch
 }
 
 fn try_dispatch(state: &Arc<AppState>, chat_id: &str, conn: BrowserConnection, frame: OutboundFrame) -> RouteResult {
     match frame {
         OutboundFrame::Progress(_) => {
-            let _ = conn.outbound.try_send(frame); // drop on full, ignore error
+            let _ = conn.tx.try_send(frame); // drop on full, ignore error
             RouteResult::DirectHit
         }
         OutboundFrame::Message(_) => {
-            match conn.outbound.try_send(frame) {
+            match conn.tx.try_send(frame) {
                 Ok(()) => RouteResult::DirectHit,
                 Err(_) => {
                     tracing::warn!("evicting slow browser chat_id={chat_id}");
@@ -304,7 +301,7 @@ fn try_dispatch(state: &Arc<AppState>, chat_id: &str, conn: BrowserConnection, f
         OutboundFrame::Error(_) => {
             // Error frames are only constructed by the reader loop, not routing;
             // if one ever reaches here it's a bug — but handle gracefully.
-            let _ = conn.data_tx.try_send(frame);
+            let _ = conn.tx.try_send(frame);
             RouteResult::DirectHit
         }
     }
@@ -319,13 +316,13 @@ fn try_dispatch(state: &Arc<AppState>, chat_id: &str, conn: BrowserConnection, f
 
 Handler lives in `proxy.rs`. Behavior matches `plexus-gateway/docs/PROTOCOL.md`:
 
-- Public endpoints `/api/auth/login` and `/api/auth/register` skip JWT validation.
-- All other paths require `Authorization: Bearer <JWT>`, validated at the gateway before proxying.
+- Public endpoints under `/api/auth/*` skip JWT validation (login, register, and any future auth endpoints like password reset).
+- All other `/api/*` paths require `Authorization: Bearer <JWT>`, validated at the gateway before proxying.
 - Forward method, headers, and body to `{PLEXUS_SERVER_API_URL}{path}`.
 - Strip hop-by-hop headers: `host`, `connection`, `transfer-encoding`, `upgrade`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`, `te`, `trailer`.
 - Reject path traversal (`..`) with HTTP 422.
 - **Max request body:** 25 MB via `tower_http::limit::RequestBodyLimitLayer`. Oversized → HTTP 413.
-- **Max response body:** 25 MB, enforced explicitly. If the upstream sends a `Content-Length` header > 25 MB, the proxy rejects with HTTP 502 before reading the body. Otherwise, stream the body via `resp.bytes_stream()` accumulating into a `Vec<u8>` with a running check; if the running total exceeds 25 MB, abort and return HTTP 502 with `{"error":{"code":"upstream_too_large","message":"response body exceeded 25 MB limit"}}`.
+- **Max response body:** 25 MB, enforced via `reqwest::Response::bytes()` with a length check. If the response exceeds 25 MB, return HTTP 502 with `{"error":{"code":"upstream_too_large","message":"response body exceeded 25 MB limit"}}`. No streaming byte counter — `bytes()` with a limit is sufficient for M3 payload sizes.
 - Uses the shared `reqwest::Client` from `AppState`. One pool, many requests.
 - Network failure → 502 Bad Gateway with JSON body `{"error":{"code":"upstream_unreachable","message": ...}}`.
 
@@ -391,7 +388,7 @@ Parsed once at startup. Non-`*` config is required for production deployments; t
 Unit tests (`cargo test --package plexus-gateway`):
 
 - `jwt.rs`: valid token, expired token, malformed token, wrong secret, missing claims.
-- `routing.rs`: direct chat_id lookup, sender_id fallback, no-match, **slow-consumer eviction**, **progress drop on full**.
+- `routing.rs`: direct chat_id lookup, no-match, **slow-consumer eviction**, **progress drop on full**.
 - Constant-time token comparison: equal-length match, equal-length mismatch, length mismatch without byte comparison.
 
 Integration tests (in-process, ephemeral port, isolated `Config` per test):

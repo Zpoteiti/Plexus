@@ -242,7 +242,7 @@ When plexus-server sends a `send` message:
 
 **Browser ↔ Gateway:** the gateway sends application-level `{"type":"ping"}` frames every 30 seconds and expects `{"type":"pong"}` within 15 seconds. On timeout, the gateway cancels the per-connection `CancellationToken`, which causes the reader, writer, and keepalive tasks to exit and the `DashMap` entry to be removed. Application-level frames are used (not WebSocket control frames) because some reverse proxies strip control frames.
 
-Pings use a dedicated bounded `mpsc::channel(4)` (the "control channel"), separate from the data channel that carries `message` / `progress` frames. The writer task does `tokio::select!` over both channels, so a full data channel cannot starve keepalives. The keepalive task holds only the control-channel sender, and it is `abort()`ed before the writer is awaited on disconnect.
+Pings are sent through the same bounded `mpsc::channel(64)` as data frames, as an `OutboundFrame::Ping` variant. The keepalive task tracks a missed-pong counter (`AtomicU32`); if the counter exceeds 3 (~2 min of silence) or `try_send` fails (channel full), the per-connection `CancellationToken` is cancelled and all tasks exit.
 
 **Plexus-server ↔ Gateway:** no application-level keepalive in M3. The TCP keepalive and the plexus-server's own reconnect loop (1s → 30s exponential backoff) are relied on to detect dead connections. If operational experience shows this is insufficient, app-level keepalive can be added in a later milestone.
 
@@ -253,7 +253,7 @@ Pings use a dedicated bounded `mpsc::channel(4)` (the "control channel"), separa
 Each browser connection has two queue thresholds:
 
 - **Inbound (browser → gateway → plexus):** the gateway forwards one browser message at a time, blocking on the plexus sender channel. The plexus sender has buffer 256. If plexus-server cannot keep up, browser sends block naturally — fine, it's a 1-to-many fan-in.
-- **Outbound (plexus → gateway → browser):** each browser has an outbound channel of buffer 64. Progress frames drop oldest on overflow; final frames trigger eviction. This isolates slow consumers from one another.
+- **Outbound (plexus → gateway → browser):** each browser has an outbound channel of buffer 64. Progress frames drop newest on overflow (`try_send` drops the incoming frame, not queued ones); final frames trigger eviction. This isolates slow consumers from one another.
 
 The plexus `/ws/plexus` reader loop **must** be non-blocking per message — any blocking call there stalls every browser's outbound flow.
 
