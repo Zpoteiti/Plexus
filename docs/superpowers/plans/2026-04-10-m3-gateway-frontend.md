@@ -1,20 +1,33 @@
-# M3: Gateway + Frontend Implementation Plan
+# M3: Gateway + Frontend Implementation Plan (r2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build `plexus-gateway` (Rust WebSocket hub + REST proxy + static file server) and `plexus-frontend` (React 19 SPA with Chat / Settings / Admin pages).
 
-**Architecture:** The gateway is a stateless "pipe with auth" — browsers and plexus-server both dial in as WebSocket clients, and the gateway routes messages between them by `chat_id`. Session state lives at plexus-server (DB). The frontend is a React SPA styled as "Cyberpunk Refined" (GitHub-dark base + neon green `#39ff14` accents) served by the gateway as static files in production.
+**Architecture:** The gateway is a stateless "pipe with auth" — browsers and plexus-server both dial in as WebSocket clients, and the gateway routes messages between them by `chat_id`. **The browser owns session state**: every inbound `message` carries a `session_id` that the gateway validates (prefix match against the JWT `sub`) and forwards. Session rows are auto-created on plexus-server on first use (same pattern as Discord/Telegram channels). The frontend is a React SPA styled as "Cyberpunk Refined" (GitHub-dark base + neon green `#39ff14` accents) served by the gateway as static files in production.
 
 **Tech Stack:**
-- Gateway: Rust 2024 edition, axum 0.8 (with `ws` feature), jsonwebtoken, subtle, dashmap, reqwest, tower-http, tokio, dotenvy, tracing.
+- Gateway: Rust 2024 edition, axum 0.8 (with `ws` feature), jsonwebtoken, subtle, dashmap, reqwest, tower-http, tokio, tokio-util (CancellationToken), dotenvy, tracing.
 - Frontend: React 19, TypeScript 5.9, Vite 8, Tailwind CSS 4, Zustand 5, react-router-dom 7, react-markdown + remark-gfm, react-syntax-highlighter, lucide-react, Vitest.
 
-**Spec:** `docs/superpowers/specs/2026-04-10-m3-gateway-frontend-design.md`
+**Spec:** `docs/superpowers/specs/2026-04-10-m3-gateway-frontend-design.md` (r2)
+**Protocol:** `plexus-gateway/docs/PROTOCOL.md` (r2)
+
+**Revision r2 highlights:**
+- Browser owns session state; gateway validates `session_id` prefix. No more `new_session` / `switch_session` / `session_created` / `session_switched` messages.
+- Routing is strictly non-blocking: slow browsers are evicted instead of stalling the plexus reader.
+- Writer task lifecycle: explicit drop of local senders before `writer.await`.
+- Proxy response body limited to 25 MB via streaming.
+- App-level ping/pong on both WS endpoints.
+- Graceful shutdown via `CancellationToken`.
+- `/healthz` endpoint for load balancers.
+- CORS / WS Origin gated on `PLEXUS_ALLOWED_ORIGINS`.
+- Frontend WS reconnect has jitter + auth-failed terminal state.
+- Frontend URL-driven session (`/chat/:sessionId`); chat store merges REST/WS with dedup.
 
 **Delivery Phases:**
-- **Phase 1 (Tasks 1–10):** Gateway. User validates with Postman before Phase 2 starts.
-- **Phase 2 (Tasks 11–24):** Frontend.
+- **Phase 1 (Tasks 1–11):** Gateway. User validates with Postman before Phase 2 starts.
+- **Phase 2 (Tasks 12–25):** Frontend.
 
 ---
 
@@ -27,16 +40,18 @@
 | `Cargo.toml` (workspace) | Add `plexus-gateway` member |
 | `plexus-gateway/Cargo.toml` | Crate deps |
 | `plexus-gateway/.env.example` | Env var template |
-| `plexus-gateway/src/main.rs` | Entry point, router, axum serve |
-| `plexus-gateway/src/config.rs` | `Config` struct, env var loading |
-| `plexus-gateway/src/state.rs` | `AppState` with DashMap and RwLock<Option<mpsc::Sender>> |
+| `plexus-gateway/src/main.rs` | Entry point, signal handlers, serve |
+| `plexus-gateway/src/lib.rs` | Router builder, `serve()`, `run_from_env()` |
+| `plexus-gateway/src/config.rs` | `Config` struct with `allowed_origins: Vec<String>` |
+| `plexus-gateway/src/state.rs` | `AppState` with DashMap, plexus sender, shutdown token |
 | `plexus-gateway/src/jwt.rs` | JWT validation using `jsonwebtoken` |
-| `plexus-gateway/src/routing.rs` | Browser lookup by chat_id with sender_id fallback |
-| `plexus-gateway/src/proxy.rs` | REST `/api/*` reverse proxy |
+| `plexus-gateway/src/routing.rs` | Non-blocking chat_id lookup with eviction on queue full |
+| `plexus-gateway/src/proxy.rs` | REST `/api/*` reverse proxy with streamed response cap |
 | `plexus-gateway/src/static_files.rs` | Frontend static file serving with SPA fallback |
+| `plexus-gateway/src/health.rs` | `/healthz` handler |
 | `plexus-gateway/src/ws/mod.rs` | Shared WS types, `BrowserConnection`, `OutboundFrame` |
-| `plexus-gateway/src/ws/chat.rs` | `/ws/chat` browser handler |
-| `plexus-gateway/src/ws/plexus.rs` | `/ws/plexus` plexus-server handler |
+| `plexus-gateway/src/ws/chat.rs` | `/ws/chat` browser handler (ping/pong, session prefix check, lifecycle) |
+| `plexus-gateway/src/ws/plexus.rs` | `/ws/plexus` plexus-server handler (ping/pong, graceful shutdown) |
 | `plexus-gateway/tests/integration.rs` | End-to-end tests (browser + plexus mocks) |
 
 ### Phase 2 — plexus-frontend
@@ -105,12 +120,13 @@ license.workspace = true
 plexus-common = { path = "../plexus-common", features = ["axum"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"  # CancellationToken for graceful shutdown
 tower-http = { version = "0.6", features = ["cors", "fs", "trace", "limit"] }
 futures-util = "0.3"
 jsonwebtoken = "9"
 subtle = "2"
 dashmap = "6"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -118,6 +134,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
 
 [dev-dependencies]
 tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
@@ -148,6 +165,11 @@ PLEXUS_SERVER_API_URL=http://localhost:3030
 
 # Frontend static files directory (served as fallback route)
 PLEXUS_FRONTEND_DIR=../plexus-frontend/dist
+
+# Comma-separated CORS and WebSocket Origin allow-list.
+# Use "*" for local dev only. Production MUST set an explicit list.
+# Example: PLEXUS_ALLOWED_ORIGINS=https://plexus.example.com,https://admin.plexus.example.com
+PLEXUS_ALLOWED_ORIGINS=*
 ```
 
 - [ ] **Step 4: Create stub `plexus-gateway/src/main.rs`**
@@ -192,11 +214,24 @@ pub struct Config {
     pub port: u16,
     pub plexus_server_api_url: String,
     pub frontend_dir: String,
+    /// Comma-separated list from PLEXUS_ALLOWED_ORIGINS. Empty = wildcard (dev only).
+    pub allowed_origins: Vec<String>,
 }
 
 impl Config {
     /// Load from environment variables. Panics if any required var is missing.
     pub fn from_env() -> Self {
+        let raw_origins = env::var("PLEXUS_ALLOWED_ORIGINS").unwrap_or_else(|_| "*".to_string());
+        let allowed_origins = if raw_origins.trim() == "*" {
+            Vec::new() // empty = wildcard
+        } else {
+            raw_origins
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+
         Self {
             gateway_token: required("PLEXUS_GATEWAY_TOKEN"),
             jwt_secret: required("JWT_SECRET"),
@@ -206,12 +241,58 @@ impl Config {
             plexus_server_api_url: required("PLEXUS_SERVER_API_URL"),
             frontend_dir: env::var("PLEXUS_FRONTEND_DIR")
                 .unwrap_or_else(|_| "../plexus-frontend/dist".to_string()),
+            allowed_origins,
+        }
+    }
+
+    /// Returns true if origin is allowed. Empty allow-list = wildcard.
+    pub fn origin_allowed(&self, origin: Option<&str>) -> bool {
+        if self.allowed_origins.is_empty() {
+            return true;
+        }
+        match origin {
+            Some(o) => self.allowed_origins.iter().any(|allowed| allowed == o),
+            None => false,
         }
     }
 }
 
 fn required(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| panic!("Required env var {name} is not set"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_allows_any_origin() {
+        let c = Config {
+            gateway_token: "t".into(),
+            jwt_secret: "s".into(),
+            port: 0,
+            plexus_server_api_url: "http://localhost".into(),
+            frontend_dir: "/tmp".into(),
+            allowed_origins: vec![],
+        };
+        assert!(c.origin_allowed(Some("https://example.com")));
+        assert!(c.origin_allowed(None));
+    }
+
+    #[test]
+    fn strict_list_rejects_others() {
+        let c = Config {
+            gateway_token: "t".into(),
+            jwt_secret: "s".into(),
+            port: 0,
+            plexus_server_api_url: "http://localhost".into(),
+            frontend_dir: "/tmp".into(),
+            allowed_origins: vec!["https://plexus.example.com".into()],
+        };
+        assert!(c.origin_allowed(Some("https://plexus.example.com")));
+        assert!(!c.origin_allowed(Some("https://evil.example.com")));
+        assert!(!c.origin_allowed(None));
+    }
 }
 ```
 
@@ -354,15 +435,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Add `thiserror` to `plexus-gateway/Cargo.toml`**
-
-Add under `[dependencies]`:
-
-```toml
-thiserror = "2"
-```
-
-- [ ] **Step 3: Declare `jwt` module in `main.rs`**
+- [ ] **Step 2: Declare `jwt` module in `main.rs`**
 
 Add to the module list in `plexus-gateway/src/main.rs`:
 
@@ -371,15 +444,15 @@ mod config;
 mod jwt;
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 3: Run tests**
 
 Run: `cargo test --package plexus-gateway jwt::`
 Expected: 4 tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add plexus-gateway/src/jwt.rs plexus-gateway/src/main.rs plexus-gateway/Cargo.toml
+git add plexus-gateway/src/jwt.rs plexus-gateway/src/main.rs
 git commit -m "feat(gateway): add JWT validation with tests"
 ```
 
@@ -400,18 +473,25 @@ git commit -m "feat(gateway): add JWT validation with tests"
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-/// A frame queued for delivery to a browser. Progress frames may be dropped
-/// under backpressure; final Message frames must deliver or the connection
-/// is closed.
+/// A frame queued for delivery to a browser.
+///
+/// Lifecycle:
+/// - Progress frames are dropped silently on channel full (ephemeral hints).
+/// - Message frames trigger eviction on channel full (slow consumer protection).
+/// - Close frames are enqueued during graceful shutdown so the writer flushes
+///   and closes the sink cleanly.
 #[derive(Debug, Clone)]
 pub enum OutboundFrame {
     Message(Value),
     Progress(Value),
+    Close,
 }
 
-/// Per-browser handle held in `AppState.browsers`.
-/// The real sink is owned by a dedicated writer task; other tasks send
-/// frames through `outbound` which is a bounded channel.
+/// Per-browser handle held in `AppState.browsers`. Cloneable so the routing
+/// layer can clone the handle out of the DashMap shard before any await.
+///
+/// The WebSocket sink is not stored here — it's owned by a dedicated writer
+/// task. Other tasks send frames through the bounded `outbound` channel.
 #[derive(Debug, Clone)]
 pub struct BrowserConnection {
     pub outbound: mpsc::Sender<OutboundFrame>,
@@ -443,15 +523,18 @@ use dashmap::DashMap;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
+use tokio_util::sync::CancellationToken;
 
 pub struct AppState {
     pub config: Config,
-    /// chat_id → browser handle
+    /// chat_id → cloneable browser handle
     pub browsers: Arc<DashMap<String, BrowserConnection>>,
     /// Sender for the single plexus-server connection. `None` when not connected.
     pub plexus: Arc<RwLock<Option<mpsc::Sender<Value>>>>,
     /// Pooled HTTP client for REST proxy requests.
     pub http_client: reqwest::Client,
+    /// Triggered on SIGTERM/SIGINT. Reader loops watch this and break cleanly.
+    pub shutdown: CancellationToken,
 }
 
 impl AppState {
@@ -464,6 +547,7 @@ impl AppState {
                 .pool_max_idle_per_host(32)
                 .build()
                 .expect("reqwest client build"),
+            shutdown: CancellationToken::new(),
         })
     }
 }
@@ -646,10 +730,17 @@ Create `plexus-gateway/src/routing.rs`:
 ```rust
 //! Routes messages from plexus-server to browser connections.
 //!
-//! Primary: lookup by `chat_id` in `state.browsers`.
-//! Fallback: if `chat_id` not found, route to any open browser for
-//! `metadata.sender_id` (handles cron-triggered pushes where the original
-//! chat_id is stale).
+//! Guarantees:
+//! 1. `route_send` is **non-blocking**. It uses `try_send` on the per-browser
+//!    outbound channel and never awaits on slow consumers. This is critical
+//!    because route_send is called from the single /ws/plexus reader loop
+//!    and blocking here head-of-line-blocks every browser.
+//! 2. DashMap shard guards are **never** held across await points. Handles
+//!    are cloned out synchronously before any async work.
+//! 3. On queue-full for a final Message, the browser is **evicted** from
+//!    state.browsers. Its writer task exits once the last sender is dropped.
+//! 4. On queue-full for a Progress frame, the frame is **dropped silently**.
+//!    Progress is ephemeral.
 
 use crate::state::AppState;
 use crate::ws::{BrowserConnection, OutboundFrame};
@@ -657,7 +748,6 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::warn;
 
-/// Result of a routing decision.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteResult {
     /// Delivered via direct chat_id lookup.
@@ -666,26 +756,37 @@ pub enum RouteResult {
     SenderFallback,
     /// No matching browser connection found.
     NoMatch,
+    /// A browser was evicted due to queue pressure (final message).
+    Evicted,
 }
 
-/// Route a `send` message from plexus-server to the correct browser.
-pub async fn route_send(state: &Arc<AppState>, msg: &Value) -> RouteResult {
-    let chat_id = msg.get("chat_id").and_then(|v| v.as_str()).unwrap_or("");
+/// Build an outbound JSON frame from an upstream `send` message.
+/// Returns (frame, chat_id, sender_id_opt).
+fn build_frame(msg: &Value) -> (OutboundFrame, String, Option<String>) {
+    let chat_id = msg
+        .get("chat_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let content = msg.get("content").cloned().unwrap_or(Value::Null);
-    let metadata = msg.get("metadata").cloned().unwrap_or(json!({}));
     let session_id = msg.get("session_id").cloned().unwrap_or(Value::Null);
+    let metadata = msg.get("metadata").cloned().unwrap_or(json!({}));
 
     let is_progress = metadata
         .get("_progress")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let media = metadata.get("media").cloned();
+    let sender_id = metadata
+        .get("sender_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
     let frame_type = if is_progress { "progress" } else { "message" };
     let mut outbound = json!({
         "type": frame_type,
-        "content": content,
         "session_id": session_id,
+        "content": content,
     });
     if let Some(media) = media {
         outbound["media"] = media;
@@ -697,24 +798,39 @@ pub async fn route_send(state: &Arc<AppState>, msg: &Value) -> RouteResult {
         OutboundFrame::Message(outbound)
     };
 
-    // Direct lookup
-    if let Some(conn) = state.browsers.get(chat_id) {
-        if try_send(&conn, frame.clone()).await {
-            return RouteResult::DirectHit;
+    (frame, chat_id, sender_id)
+}
+
+/// Route a `send` message from plexus-server to the correct browser.
+/// Non-blocking — never awaits on a browser's outbound channel.
+pub fn route_send(state: &Arc<AppState>, msg: &Value) -> RouteResult {
+    let (frame, chat_id, sender_id) = build_frame(msg);
+
+    // Direct lookup — clone the handle OUT of the shard before any further work.
+    let direct_conn = state.browsers.get(&chat_id).map(|r| r.clone());
+    if let Some(conn) = direct_conn {
+        match try_dispatch(state, &chat_id, conn, frame.clone()) {
+            DispatchOutcome::Delivered => return RouteResult::DirectHit,
+            DispatchOutcome::Dropped => return RouteResult::DirectHit,
+            DispatchOutcome::Evicted => return RouteResult::Evicted,
         }
     }
 
-    // Fallback: any browser connection for the given sender_id
-    if let Some(sender_id) = metadata.get("sender_id").and_then(|v| v.as_str()) {
-        let candidates: Vec<BrowserConnection> = state
+    // Fallback: any browser for the given sender_id.
+    if let Some(sender_id) = sender_id {
+        // Snapshot matching handles. This iterates under the DashMap read
+        // lock but does not await; clones are cheap (Arc + String).
+        let candidates: Vec<(String, BrowserConnection)> = state
             .browsers
             .iter()
             .filter(|entry| entry.value().user_id == sender_id)
-            .map(|entry| entry.value().clone())
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
-        for conn in candidates {
-            if try_send(&conn, frame.clone()).await {
-                return RouteResult::SenderFallback;
+        for (fallback_chat_id, conn) in candidates {
+            match try_dispatch(state, &fallback_chat_id, conn, frame.clone()) {
+                DispatchOutcome::Delivered => return RouteResult::SenderFallback,
+                DispatchOutcome::Dropped => return RouteResult::SenderFallback,
+                DispatchOutcome::Evicted => continue, // try the next candidate
             }
         }
     }
@@ -723,16 +839,35 @@ pub async fn route_send(state: &Arc<AppState>, msg: &Value) -> RouteResult {
     RouteResult::NoMatch
 }
 
-async fn try_send(conn: &BrowserConnection, frame: OutboundFrame) -> bool {
+enum DispatchOutcome {
+    Delivered,
+    Dropped,  // progress frame dropped on full
+    Evicted,  // final frame could not be delivered; browser evicted
+}
+
+fn try_dispatch(
+    state: &Arc<AppState>,
+    chat_id: &str,
+    conn: BrowserConnection,
+    frame: OutboundFrame,
+) -> DispatchOutcome {
     match &frame {
-        OutboundFrame::Progress(_) => {
-            // Drop progress hints if the channel is full — they are ephemeral.
-            conn.outbound.try_send(frame).is_ok()
-        }
-        OutboundFrame::Message(_) => {
-            // Blocking send for final messages — if this errors, the writer
-            // task is dead and the entry will be cleaned up on disconnect.
-            conn.outbound.send(frame).await.is_ok()
+        OutboundFrame::Progress(_) => match conn.outbound.try_send(frame) {
+            Ok(()) => DispatchOutcome::Delivered,
+            Err(_) => DispatchOutcome::Dropped,
+        },
+        OutboundFrame::Message(_) => match conn.outbound.try_send(frame) {
+            Ok(()) => DispatchOutcome::Delivered,
+            Err(_) => {
+                warn!("routing: evicting slow browser chat_id={chat_id}");
+                state.browsers.remove(chat_id);
+                DispatchOutcome::Evicted
+            }
+        },
+        OutboundFrame::Close => {
+            // Close is only sent from shutdown path, not routing.
+            let _ = conn.outbound.try_send(frame);
+            DispatchOutcome::Delivered
         }
     }
 }
@@ -750,14 +885,18 @@ mod tests {
             port: 0,
             plexus_server_api_url: "http://localhost".into(),
             frontend_dir: "/tmp".into(),
+            allowed_origins: vec![],
         };
         AppState::new(config)
     }
 
-    fn register_browser(state: &Arc<AppState>, chat_id: &str, user_id: &str)
-        -> mpsc::Receiver<OutboundFrame>
-    {
-        let (tx, rx) = mpsc::channel(8);
+    fn register_browser(
+        state: &Arc<AppState>,
+        chat_id: &str,
+        user_id: &str,
+        buffer: usize,
+    ) -> mpsc::Receiver<OutboundFrame> {
+        let (tx, rx) = mpsc::channel(buffer);
         state.browsers.insert(
             chat_id.to_string(),
             BrowserConnection {
@@ -771,19 +910,19 @@ mod tests {
     #[tokio::test]
     async fn direct_chat_id_hit() {
         let state = test_state();
-        let mut rx = register_browser(&state, "chat-1", "user-1");
+        let mut rx = register_browser(&state, "chat-1", "user-1", 8);
         let msg = json!({
             "type": "send",
             "chat_id": "chat-1",
+            "session_id": "gateway:user-1:abc",
             "content": "hello",
         });
-        let result = route_send(&state, &msg).await;
-        assert_eq!(result, RouteResult::DirectHit);
-        let frame = rx.recv().await.unwrap();
-        match frame {
+        assert_eq!(route_send(&state, &msg), RouteResult::DirectHit);
+        match rx.recv().await.unwrap() {
             OutboundFrame::Message(v) => {
                 assert_eq!(v["type"], "message");
                 assert_eq!(v["content"], "hello");
+                assert_eq!(v["session_id"], "gateway:user-1:abc");
             }
             _ => panic!("expected Message"),
         }
@@ -792,15 +931,15 @@ mod tests {
     #[tokio::test]
     async fn sender_id_fallback() {
         let state = test_state();
-        let mut rx = register_browser(&state, "chat-existing", "user-42");
+        let mut rx = register_browser(&state, "chat-existing", "user-42", 8);
         let msg = json!({
             "type": "send",
             "chat_id": "chat-stale",
+            "session_id": "gateway:user-42:xyz",
             "content": "scheduled task result",
             "metadata": { "sender_id": "user-42" },
         });
-        let result = route_send(&state, &msg).await;
-        assert_eq!(result, RouteResult::SenderFallback);
+        assert_eq!(route_send(&state, &msg), RouteResult::SenderFallback);
         assert!(rx.recv().await.is_some());
     }
 
@@ -812,24 +951,79 @@ mod tests {
             "chat_id": "nope",
             "content": "void",
         });
-        assert_eq!(route_send(&state, &msg).await, RouteResult::NoMatch);
+        assert_eq!(route_send(&state, &msg), RouteResult::NoMatch);
     }
 
     #[tokio::test]
     async fn progress_frame_sets_type() {
         let state = test_state();
-        let mut rx = register_browser(&state, "chat-p", "user-p");
+        let mut rx = register_browser(&state, "chat-p", "user-p", 8);
         let msg = json!({
             "type": "send",
             "chat_id": "chat-p",
+            "session_id": "gateway:user-p:abc",
             "content": "Executing shell on laptop...",
             "metadata": { "_progress": true },
         });
-        assert_eq!(route_send(&state, &msg).await, RouteResult::DirectHit);
+        assert_eq!(route_send(&state, &msg), RouteResult::DirectHit);
         match rx.recv().await.unwrap() {
-            OutboundFrame::Progress(v) => assert_eq!(v["type"], "progress"),
+            OutboundFrame::Progress(v) => {
+                assert_eq!(v["type"], "progress");
+                assert_eq!(v["content"], "Executing shell on laptop...");
+            }
             _ => panic!("expected Progress"),
         }
+    }
+
+    #[tokio::test]
+    async fn slow_browser_evicted_on_final_message() {
+        let state = test_state();
+        // Buffer of 1; don't drain. First send fills the queue.
+        let _rx = register_browser(&state, "chat-slow", "user-slow", 1);
+        let filler = json!({
+            "type": "send",
+            "chat_id": "chat-slow",
+            "session_id": "gateway:user-slow:abc",
+            "content": "first",
+        });
+        assert_eq!(route_send(&state, &filler), RouteResult::DirectHit);
+        // Second final send — queue full → Evicted.
+        let full = json!({
+            "type": "send",
+            "chat_id": "chat-slow",
+            "session_id": "gateway:user-slow:abc",
+            "content": "second",
+        });
+        assert_eq!(route_send(&state, &full), RouteResult::Evicted);
+        // Browser is removed from state.browsers.
+        assert!(!state.browsers.contains_key("chat-slow"));
+    }
+
+    #[tokio::test]
+    async fn progress_frame_dropped_silently_on_full() {
+        let state = test_state();
+        // Buffer of 1; don't drain.
+        let _rx = register_browser(&state, "chat-p2", "user-p2", 1);
+        let first = json!({
+            "type": "send",
+            "chat_id": "chat-p2",
+            "session_id": "gateway:user-p2:abc",
+            "content": "first progress",
+            "metadata": { "_progress": true },
+        });
+        route_send(&state, &first);
+        // Second one hits a full queue — dropped, but NOT evicted.
+        let second = json!({
+            "type": "send",
+            "chat_id": "chat-p2",
+            "session_id": "gateway:user-p2:abc",
+            "content": "second progress",
+            "metadata": { "_progress": true },
+        });
+        let result = route_send(&state, &second);
+        assert_eq!(result, RouteResult::DirectHit); // it was "delivered" (dropped counts)
+        // Crucially, browser is still registered.
+        assert!(state.browsers.contains_key("chat-p2"));
     }
 }
 ```
@@ -848,13 +1042,13 @@ mod ws;
 - [ ] **Step 3: Run tests**
 
 Run: `cargo test --package plexus-gateway routing::`
-Expected: 4 tests pass.
+Expected: 6 tests pass (direct_chat_id_hit, sender_id_fallback, no_match_returns_nomatch, progress_frame_sets_type, slow_browser_evicted_on_final_message, progress_frame_dropped_silently_on_full).
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add plexus-gateway/src/routing.rs plexus-gateway/src/main.rs
-git commit -m "feat(gateway): add routing module with chat_id lookup + fallback"
+git commit -m "feat(gateway): non-blocking routing with slow-browser eviction"
 ```
 
 ---
@@ -872,27 +1066,42 @@ Replace `plexus-gateway/src/ws/chat.rs`:
 ```rust
 //! /ws/chat browser WebSocket handler.
 //!
-//! Flow:
-//! 1. Validate JWT from `token` query param (401 before upgrade on failure).
-//! 2. Assign chat_id + initial session_id, insert into state.browsers.
-//! 3. Spawn a writer task owning the sink; send frames through a bounded mpsc channel.
-//! 4. Read loop dispatches incoming JSON by `type`.
+//! Protocol (r2):
+//! - Browser owns session state. Every inbound `message` carries a `session_id`.
+//! - Gateway validates the prefix matches `gateway:{user_id}:` against JWT sub.
+//! - No session_created / new_session / switch_session messages.
+//!
+//! Lifecycle:
+//! - Origin check → JWT validation → upgrade.
+//! - Spawn writer task owning the sink; reader loop forwards to plexus via
+//!   bounded mpsc channel.
+//! - Spawn keepalive task: app-level ping every 30s, expect pong within 15s.
+//! - Shutdown (via CancellationToken) drains gracefully.
+//! - On disconnect: remove from state.browsers, drop local sender, await writer.
 
 use crate::jwt;
 use crate::state::AppState;
 use crate::ws::{BrowserConnection, OutboundFrame};
 use axum::extract::{
-    Query, State, WebSocketUpgrade,
-    ws::{Message, WebSocket},
+    ConnectInfo, Query, State, WebSocketUpgrade,
+    ws::{CloseFrame, Message, Utf8Bytes, WebSocket, close_code},
 };
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tokio::time::{Instant, interval};
+use tracing::{info, info_span, warn, Instrument};
+
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+const PONG_TIMEOUT: Duration = Duration::from_secs(15);
+const OUTBOUND_BUFFER: usize = 64;
 
 #[derive(Deserialize)]
 pub struct ChatQuery {
@@ -902,8 +1111,18 @@ pub struct ChatQuery {
 pub async fn handler(
     ws: WebSocketUpgrade,
     Query(params): Query<ChatQuery>,
+    headers: HeaderMap,
     State(state): State<Arc<AppState>>,
+    ConnectInfo(_addr): ConnectInfo<SocketAddr>,
 ) -> Response {
+    // Origin check (relies on Config::origin_allowed: empty list = wildcard)
+    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
+    if !state.config.origin_allowed(origin) {
+        warn!("ws/chat: rejected origin {:?}", origin);
+        return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
+    }
+
+    // JWT validation
     let claims = match jwt::validate(&params.token, &state.config.jwt_secret) {
         Ok(c) => c,
         Err(e) => {
@@ -917,9 +1136,12 @@ pub async fn handler(
 
 async fn run(socket: WebSocket, state: Arc<AppState>, user_id: String) {
     let chat_id = uuid::Uuid::new_v4().to_string();
-    let initial_session = format!("gateway:{}:{}", user_id, uuid::Uuid::new_v4());
+    let span = info_span!("ws_chat", chat_id = %chat_id, user_id = %user_id);
+    run_inner(socket, state, user_id, chat_id).instrument(span).await;
+}
 
-    let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundFrame>(64);
+async fn run_inner(socket: WebSocket, state: Arc<AppState>, user_id: String, chat_id: String) {
+    let (outbound_tx, outbound_rx) = mpsc::channel::<OutboundFrame>(OUTBOUND_BUFFER);
 
     state.browsers.insert(
         chat_id.clone(),
@@ -928,136 +1150,131 @@ async fn run(socket: WebSocket, state: Arc<AppState>, user_id: String) {
             user_id: user_id.clone(),
         },
     );
-    info!(
-        "ws/chat: browser connected chat_id={chat_id} user_id={user_id}"
-    );
+    info!("browser connected");
 
     let (ws_sink, mut ws_stream) = socket.split();
 
-    // Writer task: owns the sink and drains outbound_rx
+    // Last-pong timestamp, updated by the reader loop, checked by keepalive.
+    let last_pong = Arc::new(AtomicI64::new(now_ms()));
+
+    // Writer task
     let writer = tokio::spawn(writer_task(ws_sink, outbound_rx));
 
-    // Send initial session_created
-    let init = json!({
-        "type": "session_created",
-        "session_id": initial_session,
-    });
-    if outbound_tx
-        .send(OutboundFrame::Message(init))
-        .await
-        .is_err()
-    {
-        cleanup(&state, &chat_id).await;
-        return;
-    }
+    // Keepalive task
+    let keepalive = tokio::spawn(keepalive_task(
+        outbound_tx.clone(),
+        Arc::clone(&last_pong),
+    ));
 
-    // Track the current session_id per browser (session lives on the browser,
-    // not in state — we only remember it here to echo back new session IDs).
-    let mut current_session = initial_session;
+    // Expected session_id prefix for this connection.
+    let session_prefix = format!("gateway:{}:", user_id);
+
+    let shutdown = state.shutdown.clone();
 
     // Reader loop
-    while let Some(Ok(msg)) = ws_stream.next().await {
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            _ => continue,
-        };
-        let parsed: Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let msg_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("shutdown signal received; closing browser");
+                let _ = outbound_tx.send(OutboundFrame::Close).await;
+                break;
+            }
+            msg = ws_stream.next() => {
+                let Some(Ok(msg)) = msg else { break };
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let parsed: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let msg_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-        match msg_type {
-            "message" => {
-                let content = parsed
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let media = parsed.get("media").cloned().unwrap_or(Value::Null);
-                let session_id = parsed
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&current_session)
-                    .to_string();
-                forward_to_plexus(
-                    &state,
-                    &chat_id,
-                    &user_id,
-                    &content,
-                    &media,
-                    &session_id,
-                    &outbound_tx,
-                )
-                .await;
-            }
-            "new_session" => {
-                let new_id = format!("gateway:{}:{}", user_id, uuid::Uuid::new_v4());
-                current_session = new_id.clone();
-                let _ = outbound_tx
-                    .send(OutboundFrame::Message(json!({
-                        "type": "session_created",
-                        "session_id": new_id,
-                    })))
-                    .await;
-            }
-            "switch_session" => {
-                if let Some(sid) = parsed.get("session_id").and_then(|v| v.as_str()) {
-                    current_session = sid.to_string();
-                    let _ = outbound_tx
-                        .send(OutboundFrame::Message(json!({
-                            "type": "session_switched",
-                            "session_id": sid,
-                        })))
-                        .await;
+                match msg_type {
+                    "message" => {
+                        handle_message(&state, &chat_id, &user_id, &session_prefix, &parsed, &outbound_tx).await;
+                    }
+                    "pong" => {
+                        last_pong.store(now_ms(), Ordering::Relaxed);
+                    }
+                    other => {
+                        warn!("unknown message type: {other}");
+                    }
                 }
-            }
-            other => {
-                warn!("ws/chat: unknown message type: {other}");
             }
         }
     }
 
+    // Cleanup — order matters for clean writer exit.
     cleanup(&state, &chat_id).await;
+    drop(outbound_tx); // drop the local sender so the writer can finish draining
     let _ = writer.await;
-    info!("ws/chat: browser disconnected chat_id={chat_id}");
+    keepalive.abort();
+    info!("browser disconnected");
 }
 
-async fn forward_to_plexus(
+async fn handle_message(
     state: &Arc<AppState>,
     chat_id: &str,
     user_id: &str,
-    content: &str,
-    media: &Value,
-    session_id: &str,
+    session_prefix: &str,
+    parsed: &Value,
     outbound_tx: &mpsc::Sender<OutboundFrame>,
 ) {
+    let content = parsed
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let media = parsed.get("media").cloned().unwrap_or(Value::Null);
+    let session_id = parsed
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Validate session_id prefix — prevents cross-user spoofing.
+    if session_id.is_empty() || !session_id.starts_with(session_prefix) {
+        warn!(
+            "rejecting message with invalid session_id prefix: got {:?}, expected prefix {:?}",
+            session_id, session_prefix
+        );
+        let _ = outbound_tx
+            .try_send(OutboundFrame::Message(json!({
+                "type": "error",
+                "reason": "invalid session_id",
+            })));
+        return;
+    }
+
+    // Look up plexus sender (clone the handle, drop the read guard immediately).
     let plexus_tx = {
         let guard = state.plexus.read().await;
         guard.clone()
     };
     let Some(plexus_tx) = plexus_tx else {
         let _ = outbound_tx
-            .send(OutboundFrame::Message(json!({
+            .try_send(OutboundFrame::Message(json!({
                 "type": "error",
                 "reason": "Plexus server not connected",
-            })))
-            .await;
+            })));
         return;
     };
+
     let mut payload = json!({
         "type": "message",
         "chat_id": chat_id,
         "sender_id": user_id,
-        "content": content,
         "session_id": session_id,
+        "content": content,
     });
     if !media.is_null() {
-        payload["media"] = media.clone();
+        payload["media"] = media;
     }
     if plexus_tx.send(payload).await.is_err() {
-        warn!("ws/chat: plexus channel closed while forwarding");
+        warn!("plexus channel closed while forwarding");
     }
 }
 
@@ -1066,12 +1283,57 @@ async fn writer_task(
     mut rx: mpsc::Receiver<OutboundFrame>,
 ) {
     while let Some(frame) = rx.recv().await {
-        let value = match frame {
-            OutboundFrame::Message(v) | OutboundFrame::Progress(v) => v,
-        };
-        let text = serde_json::to_string(&value).unwrap_or_default();
-        if sink.send(Message::Text(text.into())).await.is_err() {
-            break;
+        match frame {
+            OutboundFrame::Message(v) | OutboundFrame::Progress(v) => {
+                let text = serde_json::to_string(&v).unwrap_or_default();
+                if sink.send(Message::Text(Utf8Bytes::from(text))).await.is_err() {
+                    break;
+                }
+            }
+            OutboundFrame::Close => {
+                let _ = sink
+                    .send(Message::Close(Some(CloseFrame {
+                        code: close_code::AWAY,
+                        reason: Utf8Bytes::from("server shutting down"),
+                    })))
+                    .await;
+                break;
+            }
+        }
+    }
+}
+
+async fn keepalive_task(
+    outbound: mpsc::Sender<OutboundFrame>,
+    last_pong: Arc<AtomicI64>,
+) {
+    let mut tick = interval(PING_INTERVAL);
+    tick.tick().await; // first tick fires immediately; skip it
+    loop {
+        tick.tick().await;
+        // Send ping
+        let ping = json!({"type": "ping"});
+        if outbound
+            .send(OutboundFrame::Message(ping))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        // Wait briefly and check for pong within PONG_TIMEOUT
+        let deadline = Instant::now() + PONG_TIMEOUT;
+        let sent_at = now_ms();
+        loop {
+            tokio::time::sleep_until(deadline.min(Instant::now() + Duration::from_millis(500))).await;
+            if last_pong.load(Ordering::Relaxed) >= sent_at {
+                break; // got a pong
+            }
+            if Instant::now() >= deadline {
+                warn!("keepalive: no pong within {PONG_TIMEOUT:?}, closing");
+                // Send Close; writer will exit; reader will terminate.
+                let _ = outbound.try_send(OutboundFrame::Close);
+                return;
+            }
         }
     }
 }
@@ -1079,11 +1341,19 @@ async fn writer_task(
 async fn cleanup(state: &Arc<AppState>, chat_id: &str) {
     state.browsers.remove(chat_id);
 }
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 ```
 
 - [ ] **Step 2: Wire `/ws/chat` into the router in `main.rs`**
 
-Update `plexus-gateway/src/main.rs`:
+`ConnectInfo<SocketAddr>` extraction requires the listener to be served with `.into_make_service_with_connect_info::<SocketAddr>()`. Update `plexus-gateway/src/main.rs`:
 
 ```rust
 mod config;
@@ -1097,6 +1367,7 @@ use axum::Router;
 use axum::routing::get;
 use config::Config;
 use state::AppState;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -1120,7 +1391,12 @@ async fn main() {
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("plexus-gateway listening on {addr}");
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
 ```
 
@@ -1156,13 +1432,16 @@ Replace `plexus-gateway/src/ws/plexus.rs`:
 //! 2. Wait up to 5s for the first text frame — must be {"type":"auth","token":...}.
 //! 3. Compare token constant-time against PLEXUS_GATEWAY_TOKEN.
 //! 4. Reject duplicate connections with auth_fail.
-//! 5. Run a writer task owning the sink; run a reader loop routing `send` messages.
+//! 5. Writer task owns the sink. Reader loop routes `send` messages via
+//!    non-blocking `routing::route_send`.
+//! 6. Shutdown signal breaks the reader loop; cleanup drops the plexus sender
+//!    (which ends the writer's recv()) and awaits the writer join handle.
 
 use crate::routing;
 use crate::state::AppState;
 use axum::extract::{
     State, WebSocketUpgrade,
-    ws::{Message, WebSocket},
+    ws::{CloseFrame, Message, Utf8Bytes, WebSocket, close_code},
 };
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
@@ -1171,10 +1450,12 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
-use tracing::{info, warn};
+use tracing::{info, info_span, warn, Instrument};
+
+const PLEXUS_BUFFER: usize = 256;
 
 pub async fn handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
-    ws.on_upgrade(move |socket| run(socket, state))
+    ws.on_upgrade(move |socket| run(socket, state).instrument(info_span!("ws_plexus")))
 }
 
 async fn run(socket: WebSocket, state: Arc<AppState>) {
@@ -1184,13 +1465,7 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
     let auth_msg = match timeout(Duration::from_secs(5), stream.next()).await {
         Ok(Some(Ok(Message::Text(t)))) => t,
         _ => {
-            let _ = sink
-                .send(Message::Text(
-                    json!({"type":"auth_fail","reason":"no auth"})
-                        .to_string()
-                        .into(),
-                ))
-                .await;
+            let _ = send_text(&mut sink, json!({"type":"auth_fail","reason":"no auth"})).await;
             return;
         }
     };
@@ -1198,25 +1473,13 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
     let parsed: Value = match serde_json::from_str(&auth_msg) {
         Ok(v) => v,
         Err(_) => {
-            let _ = sink
-                .send(Message::Text(
-                    json!({"type":"auth_fail","reason":"invalid json"})
-                        .to_string()
-                        .into(),
-                ))
-                .await;
+            let _ = send_text(&mut sink, json!({"type":"auth_fail","reason":"invalid json"})).await;
             return;
         }
     };
 
     if parsed.get("type").and_then(|v| v.as_str()) != Some("auth") {
-        let _ = sink
-            .send(Message::Text(
-                json!({"type":"auth_fail","reason":"expected auth"})
-                    .to_string()
-                    .into(),
-            ))
-            .await;
+        let _ = send_text(&mut sink, json!({"type":"auth_fail","reason":"expected auth"})).await;
         return;
     }
     let provided = parsed
@@ -1227,79 +1490,93 @@ async fn run(socket: WebSocket, state: Arc<AppState>) {
     let expected = state.config.gateway_token.as_bytes();
     let ok = provided.len() == expected.len() && provided.ct_eq(expected).into();
     if !ok {
-        let _ = sink
-            .send(Message::Text(
-                json!({"type":"auth_fail","reason":"invalid token"})
-                    .to_string()
-                    .into(),
-            ))
-            .await;
+        let _ = send_text(&mut sink, json!({"type":"auth_fail","reason":"invalid token"})).await;
         return;
     }
 
-    // Step 2: enforce singleton
-    let (plexus_tx, mut plexus_rx) = mpsc::channel::<Value>(256);
+    // Step 2: enforce singleton and create the sender channel.
+    let (plexus_tx, mut plexus_rx) = mpsc::channel::<Value>(PLEXUS_BUFFER);
     {
         let mut guard = state.plexus.write().await;
         if guard.is_some() {
-            let _ = sink
-                .send(Message::Text(
-                    json!({"type":"auth_fail","reason":"duplicate connection"})
-                        .to_string()
-                        .into(),
-                ))
-                .await;
+            let _ = send_text(&mut sink, json!({"type":"auth_fail","reason":"duplicate connection"})).await;
             return;
         }
         *guard = Some(plexus_tx);
     }
 
     // Step 3: ack
-    if sink
-        .send(Message::Text(
-            json!({"type":"auth_ok"}).to_string().into(),
-        ))
-        .await
-        .is_err()
-    {
+    if send_text(&mut sink, json!({"type":"auth_ok"})).await.is_err() {
         state.plexus.write().await.take();
         return;
     }
-    info!("ws/plexus: server authenticated");
+    info!("plexus server authenticated");
 
-    // Writer task: drain plexus_rx into the sink
+    // Writer task: drain plexus_rx into the sink. Exits when all senders drop.
     let writer = tokio::spawn(async move {
         while let Some(value) = plexus_rx.recv().await {
             let text = serde_json::to_string(&value).unwrap_or_default();
-            if sink.send(Message::Text(text.into())).await.is_err() {
+            if sink.send(Message::Text(Utf8Bytes::from(text))).await.is_err() {
                 break;
             }
         }
+        // Try to send a close frame on the way out.
+        let _ = sink
+            .send(Message::Close(Some(CloseFrame {
+                code: close_code::NORMAL,
+                reason: Utf8Bytes::from("gateway closing"),
+            })))
+            .await;
     });
 
-    // Reader loop: route `send` messages
-    while let Some(Ok(msg)) = stream.next().await {
-        let text = match msg {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            _ => continue,
-        };
-        let parsed: Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let msg_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if msg_type != "send" {
-            warn!("ws/plexus: unknown message type: {msg_type}");
-            continue;
+    // Reader loop: route `send` messages (non-blocking), honor shutdown signal.
+    let shutdown = state.shutdown.clone();
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("shutdown signal received; closing plexus connection");
+                break;
+            }
+            msg = stream.next() => {
+                let Some(Ok(msg)) = msg else { break };
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let parsed: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let msg_type = parsed.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match msg_type {
+                    "send" => {
+                        let _ = routing::route_send(&state, &parsed);
+                    }
+                    "pong" => {
+                        // plexus is alive — no action needed
+                    }
+                    other => {
+                        warn!("unknown message type: {other}");
+                    }
+                }
+            }
         }
-        let _ = routing::route_send(&state, &parsed).await;
     }
 
-    // Cleanup
+    // Cleanup: dropping the sender stored in state.plexus causes the writer's
+    // recv() to return None and the writer task exits cleanly.
     state.plexus.write().await.take();
     let _ = writer.await;
-    info!("ws/plexus: server disconnected");
+    info!("plexus server disconnected");
+}
+
+async fn send_text(
+    sink: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    value: Value,
+) -> Result<(), axum::Error> {
+    let text = value.to_string();
+    sink.send(Message::Text(Utf8Bytes::from(text))).await
 }
 ```
 
@@ -1342,7 +1619,9 @@ git commit -m "feat(gateway): add /ws/plexus server WebSocket handler"
 //!
 //! - Public endpoints (/api/auth/login, /api/auth/register) skip JWT.
 //! - All other paths require a valid JWT at the gateway before proxying.
-//! - Max body: 25 MB (enforced by tower-http RequestBodyLimitLayer).
+//! - Max request body: 25 MB (enforced by tower-http RequestBodyLimitLayer).
+//! - Max response body: 25 MB (enforced here by streaming with a running counter
+//!   plus a Content-Length fast path).
 //! - Hop-by-hop headers stripped.
 //! - Path traversal rejected.
 
@@ -1350,10 +1629,11 @@ use crate::jwt;
 use crate::state::AppState;
 use axum::body::{Body, to_bytes};
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use axum::Router;
+use futures_util::StreamExt;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::json;
 use std::sync::Arc;
@@ -1392,7 +1672,7 @@ async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
     if path.contains("..") {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
-            error_json("path traversal rejected"),
+            error_json("path_traversal", "path traversal rejected"),
         )
             .into_response();
     }
@@ -1408,7 +1688,10 @@ async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
             .and_then(|t| jwt::validate(t, &state.config.jwt_secret).ok())
             .is_some();
         if !ok {
-            return (StatusCode::UNAUTHORIZED, error_json("invalid or missing token"))
+            return (
+                StatusCode::UNAUTHORIZED,
+                error_json("unauthorized", "invalid or missing token"),
+            )
                 .into_response();
         }
     }
@@ -1427,16 +1710,21 @@ async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let body_bytes = match to_bytes(req.into_body(), MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(_) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, error_json("body too large"))
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                error_json("request_too_large", "request body exceeded 25 MB limit"),
+            )
                 .into_response();
         }
     };
 
-    // Build reqwest request
     let reqwest_method = match reqwest::Method::from_bytes(method.as_str().as_bytes()) {
         Ok(m) => m,
         Err(_) => {
-            return (StatusCode::BAD_REQUEST, error_json("invalid method"))
+            return (
+                StatusCode::BAD_REQUEST,
+                error_json("invalid_method", "invalid HTTP method"),
+            )
                 .into_response();
         }
     };
@@ -1469,11 +1757,26 @@ async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
             warn!("proxy: upstream error: {e}");
             return (
                 StatusCode::BAD_GATEWAY,
-                error_json(&format!("upstream unreachable: {e}")),
+                error_json("upstream_unreachable", &format!("upstream unreachable: {e}")),
             )
                 .into_response();
         }
     };
+
+    // Content-Length fast path: reject oversized responses before reading body.
+    if let Some(cl) = resp.content_length() {
+        if cl > MAX_BODY_BYTES as u64 {
+            warn!("proxy: upstream response Content-Length {cl} > {MAX_BODY_BYTES}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                error_json(
+                    "upstream_too_large",
+                    "response body exceeded 25 MB limit",
+                ),
+            )
+                .into_response();
+        }
+    }
 
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut out_headers = HeaderMap::new();
@@ -1489,44 +1792,57 @@ async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
             out_headers.insert(hn, hv);
         }
     }
-    let body = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
+
+    // Streaming body with running size check (handles chunked / missing Content-Length).
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("proxy: upstream read error: {e}");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    error_json("upstream_read_error", &format!("read upstream body: {e}")),
+                )
+                    .into_response();
+            }
+        };
+        if buf.len() + chunk.len() > MAX_BODY_BYTES {
+            warn!("proxy: upstream stream exceeded MAX_BODY_BYTES");
             return (
                 StatusCode::BAD_GATEWAY,
-                error_json(&format!("read upstream body: {e}")),
+                error_json("upstream_too_large", "response body exceeded 25 MB limit"),
             )
                 .into_response();
         }
-    };
+        buf.extend_from_slice(&chunk);
+    }
 
-    let mut response = Response::new(Body::from(body));
+    let mut response = Response::new(Body::from(buf));
     *response.status_mut() = status;
     *response.headers_mut() = out_headers;
     response
 }
 
-fn error_json(msg: &str) -> String {
+fn error_json(code: &str, message: &str) -> String {
     json!({
         "error": {
-            "code": "gateway_error",
-            "message": msg,
+            "code": code,
+            "message": message,
         }
     })
     .to_string()
 }
-
-// Silence unused imports if the compiler folds handler signature types.
-#[allow(dead_code)]
-fn _unused(_: Uri, _: Method) {}
 ```
 
 - [ ] **Step 2: Wire proxy into the router in `main.rs`**
 
-Add proxy routes in `plexus-gateway/src/main.rs`:
+This step replaces the router bootstrap with one that uses the CORS policy from `Config`, wires in `/healthz`, and prepares for graceful shutdown (which Task 11 completes). Add proxy + healthz routes in `plexus-gateway/src/main.rs`:
 
 ```rust
 mod config;
+mod health;
 mod jwt;
 mod proxy;
 mod routing;
@@ -1535,11 +1851,14 @@ mod static_files;
 mod ws;
 
 use axum::Router;
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::routing::get;
 use config::Config;
 use state::AppState;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use std::str::FromStr;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 #[tokio::main]
 async fn main() {
@@ -1554,12 +1873,10 @@ async fn main() {
     let config = Config::from_env();
     let state = AppState::new(config.clone());
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = build_cors(&config);
 
     let app: Router = Router::new()
+        .route("/healthz", get(health::healthz))
         .route("/ws/chat", get(ws::chat::handler))
         .route("/ws/plexus", get(ws::plexus::handler))
         .merge(proxy::routes())
@@ -1570,7 +1887,61 @@ async fn main() {
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::info!("plexus-gateway listening on {addr}");
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
+}
+
+fn build_cors(config: &Config) -> CorsLayer {
+    let base = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-requested-with"),
+        ]);
+
+    if config.allowed_origins.is_empty() {
+        base.allow_origin(Any)
+    } else {
+        let list: Vec<HeaderValue> = config
+            .allowed_origins
+            .iter()
+            .filter_map(|s| HeaderValue::from_str(s).ok())
+            .collect();
+        base.allow_origin(AllowOrigin::list(list))
+    }
+}
+```
+
+Create the stub `plexus-gateway/src/health.rs`:
+
+```rust
+//! Unauthenticated /healthz endpoint for load-balancer readiness probes.
+
+use crate::state::AppState;
+use axum::Json;
+use axum::extract::State;
+use serde_json::{Value, json};
+use std::sync::Arc;
+
+pub async fn healthz(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let plexus_connected = state.plexus.read().await.is_some();
+    Json(json!({
+        "status": "ok",
+        "plexus_connected": plexus_connected,
+        "browsers": state.browsers.len(),
+    }))
 }
 ```
 
@@ -1582,13 +1953,270 @@ Expected: Clean build (may warn about unused imports in proxy.rs — those are f
 - [ ] **Step 4: Commit**
 
 ```bash
-git add plexus-gateway/src/proxy.rs plexus-gateway/src/main.rs
-git commit -m "feat(gateway): add REST reverse proxy for /api/*"
+git add plexus-gateway/src/proxy.rs plexus-gateway/src/health.rs plexus-gateway/src/main.rs
+git commit -m "feat(gateway): add REST reverse proxy, /healthz, and strict CORS"
 ```
 
 ---
 
-### Task 10: Integration Tests + Postman Validation Gate
+### Task 10: Library Split + Graceful Shutdown
+
+**Files:**
+- Create: `plexus-gateway/src/lib.rs`
+- Modify: `plexus-gateway/src/main.rs`
+
+This task splits the binary so integration tests can import it, wires in graceful shutdown, and sets up the `run_with_config` entry point that tests use.
+
+- [ ] **Step 1: Create `plexus-gateway/src/lib.rs`**
+
+```rust
+//! plexus-gateway library entry point. `main.rs` delegates to
+//! `run_from_env`. Integration tests use `serve` to spawn isolated instances
+//! with a custom `Config` (no env var races).
+
+pub mod config;
+pub mod health;
+pub mod jwt;
+pub mod proxy;
+pub mod routing;
+pub mod state;
+pub mod static_files;
+pub mod ws;
+
+use axum::Router;
+use axum::http::{HeaderName, HeaderValue, Method, header};
+use axum::routing::get;
+use config::Config;
+use state::AppState;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+use tokio::net::TcpListener;
+
+/// Build the axum router. Exposed for tests.
+pub fn build_router(state: Arc<AppState>) -> Router {
+    let cors = build_cors(&state.config);
+
+    Router::new()
+        .route("/healthz", get(health::healthz))
+        .route("/ws/chat", get(ws::chat::handler))
+        .route("/ws/plexus", get(ws::plexus::handler))
+        .merge(proxy::routes())
+        .merge(static_files::service(&state.config.frontend_dir))
+        .layer(cors)
+        .with_state(state)
+}
+
+fn build_cors(config: &Config) -> CorsLayer {
+    let base = CorsLayer::new()
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-requested-with"),
+        ]);
+
+    if config.allowed_origins.is_empty() {
+        base.allow_origin(Any)
+    } else {
+        let list: Vec<HeaderValue> = config
+            .allowed_origins
+            .iter()
+            .filter_map(|s| HeaderValue::from_str(s).ok())
+            .collect();
+        base.allow_origin(AllowOrigin::list(list))
+    }
+}
+
+/// Run the gateway on the given listener with the given config. Honors
+/// the state's `shutdown` CancellationToken for graceful shutdown. Used
+/// by tests (which pass an ephemeral listener) and by `run_from_env`.
+pub async fn serve(listener: TcpListener, config: Config) {
+    let state = AppState::new(config);
+    let app = build_router(Arc::clone(&state));
+
+    let shutdown = state.shutdown.clone();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown.cancelled().await;
+        tracing::info!("graceful shutdown signal received");
+        // Give in-flight WS handlers up to 5s to drain after cancellation.
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    })
+    .await
+    .unwrap();
+}
+
+/// Run the gateway using env vars for config. Used by `main.rs`.
+pub async fn run_from_env() {
+    let config = Config::from_env();
+    let addr = format!("0.0.0.0:{}", config.port);
+    let listener = TcpListener::bind(&addr).await.unwrap();
+    tracing::info!("plexus-gateway listening on {addr}");
+    serve(listener, config).await;
+}
+```
+
+- [ ] **Step 2: Trim `main.rs` to delegate and install signal handlers**
+
+Replace `plexus-gateway/src/main.rs`:
+
+```rust
+#[tokio::main]
+async fn main() {
+    dotenvy::dotenv().ok();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    // The state's shutdown token is triggered by install_signal_handlers,
+    // which watches SIGTERM and SIGINT. run_from_env sets up the token and
+    // wires it into axum's graceful shutdown future via serve().
+    //
+    // On Unix, tokio::signal supports SIGTERM directly. On Windows, only
+    // Ctrl+C is supported.
+    let shutdown_task = tokio::spawn(install_signal_handlers());
+    plexus_gateway::run_from_env().await;
+    shutdown_task.abort();
+}
+
+#[cfg(unix)]
+async fn install_signal_handlers() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM");
+    let mut int = signal(SignalKind::interrupt()).expect("install SIGINT");
+    tokio::select! {
+        _ = term.recv() => tracing::info!("SIGTERM received"),
+        _ = int.recv() => tracing::info!("SIGINT received"),
+    }
+    // Trigger shutdown via the global (static) token is not accessible here
+    // because AppState is constructed inside serve(). Workaround: signal the
+    // process by panic-propagating through the ctrl_c handler path.
+    //
+    // NOTE: This is tricky because main.rs can't reach into the AppState
+    // created by run_from_env. The cleanest fix is to have run_from_env
+    // expose the CancellationToken. See Step 3.
+}
+```
+
+**Note:** the above comment about the signal-handler race is the first draft. Step 3 fixes it by changing `serve` to accept an externally-constructed `AppState` so `main.rs` can hold the token.
+
+- [ ] **Step 3: Refactor `serve` and `run_from_env` to expose the shutdown token**
+
+Replace the previous `lib.rs` `serve`/`run_from_env` + `main.rs` glue with this cleaner version. Update `plexus-gateway/src/lib.rs`:
+
+```rust
+// Replace just the serve + run_from_env functions at the bottom of lib.rs:
+
+/// Run the gateway on the given listener with the given pre-built state.
+/// The caller owns the `AppState.shutdown` token and is responsible for
+/// triggering it (e.g. from a signal handler).
+pub async fn serve_with_state(listener: TcpListener, state: Arc<AppState>) {
+    let app = build_router(Arc::clone(&state));
+    let shutdown = state.shutdown.clone();
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown.cancelled().await;
+        tracing::info!("graceful shutdown signal received");
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    })
+    .await
+    .unwrap();
+}
+
+/// Convenience: build state from config and call serve_with_state. Tests use this.
+pub async fn serve(listener: TcpListener, config: Config) {
+    let state = AppState::new(config);
+    serve_with_state(listener, state).await;
+}
+
+/// Run the gateway using env vars for config. Used by `main.rs`. Returns
+/// the shutdown token so main can trigger it from a signal handler.
+pub async fn run_from_env() {
+    let config = Config::from_env();
+    let state = AppState::new(config);
+    let shutdown = state.shutdown.clone();
+
+    // Install signal handlers that fire the shutdown token.
+    tokio::spawn(wait_for_signal(shutdown));
+
+    let addr = format!("0.0.0.0:{}", state.config.port);
+    let listener = TcpListener::bind(&addr).await.unwrap();
+    tracing::info!("plexus-gateway listening on {addr}");
+    serve_with_state(listener, state).await;
+}
+
+#[cfg(unix)]
+async fn wait_for_signal(shutdown: tokio_util::sync::CancellationToken) {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM");
+    let mut int = signal(SignalKind::interrupt()).expect("install SIGINT");
+    tokio::select! {
+        _ = term.recv() => tracing::info!("SIGTERM received; beginning graceful shutdown"),
+        _ = int.recv() => tracing::info!("SIGINT received; beginning graceful shutdown"),
+    }
+    shutdown.cancel();
+}
+
+#[cfg(not(unix))]
+async fn wait_for_signal(shutdown: tokio_util::sync::CancellationToken) {
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("Ctrl-C received; beginning graceful shutdown");
+    shutdown.cancel();
+}
+```
+
+And simplify `plexus-gateway/src/main.rs`:
+
+```rust
+#[tokio::main]
+async fn main() {
+    dotenvy::dotenv().ok();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    plexus_gateway::run_from_env().await;
+}
+```
+
+(The main.rs from Task 9 Step 2 — with all the inline router setup — is now obsolete because `build_router` + `serve_with_state` live in lib.rs. Delete the duplicate modules section from main.rs.)
+
+- [ ] **Step 4: Build**
+
+Run: `cargo build --package plexus-gateway`
+Expected: Clean build.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add plexus-gateway/src/lib.rs plexus-gateway/src/main.rs
+git commit -m "feat(gateway): library split with graceful shutdown"
+```
+
+---
+
+### Task 11: Integration Tests + Postman Validation Gate
 
 **Files:**
 - Create: `plexus-gateway/tests/integration.rs`
@@ -1607,13 +2235,19 @@ Create `plexus-gateway/tests/integration.rs`:
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use plexus_gateway::config::Config;
+use plexus_gateway::state::AppState;
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
 const JWT_SECRET: &str = "test-jwt-secret";
 const GATEWAY_TOKEN: &str = "test-gateway-token";
+
+type WsStream = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
 
 #[derive(Serialize)]
 struct Claims {
@@ -1636,43 +2270,53 @@ fn valid_jwt(user_id: &str) -> String {
     .unwrap()
 }
 
-/// Start a gateway instance in-process on an ephemeral port. Returns the port.
-async fn spawn_gateway() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-
-    let config = Config {
+fn test_config(port: u16, upstream: &str, frontend_dir: &str) -> Config {
+    Config {
         gateway_token: GATEWAY_TOKEN.to_string(),
         jwt_secret: JWT_SECRET.to_string(),
         port,
-        plexus_server_api_url: "http://127.0.0.1:1".to_string(),
-        frontend_dir: "/tmp".to_string(),
-    };
+        plexus_server_api_url: upstream.to_string(),
+        frontend_dir: frontend_dir.to_string(),
+        allowed_origins: vec![], // wildcard for tests
+    }
+}
 
+/// Start a gateway instance in-process on an ephemeral port. Returns the
+/// state handle (so tests can trigger shutdown) and the port.
+async fn spawn_gateway_with(config: Config) -> (Arc<AppState>, u16) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let state = AppState::new(Config { port, ..config });
+    let state_for_serve = Arc::clone(&state);
     tokio::spawn(async move {
-        plexus_gateway::serve(listener, config).await;
+        plexus_gateway::serve_with_state(listener, state_for_serve).await;
     });
 
-    // Wait briefly for the server to be ready by connecting once.
-    for _ in 0..20 {
+    for _ in 0..40 {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
         {
-            return port;
+            return (state, port);
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    panic!("gateway failed to bind within ~500ms");
+    panic!("gateway failed to bind within ~1s");
 }
 
-async fn connect_plexus(port: u16) -> tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-> {
+async fn spawn_gateway() -> (Arc<AppState>, u16) {
+    spawn_gateway_with(test_config(0, "http://127.0.0.1:1", "/tmp")).await
+}
+
+async fn session_id_for(user: &str) -> String {
+    format!("gateway:{}:{}", user, uuid::Uuid::new_v4())
+}
+
+async fn connect_plexus(port: u16) -> WsStream {
     let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus"))
         .await
         .unwrap();
-    // Auth
     ws.send(WsMessage::Text(
         json!({"type":"auth","token": GATEWAY_TOKEN})
             .to_string()
@@ -1690,81 +2334,77 @@ async fn connect_plexus(port: u16) -> tokio_tungstenite::WebSocketStream<
     ws
 }
 
-async fn connect_browser(
-    port: u16,
-    user: &str,
-) -> tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-> {
+async fn connect_browser(port: u16, user: &str) -> WsStream {
     let jwt = valid_jwt(user);
-    let (mut ws, _) = connect_async(format!(
-        "ws://127.0.0.1:{port}/ws/chat?token={jwt}"
-    ))
-    .await
-    .unwrap();
-    // Expect session_created
-    let msg = ws.next().await.unwrap().unwrap();
-    let text = match msg {
-        WsMessage::Text(t) => t,
-        _ => panic!("expected text"),
-    };
-    let v: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(v["type"], "session_created");
+    let (ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}"))
+        .await
+        .unwrap();
     ws
+}
+
+/// Drain any asynchronous ping frames the gateway may have sent before
+/// the real test assertion. Returns the first non-ping Text frame.
+async fn recv_non_ping(ws: &mut WsStream) -> Value {
+    loop {
+        let msg = ws.next().await.unwrap().unwrap();
+        let text = match msg {
+            WsMessage::Text(t) => t,
+            WsMessage::Close(_) => panic!("unexpected close"),
+            _ => continue,
+        };
+        let v: Value = serde_json::from_str(&text).unwrap();
+        if v["type"] == "ping" {
+            // Reply with pong to keep the connection healthy.
+            ws.send(WsMessage::Text(json!({"type":"pong"}).to_string().into()))
+                .await
+                .unwrap();
+            continue;
+        }
+        return v;
+    }
 }
 
 #[tokio::test]
 async fn browser_to_plexus_round_trip() {
-    let port = spawn_gateway().await;
+    let (_state, port) = spawn_gateway().await;
     let mut plexus = connect_plexus(port).await;
     let mut browser = connect_browser(port, "user-1").await;
 
-    // Browser sends a message
+    let sid = session_id_for("user-1").await;
     browser
         .send(WsMessage::Text(
-            json!({"type":"message","content":"hello"})
+            json!({"type":"message","session_id":sid,"content":"hello"})
                 .to_string()
                 .into(),
         ))
         .await
         .unwrap();
 
-    // Plexus receives it
-    let msg = plexus.next().await.unwrap().unwrap();
-    let text = match msg {
-        WsMessage::Text(t) => t,
-        _ => panic!("expected text"),
-    };
-    let v: Value = serde_json::from_str(&text).unwrap();
+    let v = recv_non_ping(&mut plexus).await;
     assert_eq!(v["type"], "message");
     assert_eq!(v["content"], "hello");
     assert_eq!(v["sender_id"], "user-1");
+    assert_eq!(v["session_id"], sid);
     assert!(v["chat_id"].is_string());
 }
 
 #[tokio::test]
 async fn plexus_send_reaches_browser() {
-    let port = spawn_gateway().await;
+    let (_state, port) = spawn_gateway().await;
     let mut plexus = connect_plexus(port).await;
     let mut browser = connect_browser(port, "user-2").await;
 
-    // Browser sends first to establish routing
+    let sid = session_id_for("user-2").await;
     browser
         .send(WsMessage::Text(
-            json!({"type":"message","content":"ping"})
+            json!({"type":"message","session_id":sid,"content":"ping"})
                 .to_string()
                 .into(),
         ))
         .await
         .unwrap();
 
-    // Plexus reads the message, grabs chat_id, sends back
-    let incoming = plexus.next().await.unwrap().unwrap();
-    let text = match incoming {
-        WsMessage::Text(t) => t,
-        _ => panic!("expected text"),
-    };
-    let v: Value = serde_json::from_str(&text).unwrap();
+    let v = recv_non_ping(&mut plexus).await;
     let chat_id = v["chat_id"].as_str().unwrap().to_string();
 
     plexus
@@ -1772,6 +2412,7 @@ async fn plexus_send_reaches_browser() {
             json!({
                 "type": "send",
                 "chat_id": chat_id,
+                "session_id": sid,
                 "content": "pong",
             })
             .to_string()
@@ -1780,44 +2421,143 @@ async fn plexus_send_reaches_browser() {
         .await
         .unwrap();
 
-    // Browser receives it
-    let reply = browser.next().await.unwrap().unwrap();
-    let text = match reply {
-        WsMessage::Text(t) => t,
-        _ => panic!("expected text"),
-    };
-    let v: Value = serde_json::from_str(&text).unwrap();
+    let v = recv_non_ping(&mut browser).await;
     assert_eq!(v["type"], "message");
     assert_eq!(v["content"], "pong");
+    assert_eq!(v["session_id"], sid);
+}
+
+#[tokio::test]
+async fn progress_hint_forwarded() {
+    let (_state, port) = spawn_gateway().await;
+    let mut plexus = connect_plexus(port).await;
+    let mut browser = connect_browser(port, "user-p").await;
+
+    let sid = session_id_for("user-p").await;
+    browser
+        .send(WsMessage::Text(
+            json!({"type":"message","session_id":sid,"content":"do it"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let v = recv_non_ping(&mut plexus).await;
+    let chat_id = v["chat_id"].as_str().unwrap().to_string();
+
+    plexus
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "chat_id": chat_id,
+                "session_id": sid,
+                "content": "Executing shell on laptop...",
+                "metadata": { "_progress": true },
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let v = recv_non_ping(&mut browser).await;
+    assert_eq!(v["type"], "progress");
+    assert_eq!(v["content"], "Executing shell on laptop...");
+}
+
+#[tokio::test]
+async fn media_attachments_forwarded_both_directions() {
+    let (_state, port) = spawn_gateway().await;
+    let mut plexus = connect_plexus(port).await;
+    let mut browser = connect_browser(port, "user-m").await;
+
+    let sid = session_id_for("user-m").await;
+    browser
+        .send(WsMessage::Text(
+            json!({
+                "type":"message",
+                "session_id":sid,
+                "content":"check this",
+                "media":["file1:pic.png"],
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let v = recv_non_ping(&mut plexus).await;
+    assert_eq!(v["media"], json!(["file1:pic.png"]));
+    let chat_id = v["chat_id"].as_str().unwrap().to_string();
+
+    plexus
+        .send(WsMessage::Text(
+            json!({
+                "type": "send",
+                "chat_id": chat_id,
+                "session_id": sid,
+                "content": "here you go",
+                "metadata": { "media": ["https://example.com/result.png"] },
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let v = recv_non_ping(&mut browser).await;
+    assert_eq!(v["type"], "message");
+    assert_eq!(v["media"], json!(["https://example.com/result.png"]));
 }
 
 #[tokio::test]
 async fn browser_without_plexus_gets_error() {
-    let port = spawn_gateway().await;
+    let (_state, port) = spawn_gateway().await;
     let mut browser = connect_browser(port, "user-3").await;
+    let sid = session_id_for("user-3").await;
 
     browser
         .send(WsMessage::Text(
-            json!({"type":"message","content":"lonely"})
+            json!({"type":"message","session_id":sid,"content":"lonely"})
                 .to_string()
                 .into(),
         ))
         .await
         .unwrap();
 
-    let reply = browser.next().await.unwrap().unwrap();
-    let text = match reply {
-        WsMessage::Text(t) => t,
-        _ => panic!("expected text"),
-    };
-    let v: Value = serde_json::from_str(&text).unwrap();
+    let v = recv_non_ping(&mut browser).await;
     assert_eq!(v["type"], "error");
     assert!(v["reason"].as_str().unwrap().contains("not connected"));
 }
 
 #[tokio::test]
+async fn invalid_session_prefix_rejected() {
+    let (_state, port) = spawn_gateway().await;
+    let _plexus = connect_plexus(port).await;
+    let mut browser = connect_browser(port, "user-x").await;
+
+    // Malicious: claims session belonging to user-y.
+    browser
+        .send(WsMessage::Text(
+            json!({
+                "type":"message",
+                "session_id":"gateway:user-y:abc",
+                "content":"spoofing",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    let v = recv_non_ping(&mut browser).await;
+    assert_eq!(v["type"], "error");
+    assert!(v["reason"].as_str().unwrap().contains("invalid session_id"));
+    // Connection remains open — send another frame with a valid session.
+}
+
+#[tokio::test]
 async fn invalid_jwt_rejected() {
-    let port = spawn_gateway().await;
+    let (_state, port) = spawn_gateway().await;
     let res = connect_async(format!(
         "ws://127.0.0.1:{port}/ws/chat?token=not-a-valid-jwt"
     ))
@@ -1827,9 +2567,8 @@ async fn invalid_jwt_rejected() {
 
 #[tokio::test]
 async fn duplicate_plexus_rejected() {
-    let port = spawn_gateway().await;
+    let (_state, port) = spawn_gateway().await;
     let _p1 = connect_plexus(port).await;
-    // Second connection should get auth_fail
     let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus"))
         .await
         .unwrap();
@@ -1848,101 +2587,176 @@ async fn duplicate_plexus_rejected() {
     let v: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(v["type"], "auth_fail");
 }
+
+#[tokio::test]
+async fn reader_writer_leak_free() {
+    let (state, port) = spawn_gateway().await;
+    // Spin up 50 browsers and close them.
+    for i in 0..50 {
+        let ws = connect_browser(port, &format!("user-{i}")).await;
+        drop(ws);
+    }
+    // Wait briefly for cleanup.
+    for _ in 0..40 {
+        if state.browsers.len() == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(state.browsers.len(), 0, "state.browsers should be empty after disconnects");
+}
+
+#[tokio::test]
+async fn healthz_reports_plexus_connected() {
+    let (_state, port) = spawn_gateway().await;
+    let client = reqwest::Client::new();
+
+    // Before plexus connects
+    let resp: Value = client
+        .get(format!("http://127.0.0.1:{port}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["status"], "ok");
+    assert_eq!(resp["plexus_connected"], false);
+
+    // After plexus connects
+    let _plexus = connect_plexus(port).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let resp: Value = client
+        .get(format!("http://127.0.0.1:{port}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["plexus_connected"], true);
+}
+
+#[tokio::test]
+async fn proxy_rejects_path_traversal() {
+    let (_state, port) = spawn_gateway().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/api/../etc/passwd"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+}
+
+#[tokio::test]
+async fn proxy_rejects_oversized_request() {
+    let (_state, port) = spawn_gateway().await;
+    let client = reqwest::Client::new();
+    let big = vec![0u8; 26 * 1024 * 1024]; // 26 MB
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/api/files"))
+        .header("authorization", format!("Bearer {}", valid_jwt("u")))
+        .body(big)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+}
+
+#[tokio::test]
+async fn proxy_rejects_oversized_response_via_content_length() {
+    // Bring up a mock upstream that advertises a huge Content-Length.
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = upstream_listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        use axum::routing::get;
+        let app: axum::Router = axum::Router::new().route(
+            "/api/big",
+            get(|| async {
+                let mut resp = axum::response::Response::new(axum::body::Body::from("x"));
+                resp.headers_mut().insert(
+                    axum::http::header::CONTENT_LENGTH,
+                    axum::http::HeaderValue::from(30u64 * 1024 * 1024),
+                );
+                resp
+            }),
+        );
+        axum::serve(upstream_listener, app).await.unwrap();
+    });
+
+    let (_state, port) = spawn_gateway_with(test_config(
+        0,
+        &format!("http://127.0.0.1:{upstream_port}"),
+        "/tmp",
+    ))
+    .await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/api/big"))
+        .header("authorization", format!("Bearer {}", valid_jwt("u")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 502);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "upstream_too_large");
+}
+
+#[tokio::test]
+async fn origin_allowlist_rejects_disallowed() {
+    let mut config = test_config(0, "http://127.0.0.1:1", "/tmp");
+    config.allowed_origins = vec!["https://allowed.example.com".into()];
+    let (_state, port) = spawn_gateway_with(config).await;
+
+    // Try to connect with a mismatched Origin header.
+    let jwt = valid_jwt("u");
+    let mut req = format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert(
+        "origin",
+        "https://evil.example.com".parse().unwrap(),
+    );
+    let res = tokio_tungstenite::connect_async(req).await;
+    assert!(res.is_err(), "expected origin rejection");
+}
+
+#[tokio::test]
+async fn graceful_shutdown_closes_sockets() {
+    let (state, port) = spawn_gateway().await;
+    let _plexus = connect_plexus(port).await;
+    let _browser = connect_browser(port, "user-s").await;
+
+    state.shutdown.cancel();
+
+    // Wait for serve() to exit — bind the port with a fresh listener.
+    for _ in 0..100 {
+        if tokio::net::TcpListener::bind(("127.0.0.1", port)).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("gateway did not shut down within 5s");
+}
 ```
 
-- [ ] **Step 2: Create `lib.rs` helper for tests**
+Add the missing import at the top of the test file: `use tokio_tungstenite::tungstenite::client::IntoClientRequest;`. (Required by `origin_allowlist_rejects_disallowed` for building a custom request.)
 
-Integration tests need to import from the gateway crate. Tests also need to avoid env-var races, so the library exposes two entry points: one that reads env vars (for `main.rs`) and one that accepts a `Config` directly (for tests).
-
-Create `plexus-gateway/src/lib.rs`:
-
-```rust
-//! Library entry point for integration tests.
-
-pub mod config;
-pub mod jwt;
-pub mod proxy;
-pub mod routing;
-pub mod state;
-pub mod static_files;
-pub mod ws;
-
-use axum::Router;
-use axum::routing::get;
-use config::Config;
-use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
-
-/// Build the axum router. Exposed for tests.
-pub fn build_router(state: Arc<state::AppState>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
-    Router::new()
-        .route("/ws/chat", get(ws::chat::handler))
-        .route("/ws/plexus", get(ws::plexus::handler))
-        .merge(proxy::routes())
-        .merge(static_files::service(&state.config.frontend_dir))
-        .layer(cors)
-        .with_state(state)
-}
-
-/// Run the gateway on a TCP listener with the given config. Used by tests
-/// that want to spawn isolated instances without touching env vars.
-pub async fn serve(listener: tokio::net::TcpListener, config: Config) {
-    let state = state::AppState::new(config);
-    let app = build_router(state);
-    axum::serve(listener, app).await.unwrap();
-}
-
-/// Run the gateway using env vars for config. Used by `main.rs`.
-pub async fn run_from_env() {
-    let config = Config::from_env();
-    let addr = format!("0.0.0.0:{}", config.port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    tracing::info!("plexus-gateway listening on {addr}");
-    serve(listener, config).await;
-}
-```
-
-- [ ] **Step 3: Trim `main.rs` to delegate to `lib.rs`**
-
-Replace `plexus-gateway/src/main.rs`:
-
-```rust
-#[tokio::main]
-async fn main() {
-    dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
-
-    plexus_gateway::run_from_env().await;
-}
-```
-
-- [ ] **Step 4: Add `chrono` to `[dev-dependencies]` if not already there**
-
-Already in `[dependencies]`, so nothing to do. Verify the Cargo.toml snippet from Task 1 includes `chrono`.
-
-- [ ] **Step 5: Run tests**
+- [ ] **Step 2: Run tests**
 
 Run: `cargo test --package plexus-gateway`
-Expected: All 5 integration tests + all unit tests pass.
+Expected: All unit tests (jwt, routing, config) + 14 integration tests pass.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add plexus-gateway/src/lib.rs plexus-gateway/src/main.rs plexus-gateway/tests/
-git commit -m "test(gateway): add end-to-end integration tests"
+git add plexus-gateway/tests/
+git commit -m "test(gateway): comprehensive integration tests covering backpressure, progress, media, shutdown"
 ```
 
-- [ ] **Step 7: USER VALIDATION GATE**
+- [ ] **Step 4: USER VALIDATION GATE**
 
 This is a hard gate. Do not start Phase 2 until the user has validated Phase 1 with Postman.
 
@@ -1960,17 +2774,19 @@ Ask the user to validate with Postman:
 
 1. **Register/Login through the gateway:** `POST http://localhost:9090/api/auth/register` and `POST http://localhost:9090/api/auth/login`. Both should return a JWT.
 2. **Protected endpoint:** `GET http://localhost:9090/api/user/profile` with `Authorization: Bearer <JWT>`. Should return the user.
-3. **Browser WebSocket:** Connect to `ws://localhost:9090/ws/chat?token=<JWT>`. Expect `session_created`. Send `{"type":"message","content":"hello"}`. Plexus-server should receive it and the browser should see the agent's reply.
-4. **Error flow:** Kill plexus-server. Send a browser message. Expect `{"type":"error","reason":"Plexus server not connected"}`.
-5. **Static files:** Create a dummy `plexus-frontend/dist/index.html` and verify `GET http://localhost:9090/` returns it.
+3. **Browser WebSocket:** Connect to `ws://localhost:9090/ws/chat?token=<JWT>`. Send `{"type":"message","session_id":"gateway:<user_id>:<uuid>","content":"hello"}` (replace `<user_id>` with the JWT `sub` and `<uuid>` with any UUID). Plexus-server should receive it and reply.
+4. **Session prefix check:** Send a message with `session_id` that does NOT start with `gateway:<user_id>:` — expect `{"type":"error","reason":"invalid session_id"}`.
+5. **Error flow:** Kill plexus-server. Send a browser message. Expect `{"type":"error","reason":"Plexus server not connected"}`.
+6. **Health check:** `GET http://localhost:9090/healthz` → `{"status":"ok","plexus_connected":<bool>,"browsers":<int>}`.
+7. **Static files:** Create a dummy `plexus-frontend/dist/index.html` and verify `GET http://localhost:9090/` returns it.
 
-Wait for the user to confirm "Phase 1 validated" before beginning Task 11.
+Wait for the user to confirm "Phase 1 validated" before beginning Task 12.
 
 ---
 
 ## Phase 2 — plexus-frontend
 
-### Task 11: Frontend Project Scaffold
+### Task 12: Frontend Project Scaffold
 
 **Files:**
 - Create: `plexus-frontend/package.json`
@@ -2239,7 +3055,7 @@ git commit -m "feat(frontend): scaffold Vite + React + Tailwind + Vitest"
 
 ---
 
-### Task 12: TypeScript Types + API Wrapper
+### Task 13: TypeScript Types + API Wrapper
 
 **Files:**
 - Create: `plexus-frontend/src/lib/types.ts`
@@ -2347,18 +3163,16 @@ export interface LlmConfig {
   context_window: number
 }
 
-// WebSocket message shapes (browser ↔ gateway)
+// WebSocket message shapes (browser ↔ gateway) — PROTOCOL.md r2
 export type WsIncoming =
-  | { type: 'session_created'; session_id: string }
-  | { type: 'session_switched'; session_id: string }
-  | { type: 'message'; content: string; session_id: string; media?: string[] }
-  | { type: 'progress'; content: string; session_id: string }
+  | { type: 'message'; session_id: string; content: string; media?: string[] }
+  | { type: 'progress'; session_id: string; content: string }
   | { type: 'error'; reason: string }
+  | { type: 'ping' }
 
 export type WsOutgoing =
-  | { type: 'message'; content: string; media?: string[] }
-  | { type: 'new_session' }
-  | { type: 'switch_session'; session_id: string }
+  | { type: 'message'; session_id: string; content: string; media?: string[] }
+  | { type: 'pong' }
 ```
 
 - [ ] **Step 2: Create `api.ts`**
@@ -2439,7 +3253,7 @@ git commit -m "feat(frontend): add API types and fetch wrapper"
 
 ---
 
-### Task 13: Auth Store + Login Page + Router Skeleton
+### Task 14: Auth Store + Login Page + Router Skeleton
 
 **Files:**
 - Create: `plexus-frontend/src/store/auth.ts`
@@ -2697,7 +3511,7 @@ git commit -m "feat(frontend): auth store, login page, and router skeleton"
 
 ---
 
-### Task 14: WebSocket Manager
+### Task 15: WebSocket Manager
 
 **Files:**
 - Create: `plexus-frontend/src/lib/ws.ts`
@@ -2705,12 +3519,22 @@ git commit -m "feat(frontend): auth store, login page, and router skeleton"
 - [ ] **Step 1: Create `ws.ts`**
 
 ```ts
-// Singleton WebSocket manager with auto-reconnect.
+// Singleton WebSocket manager with jittered auto-reconnect and
+// terminal auth-failure handling. Replies to server pings with pongs.
 
 import type { WsIncoming, WsOutgoing } from '@/lib/types'
 
+type Status = 'connecting' | 'open' | 'closed' | 'auth_failed'
 type Listener = (msg: WsIncoming) => void
-type StatusListener = (status: 'connecting' | 'open' | 'closed') => void
+type StatusListener = (status: Status) => void
+
+const BASE_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000]
+const MAX_DELAY_MS = 30_000
+
+function jitter(delay: number): number {
+  // 75%–125% of the base delay to spread reconnect stampedes.
+  return Math.floor(delay * (0.75 + Math.random() * 0.5))
+}
 
 class WebSocketManager {
   private ws: WebSocket | null = null
@@ -2720,11 +3544,16 @@ class WebSocketManager {
   private reconnectAttempts = 0
   private reconnectTimer: number | null = null
   private shouldReconnect = false
+  private status: Status = 'closed'
 
   connect(token: string) {
-    if (this.ws && this.token === token) return
+    // Idempotent — calling with the same token while already connected is a no-op.
+    if (this.token === token && (this.status === 'open' || this.status === 'connecting')) {
+      return
+    }
     this.token = token
     this.shouldReconnect = true
+    this.reconnectAttempts = 0
     this.dial()
   }
 
@@ -2739,6 +3568,7 @@ class WebSocketManager {
       this.ws = null
     }
     this.setStatus('closed')
+    this.token = null
   }
 
   send(msg: WsOutgoing) {
@@ -2756,7 +3586,13 @@ class WebSocketManager {
 
   onStatus(l: StatusListener): () => void {
     this.statusListeners.add(l)
+    // Emit current status immediately so late subscribers know the state.
+    l(this.status)
     return () => this.statusListeners.delete(l)
+  }
+
+  getStatus(): Status {
+    return this.status
   }
 
   private dial() {
@@ -2764,7 +3600,14 @@ class WebSocketManager {
     this.setStatus('connecting')
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const url = `${protocol}//${window.location.host}/ws/chat?token=${encodeURIComponent(this.token)}`
-    const ws = new WebSocket(url)
+    let ws: WebSocket
+    try {
+      ws = new WebSocket(url)
+    } catch (err) {
+      console.warn('ws: construct failed', err)
+      this.scheduleReconnect()
+      return
+    }
     this.ws = ws
 
     ws.onopen = () => {
@@ -2772,15 +3615,36 @@ class WebSocketManager {
       this.setStatus('open')
     }
     ws.onmessage = (e) => {
+      let msg: WsIncoming
       try {
-        const msg = JSON.parse(e.data) as WsIncoming
-        this.listeners.forEach((l) => l(msg))
+        msg = JSON.parse(e.data) as WsIncoming
       } catch (err) {
         console.warn('ws: invalid message', err)
+        return
       }
+      // Gateway ping → reply with pong (transparent to app listeners).
+      if ((msg as any).type === 'ping') {
+        this.ws?.send(JSON.stringify({ type: 'pong' }))
+        return
+      }
+      // Terminal auth failure: stop reconnecting, emit status, bubble to listeners.
+      if (msg.type === 'error' && (msg.reason === 'invalid token' || msg.reason === 'unauthorized')) {
+        this.shouldReconnect = false
+        this.setStatus('auth_failed')
+        this.listeners.forEach((l) => l(msg))
+        return
+      }
+      this.listeners.forEach((l) => l(msg))
     }
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       this.ws = null
+      // 4401 = custom "unauthorized" close from future server hardening; currently we rely on
+      // HTTP 401 at upgrade (which shows up as onerror + onclose without open).
+      if (ev.code === 4401 || ev.code === 1008) {
+        this.shouldReconnect = false
+        this.setStatus('auth_failed')
+        return
+      }
       this.setStatus('closed')
       if (this.shouldReconnect) this.scheduleReconnect()
     }
@@ -2791,7 +3655,8 @@ class WebSocketManager {
 
   private scheduleReconnect() {
     if (this.reconnectTimer !== null) return
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30_000)
+    const base = BASE_DELAYS_MS[Math.min(this.reconnectAttempts, BASE_DELAYS_MS.length - 1)]
+    const delay = jitter(Math.min(base, MAX_DELAY_MS))
     this.reconnectAttempts++
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null
@@ -2799,7 +3664,8 @@ class WebSocketManager {
     }, delay)
   }
 
-  private setStatus(status: 'connecting' | 'open' | 'closed') {
+  private setStatus(status: Status) {
+    this.status = status
     this.statusListeners.forEach((l) => l(status))
   }
 }
@@ -2816,15 +3682,23 @@ Expected: Clean build.
 
 ```bash
 git add plexus-frontend/src/lib/ws.ts
-git commit -m "feat(frontend): singleton WebSocket manager with reconnect"
+git commit -m "feat(frontend): WebSocket manager with jittered reconnect and auth-failure terminal state"
 ```
 
 ---
 
-### Task 15: Chat Store
+### Task 16: Chat Store
 
 **Files:**
 - Create: `plexus-frontend/src/store/chat.ts`
+
+**Notes:**
+- Browser owns session state. The store does NOT handle `session_created` / `session_switched` — those messages no longer exist in PROTOCOL.md r2.
+- `setCurrentSession` updates state only; there is no WS message sent.
+- `sendMessage` takes an explicit `sessionId` (from the URL) rather than relying on a mutable current-session field.
+- `loadMessages` **merges** into existing state using a dedup set keyed on `message_id`.
+- `handleIncomingMessage` appends unconditionally (it's live, not historical).
+- `init()` is idempotent — the WS listener cleanups are stored in module-level variables so StrictMode double-invocations don't double-register.
 
 - [ ] **Step 1: Create `chat.ts`**
 
@@ -2832,41 +3706,57 @@ git commit -m "feat(frontend): singleton WebSocket manager with reconnect"
 import { create } from 'zustand'
 import { api } from '@/lib/api'
 import { wsManager } from '@/lib/ws'
+import { useAuthStore } from '@/store/auth'
 import type { DbMessage, Session, WsIncoming, WsOutgoing } from '@/lib/types'
 
 export interface ChatMessage {
   id: string
-  role: 'user' | 'assistant' | 'tool' | 'system'
+  role: 'user' | 'assistant'
   content: string
   media?: string[]
   created_at: string
 }
 
+type WsStatus = 'connecting' | 'open' | 'closed' | 'auth_failed'
+
 interface ChatState {
   sessions: Session[]
   currentSessionId: string | null
   messagesBySession: Record<string, ChatMessage[]>
+  messageIdsBySession: Record<string, Set<string>>
   progressBySession: Record<string, string | null>
-  wsStatus: 'connecting' | 'open' | 'closed'
+  wsStatus: WsStatus
+
   init: () => void
   loadSessions: () => Promise<void>
   loadMessages: (sessionId: string) => Promise<void>
-  setCurrentSession: (sessionId: string) => void
-  newSession: () => void
-  sendMessage: (content: string, media?: string[]) => void
-  handleIncoming: (msg: WsIncoming) => void
+  setCurrentSession: (sessionId: string | null) => void
+  sendMessage: (sessionId: string, content: string, media?: string[]) => void
+
+  // Internal dispatches from the WS manager
+  handleIncomingMessage: (sessionId: string, content: string, media?: string[]) => void
+  setProgressHint: (sessionId: string, hint: string) => void
+  clearProgress: (sessionId: string) => void
+  handleError: (reason: string) => void
 }
+
+// Module-scoped flags so `init()` is idempotent across React.StrictMode
+// double-mounts and navigation effects.
+let wsUnsubMessage: (() => void) | null = null
+let wsUnsubStatus: (() => void) | null = null
 
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   currentSessionId: null,
   messagesBySession: {},
+  messageIdsBySession: {},
   progressBySession: {},
   wsStatus: 'closed',
 
   init() {
-    wsManager.onMessage((m) => get().handleIncoming(m))
-    wsManager.onStatus((s) => set({ wsStatus: s }))
+    if (wsUnsubMessage || wsUnsubStatus) return
+    wsUnsubMessage = wsManager.onMessage((msg) => dispatchIncoming(get, msg))
+    wsUnsubStatus = wsManager.onStatus((status) => set({ wsStatus: status }))
   },
 
   async loadSessions() {
@@ -2878,7 +3768,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const rows = await api<DbMessage[]>(
       `/api/sessions/${encodeURIComponent(sessionId)}/messages?limit=200`,
     )
-    const messages: ChatMessage[] = rows
+    const snapshot: ChatMessage[] = rows
       .filter((r) => r.role === 'user' || r.role === 'assistant')
       .map((r) => ({
         id: r.message_id,
@@ -2886,28 +3776,44 @@ export const useChatStore = create<ChatState>((set, get) => ({
         content: r.content,
         created_at: r.created_at,
       }))
-    set((s) => ({
-      messagesBySession: { ...s.messagesBySession, [sessionId]: messages },
-    }))
+
+    set((s) => {
+      const existing = s.messagesBySession[sessionId] ?? []
+      const existingIds = s.messageIdsBySession[sessionId] ?? new Set<string>()
+      // Merge: keep all existing messages (including WS-delivered ones that
+      // arrived during the REST fetch), append snapshot entries that are not
+      // already present.
+      const merged = [...existing]
+      const mergedIds = new Set(existingIds)
+      for (const m of snapshot) {
+        if (!mergedIds.has(m.id)) {
+          merged.push(m)
+          mergedIds.add(m.id)
+        }
+      }
+      // Sort by created_at so merged order is stable.
+      merged.sort((a, b) => a.created_at.localeCompare(b.created_at))
+      return {
+        messagesBySession: { ...s.messagesBySession, [sessionId]: merged },
+        messageIdsBySession: { ...s.messageIdsBySession, [sessionId]: mergedIds },
+      }
+    })
   },
 
   setCurrentSession(sessionId) {
-    set((s) => ({
-      currentSessionId: sessionId,
-      progressBySession: { ...s.progressBySession, [sessionId]: null },
-    }))
-    const msg: WsOutgoing = { type: 'switch_session', session_id: sessionId }
-    wsManager.send(msg)
+    set((s) => {
+      const progress = { ...s.progressBySession }
+      if (s.currentSessionId && s.currentSessionId !== sessionId) {
+        // Clear the previous session's progress hint — we don't know if the
+        // agent is still running and the hint is per-view anyway.
+        progress[s.currentSessionId] = null
+      }
+      return { currentSessionId: sessionId, progressBySession: progress }
+    })
   },
 
-  newSession() {
-    const msg: WsOutgoing = { type: 'new_session' }
-    wsManager.send(msg)
-  },
-
-  sendMessage(content, media) {
-    const sessionId = get().currentSessionId
-    if (!sessionId) return
+  sendMessage(sessionId, content, media) {
+    // Optimistic local echo — random id so REST merge won't dedup.
     const local: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -2915,62 +3821,84 @@ export const useChatStore = create<ChatState>((set, get) => ({
       media,
       created_at: new Date().toISOString(),
     }
-    set((s) => ({
-      messagesBySession: {
-        ...s.messagesBySession,
-        [sessionId]: [...(s.messagesBySession[sessionId] ?? []), local],
-      },
-    }))
-    const msg: WsOutgoing = { type: 'message', content, media }
+    set((s) => {
+      const existing = s.messagesBySession[sessionId] ?? []
+      const ids = new Set(s.messageIdsBySession[sessionId] ?? [])
+      ids.add(local.id)
+      return {
+        messagesBySession: {
+          ...s.messagesBySession,
+          [sessionId]: [...existing, local],
+        },
+        messageIdsBySession: { ...s.messageIdsBySession, [sessionId]: ids },
+      }
+    })
+    const msg: WsOutgoing = { type: 'message', session_id: sessionId, content, media }
     wsManager.send(msg)
   },
 
-  handleIncoming(msg) {
-    switch (msg.type) {
-      case 'session_created':
-      case 'session_switched': {
-        set((s) => ({
-          currentSessionId: msg.session_id,
-          sessions: s.sessions.some((x) => x.session_id === msg.session_id)
-            ? s.sessions
-            : [{ session_id: msg.session_id, created_at: new Date().toISOString() }, ...s.sessions],
-          progressBySession: { ...s.progressBySession, [msg.session_id]: null },
-        }))
-        break
+  handleIncomingMessage(sessionId, content, media) {
+    const entry: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content,
+      media,
+      created_at: new Date().toISOString(),
+    }
+    set((s) => {
+      const existing = s.messagesBySession[sessionId] ?? []
+      const ids = new Set(s.messageIdsBySession[sessionId] ?? [])
+      ids.add(entry.id)
+      return {
+        messagesBySession: {
+          ...s.messagesBySession,
+          [sessionId]: [...existing, entry],
+        },
+        messageIdsBySession: { ...s.messageIdsBySession, [sessionId]: ids },
+        progressBySession: { ...s.progressBySession, [sessionId]: null },
       }
-      case 'message': {
-        const sid = msg.session_id
-        const entry: ChatMessage = {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: msg.content,
-          media: msg.media,
-          created_at: new Date().toISOString(),
-        }
-        set((s) => ({
-          messagesBySession: {
-            ...s.messagesBySession,
-            [sid]: [...(s.messagesBySession[sid] ?? []), entry],
-          },
-          progressBySession: { ...s.progressBySession, [sid]: null },
-        }))
-        break
-      }
-      case 'progress': {
-        const sid = msg.session_id
-        set((s) => ({
-          progressBySession: { ...s.progressBySession, [sid]: msg.content },
-        }))
-        break
-      }
-      case 'error': {
-        console.error('ws error:', msg.reason)
-        break
-      }
+    })
+  },
+
+  setProgressHint(sessionId, hint) {
+    set((s) => ({
+      progressBySession: { ...s.progressBySession, [sessionId]: hint },
+    }))
+  },
+
+  clearProgress(sessionId) {
+    set((s) => ({
+      progressBySession: { ...s.progressBySession, [sessionId]: null },
+    }))
+  },
+
+  handleError(reason) {
+    console.warn('ws error:', reason)
+    if (reason === 'invalid token' || reason === 'unauthorized') {
+      useAuthStore.getState().logout()
     }
   },
 }))
+
+function dispatchIncoming(
+  get: () => ChatState,
+  msg: WsIncoming,
+) {
+  switch (msg.type) {
+    case 'message':
+      get().handleIncomingMessage(msg.session_id, msg.content, msg.media)
+      break
+    case 'progress':
+      get().setProgressHint(msg.session_id, msg.content)
+      break
+    case 'error':
+      get().handleError(msg.reason)
+      break
+  }
+}
 ```
+
+The `WsIncoming` / `WsOutgoing` types in `lib/types.ts` should already match PROTOCOL.md r2 (no `session_created`, `session_switched`, `new_session`, or `switch_session` variants). Verify by `grep`ing — if any old type names remain, update them before proceeding.
 
 - [ ] **Step 2: Build**
 
@@ -2981,12 +3909,12 @@ Expected: Clean build.
 
 ```bash
 git add plexus-frontend/src/store/chat.ts
-git commit -m "feat(frontend): chat store with messages and progress hints"
+git commit -m "feat(frontend): chat store with REST/WS merge and idempotent init"
 ```
 
 ---
 
-### Task 16: Devices Store + Markdown Component
+### Task 17: Devices Store + Markdown Component
 
 **Files:**
 - Create: `plexus-frontend/src/store/devices.ts`
@@ -3106,7 +4034,7 @@ git commit -m "feat(frontend): devices store and markdown component"
 
 ---
 
-### Task 17: Chat Page Components (Sidebar, Message, Input, ProgressHint, DeviceStatusBar)
+### Task 18: Chat Page Components (Sidebar, Message, Input, ProgressHint, DeviceStatusBar)
 
 **Files:**
 - Create: `plexus-frontend/src/components/Sidebar.tsx`
@@ -3120,7 +4048,7 @@ git commit -m "feat(frontend): devices store and markdown component"
 
 ```tsx
 import { useState } from 'react'
-import { NavLink } from 'react-router-dom'
+import { NavLink, useNavigate } from 'react-router-dom'
 import { ChevronLeft, ChevronRight, Plus, Settings, ShieldCheck, LogOut } from 'lucide-react'
 import { useChatStore } from '@/store/chat'
 import { useAuthStore } from '@/store/auth'
@@ -3129,10 +4057,15 @@ export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false)
   const sessions = useChatStore((s) => s.sessions)
   const currentSessionId = useChatStore((s) => s.currentSessionId)
-  const setCurrentSession = useChatStore((s) => s.setCurrentSession)
-  const newSession = useChatStore((s) => s.newSession)
   const isAdmin = useAuthStore((s) => s.isAdmin)
+  const userId = useAuthStore((s) => s.userId)
   const logout = useAuthStore((s) => s.logout)
+  const navigate = useNavigate()
+
+  function openNewChat() {
+    const newId = `gateway:${userId}:${crypto.randomUUID()}`
+    navigate(`/chat/${encodeURIComponent(newId)}`)
+  }
 
   return (
     <aside
@@ -3156,7 +4089,7 @@ export default function Sidebar() {
       </div>
 
       <button
-        onClick={newSession}
+        onClick={openNewChat}
         className="mx-2 mb-2 flex items-center justify-center gap-1 rounded border border-dashed border-plex-border px-2 py-1.5 text-xs text-plex-muted hover:border-plex-accent hover:text-plex-accent"
         title="New chat"
       >
@@ -3176,7 +4109,7 @@ export default function Sidebar() {
           return (
             <button
               key={s.session_id}
-              onClick={() => setCurrentSession(s.session_id)}
+              onClick={() => navigate(`/chat/${encodeURIComponent(s.session_id)}`)}
               className={`mb-1 w-full truncate rounded px-2 py-1.5 text-left text-xs ${
                 isActive
                   ? 'border-l-2 border-plex-accent bg-plex-accent/10 text-plex-text'
@@ -3408,15 +4341,16 @@ git commit -m "feat(frontend): chat page components (sidebar, messages, input, p
 
 ---
 
-### Task 18: Wire Up the Chat Page
+### Task 19: Wire Up the Chat Page
 
 **Files:**
 - Replace: `plexus-frontend/src/pages/Chat.tsx`
 
-- [ ] **Step 1: Implement Chat page**
+- [ ] **Step 1: Implement Chat page with URL-driven session routing**
 
 ```tsx
 import { useEffect } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { useChatStore } from '@/store/chat'
 import { wsManager } from '@/lib/ws'
@@ -3427,32 +4361,58 @@ import DeviceStatusBar from '@/components/DeviceStatusBar'
 
 export default function Chat() {
   const token = useAuthStore((s) => s.token)
+  const userId = useAuthStore((s) => s.userId)
   const init = useChatStore((s) => s.init)
   const loadSessions = useChatStore((s) => s.loadSessions)
   const loadMessages = useChatStore((s) => s.loadMessages)
   const sendMessage = useChatStore((s) => s.sendMessage)
-  const currentSessionId = useChatStore((s) => s.currentSessionId)
+  const setCurrentSession = useChatStore((s) => s.setCurrentSession)
   const messagesBySession = useChatStore((s) => s.messagesBySession)
   const progressBySession = useChatStore((s) => s.progressBySession)
 
+  const { sessionId: paramSessionId } = useParams<{ sessionId: string }>()
+  const navigate = useNavigate()
+
+  // Step 1: if URL has no session, generate one and redirect.
+  useEffect(() => {
+    if (!userId) return
+    if (!paramSessionId) {
+      const newId = `gateway:${userId}:${crypto.randomUUID()}`
+      navigate(`/chat/${encodeURIComponent(newId)}`, { replace: true })
+    }
+  }, [paramSessionId, userId, navigate])
+
+  // Step 2: idempotent init of store listeners (guarded by flags in the store).
+  // Open WebSocket (idempotent).
   useEffect(() => {
     init()
     if (token) wsManager.connect(token)
     loadSessions().catch(console.error)
-    return () => {
-      wsManager.disconnect()
-    }
+    // Do NOT disconnect on unmount — unmount can happen during navigation
+    // between /chat and /settings. Disconnect only on explicit logout.
   }, [token, init, loadSessions])
 
+  // Step 3: sync currentSessionId with URL; load history on change.
   useEffect(() => {
-    if (currentSessionId && !messagesBySession[currentSessionId]) {
-      loadMessages(currentSessionId).catch(console.error)
+    if (!paramSessionId) return
+    setCurrentSession(paramSessionId)
+    if (!messagesBySession[paramSessionId]) {
+      loadMessages(paramSessionId).catch((err) => {
+        // 404 is expected for brand-new sessions — not an error.
+        if (err?.status !== 404) console.error(err)
+      })
     }
-  }, [currentSessionId, messagesBySession, loadMessages])
+  }, [paramSessionId, setCurrentSession, loadMessages, messagesBySession])
 
+  const currentSessionId = paramSessionId ?? null
   const messages = currentSessionId ? messagesBySession[currentSessionId] ?? [] : []
   const progress = currentSessionId ? progressBySession[currentSessionId] ?? null : null
   const empty = messages.length === 0
+
+  function onSendText(text: string) {
+    if (!currentSessionId) return
+    sendMessage(currentSessionId, text)
+  }
 
   return (
     <div className="flex h-screen w-screen bg-plex-bg text-plex-text">
@@ -3471,14 +4431,14 @@ export default function Chat() {
               What are we building today?
             </h1>
             <div className="w-full px-6">
-              <ChatInput onSend={sendMessage} />
+              <ChatInput onSend={onSendText} />
             </div>
           </div>
         ) : (
           <>
             <MessageList messages={messages} progressHint={progress} />
             <div className="border-t border-plex-border px-6 py-3">
-              <ChatInput onSend={sendMessage} />
+              <ChatInput onSend={onSendText} />
             </div>
           </>
         )}
@@ -3487,6 +4447,8 @@ export default function Chat() {
   )
 }
 ```
+
+The `App.tsx` router already defines `/chat/:sessionId` from Task 14 — no change needed there.
 
 - [ ] **Step 2: Build**
 
@@ -3497,12 +4459,12 @@ Expected: Clean build.
 
 ```bash
 git add plexus-frontend/src/pages/Chat.tsx
-git commit -m "feat(frontend): wire up chat page with empty and active states"
+git commit -m "feat(frontend): URL-driven session routing in chat page"
 ```
 
 ---
 
-### Task 19: Settings Page — Profile Tab
+### Task 20: Settings Page — Profile Tab
 
 **Files:**
 - Create: `plexus-frontend/src/components/Tabs.tsx`
@@ -3691,7 +4653,7 @@ git commit -m "feat(frontend): settings page with profile tab"
 
 ---
 
-### Task 20: Settings — Devices Tab
+### Task 21: Settings — Devices Tab
 
 **Files:**
 - Modify: `plexus-frontend/src/pages/Settings.tsx`
@@ -3955,7 +4917,7 @@ git commit -m "feat(frontend): settings devices tab (status, tokens, policy, mcp
 
 ---
 
-### Task 21: Settings — Channels, Skills, Cron Tabs
+### Task 22: Settings — Channels, Skills, Cron Tabs
 
 **Files:**
 - Modify: `plexus-frontend/src/pages/Settings.tsx`
@@ -4488,7 +5450,7 @@ git commit -m "feat(frontend): settings channels, skills, and cron tabs"
 
 ---
 
-### Task 22: Admin Page
+### Task 23: Admin Page
 
 **Files:**
 - Replace: `plexus-frontend/src/pages/Admin.tsx`
@@ -4741,12 +5703,13 @@ git commit -m "feat(frontend): admin page (LLM, default soul, rate limit, server
 
 ---
 
-### Task 23: Component Smoke Tests
+### Task 24: Component Smoke Tests + Chat Store Tests
 
 **Files:**
 - Create: `plexus-frontend/src/components/__tests__/Message.test.tsx`
 - Create: `plexus-frontend/src/components/__tests__/ChatInput.test.tsx`
 - Create: `plexus-frontend/src/components/__tests__/ProgressHint.test.tsx`
+- Create: `plexus-frontend/src/store/__tests__/chat.test.ts`
 
 - [ ] **Step 1: Test `Message`**
 
@@ -4816,21 +5779,128 @@ test('renders the hint text', () => {
 })
 ```
 
-- [ ] **Step 4: Run tests**
+- [ ] **Step 4: Test chat store REST/WS merge, progress lifecycle, idempotent init**
+
+Create `plexus-frontend/src/store/__tests__/chat.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, test, vi } from 'vitest'
+
+// Mock the fetch wrapper used by the store so we can hand-craft REST responses.
+vi.mock('@/lib/api', () => ({
+  api: vi.fn(),
+}))
+vi.mock('@/lib/ws', () => ({
+  wsManager: {
+    onMessage: vi.fn(() => () => {}),
+    onStatus: vi.fn(() => () => {}),
+    send: vi.fn(),
+  },
+}))
+
+import { api } from '@/lib/api'
+import { wsManager } from '@/lib/ws'
+import { useChatStore } from '@/store/chat'
+
+describe('chat store', () => {
+  beforeEach(() => {
+    useChatStore.setState({
+      sessions: [],
+      currentSessionId: null,
+      messagesBySession: {},
+      messageIdsBySession: {},
+      progressBySession: {},
+      wsStatus: 'closed',
+    })
+    vi.clearAllMocks()
+  })
+
+  test('init is idempotent across multiple calls', () => {
+    useChatStore.getState().init()
+    useChatStore.getState().init()
+    useChatStore.getState().init()
+    expect((wsManager.onMessage as any).mock.calls.length).toBe(1)
+    expect((wsManager.onStatus as any).mock.calls.length).toBe(1)
+  })
+
+  test('loadMessages merges with existing WS-delivered entries', async () => {
+    const sid = 'gateway:u:abc'
+    // First, simulate a WS message arriving before REST completes.
+    useChatStore.getState().handleIncomingMessage(sid, 'live reply')
+    expect(useChatStore.getState().messagesBySession[sid]).toHaveLength(1)
+
+    // Now REST history returns ONE row with a distinct message_id.
+    ;(api as any).mockResolvedValue([
+      {
+        message_id: 'server-1',
+        role: 'assistant',
+        content: 'historical reply',
+        tool_call_id: null,
+        tool_name: null,
+        tool_arguments: null,
+        created_at: '2026-04-10T00:00:00Z',
+      },
+    ])
+    await useChatStore.getState().loadMessages(sid)
+
+    // The WS entry must still be present after merge.
+    const after = useChatStore.getState().messagesBySession[sid]
+    expect(after.length).toBe(2)
+    expect(after.some((m) => m.content === 'live reply')).toBe(true)
+    expect(after.some((m) => m.content === 'historical reply')).toBe(true)
+  })
+
+  test('loadMessages deduplicates repeated REST fetches by message_id', async () => {
+    const sid = 'gateway:u:abc'
+    const row = {
+      message_id: 'srv-42',
+      role: 'assistant',
+      content: 'hi',
+      tool_call_id: null,
+      tool_name: null,
+      tool_arguments: null,
+      created_at: '2026-04-10T00:00:00Z',
+    }
+    ;(api as any).mockResolvedValue([row])
+    await useChatStore.getState().loadMessages(sid)
+    await useChatStore.getState().loadMessages(sid)
+    expect(useChatStore.getState().messagesBySession[sid]).toHaveLength(1)
+  })
+
+  test('progress hint cleared on final message', () => {
+    const sid = 'gateway:u:abc'
+    useChatStore.getState().setProgressHint(sid, 'running tool...')
+    expect(useChatStore.getState().progressBySession[sid]).toBe('running tool...')
+    useChatStore.getState().handleIncomingMessage(sid, 'done')
+    expect(useChatStore.getState().progressBySession[sid]).toBeNull()
+  })
+
+  test('progress hint cleared on session switch', () => {
+    const a = 'gateway:u:aaa'
+    const b = 'gateway:u:bbb'
+    useChatStore.setState({ currentSessionId: a })
+    useChatStore.getState().setProgressHint(a, 'doing')
+    useChatStore.getState().setCurrentSession(b)
+    expect(useChatStore.getState().progressBySession[a]).toBeNull()
+  })
+})
+```
+
+- [ ] **Step 5: Run tests**
 
 Run: `cd plexus-frontend && npm test`
 Expected: All tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add plexus-frontend/src/components/__tests__/
-git commit -m "test(frontend): component smoke tests for chat primitives"
+git add plexus-frontend/src/components/__tests__/ plexus-frontend/src/store/__tests__/
+git commit -m "test(frontend): component + chat store tests"
 ```
 
 ---
 
-### Task 24: End-to-End Manual Validation + Workspace Integration Check
+### Task 25: End-to-End Manual Validation + Workspace Integration Check
 
 **Files:** None — this is a validation-only task.
 
@@ -4904,35 +5974,53 @@ git commit --allow-empty -m "chore(m3): full-stack validation passed"
 
 ## Self-Review Summary
 
-**Spec coverage:** All sections of the M3 design spec have corresponding tasks:
+**Spec coverage (r2):**
 
 - Gateway crate layout → Task 1
-- Config → Task 2
+- Config + allowed_origins → Task 2
 - JWT validation → Task 3
-- State (DashMap + plexus sender) → Task 4
+- State (DashMap + plexus sender + shutdown token) → Task 4
 - Static files + SPA fallback → Task 5
-- Routing module → Task 6
-- `/ws/chat` browser handler → Task 7
-- `/ws/plexus` server handler → Task 8
-- REST proxy → Task 9
-- Integration tests + Postman gate → Task 10
-- Frontend scaffold → Task 11
-- Types + API wrapper → Task 12
-- Auth store + login + router → Task 13
-- WebSocket manager → Task 14
-- Chat store → Task 15
-- Devices store + markdown → Task 16
-- Chat components → Task 17
-- Chat page wiring → Task 18
-- Settings profile → Task 19
-- Settings devices → Task 20
-- Settings channels/skills/cron → Task 21
-- Admin page → Task 22
-- Component tests → Task 23
-- Full-stack validation → Task 24
+- Non-blocking routing with eviction → Task 6
+- `/ws/chat` browser handler (prefix check, keepalive, lifecycle) → Task 7
+- `/ws/plexus` server handler (keepalive, graceful shutdown) → Task 8
+- REST proxy + `/healthz` + strict CORS → Task 9
+- Library split + graceful shutdown → Task 10
+- Integration tests + Postman gate → Task 11
+- Frontend scaffold → Task 12
+- Types + API wrapper → Task 13
+- Auth store + login + router → Task 14
+- WebSocket manager (jitter, auth_failed) → Task 15
+- Chat store (REST/WS merge, idempotent init, no session_created) → Task 16
+- Devices store + markdown → Task 17
+- Chat components → Task 18
+- Chat page (URL-driven session) → Task 19
+- Settings profile → Task 20
+- Settings devices → Task 21
+- Settings channels/skills/cron → Task 22
+- Admin page → Task 23
+- Component + chat store tests → Task 24
+- Full-stack validation → Task 25
+
+**Blocking-issue coverage (Codex r1 review):**
+
+1. Session ID mismatch → fixed: browser owns session, gateway validates prefix, server already has session_id in OutboundEvent and now emits it in the gateway channel (1-line server change, already committed).
+2. Writer task lifecycle leak → fixed in Tasks 7 and 8: explicit `drop(outbound_tx)` before `writer.await`; `state.plexus.write().await.take()` before `writer.await` in plexus handler.
+3. Head-of-line blocking in routing → fixed in Task 6: `route_send` is non-blocking; uses `try_send`; clones handles out of DashMap shards before any await; evicts slow browsers on final-message overflow.
+4. Proxy response size not enforced → fixed in Task 9: Content-Length fast path + running counter over `bytes_stream()`.
+5. Frontend session boot race → fixed via new session model: browser owns session state, URL is canonical, chat store merges REST/WS with dedup by message_id.
+
+**Strong-rec coverage:**
+
+1. CORS + Origin check → Tasks 2 (Config), 7 (WS chat Origin check), 9 (tightened CorsLayer).
+2. WS jitter + auth failure → Task 15.
+3. Chat store idempotent init → Task 16 + Task 24 test.
+4. `/healthz` + graceful shutdown → Tasks 9 and 10.
+5. Ping/pong keepalive → Task 7 (browser side) and Task 8 (plexus side).
+6. Expanded test matrix → Task 11 (integration) and Task 24 (chat store tests).
 
 **Placeholder check:** No TBDs, no "add appropriate error handling" handwaves, no "similar to Task N" references without code.
 
-**Type consistency:** `BrowserConnection`, `OutboundFrame`, `AppState`, `Claims`, `WsIncoming`, `WsOutgoing`, `ChatMessage` all match across tasks. Zustand stores use consistent selector patterns. API wrapper and all consumers agree on `ApiError` shape.
+**Type consistency:** `BrowserConnection`, `OutboundFrame` (with `Close` variant), `AppState`, `Claims`, `WsIncoming` (r2), `WsOutgoing` (r2), `ChatMessage` all match across tasks. Zustand stores use consistent selector patterns. Store's `setCurrentSession`/`sendMessage` signatures match the URL-driven Chat page consumers.
 
-**Scope check:** Plan is gated between Phase 1 (Task 10) and Phase 2 (Task 11+) with explicit user validation. Both phases ship complete, testable software.
+**Scope check:** Plan is gated between Phase 1 (Task 11) and Phase 2 (Task 12+) with explicit user validation. Both phases ship complete, testable software.

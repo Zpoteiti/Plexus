@@ -1,8 +1,24 @@
 # M3 — Gateway + Frontend Design
 
-**Status:** Design approved, ready for implementation plan
+**Status:** Revised after Codex review — ready for second review
 **Date:** 2026-04-10
 **Scope:** Build `plexus-gateway` (Rust) and `plexus-frontend` (React) from scratch
+
+## Revision History
+
+**2026-04-10 (r2):** Addressed Codex pre-implementation review. Major changes:
+- **Session model:** the browser now owns session state. Gateway is fully stateless w.r.t. sessions; `new_session` / `switch_session` / `session_created` / `session_switched` messages removed from the protocol. Every inbound `message` carries a `session_id`. Gateway validates the prefix against the JWT `sub`. See PROTOCOL.md r2.
+- **Routing:** `/ws/plexus` reader loop is now strictly non-blocking. Slow browsers are evicted on final-message overflow instead of stalling the shared read loop. DashMap handles are cloned out of shards before any await.
+- **Writer task lifecycle:** explicit drop of the local outbound sender before `writer.await` so the writer always exits cleanly on disconnect.
+- **Proxy response size limit:** enforced via streaming with a running byte counter and a `Content-Length` fast-path.
+- **Keepalive:** app-level ping/pong on both WS endpoints (30s interval, 15s pong timeout for browsers).
+- **Graceful shutdown:** SIGTERM/SIGINT → stop accepting → close browsers → drain → exit.
+- **Health check:** `GET /healthz` endpoint for load balancer readiness probes.
+- **CORS / Origin:** tightened — `PLEXUS_ALLOWED_ORIGINS` env var (comma-separated), default `*` for dev only, explicit `Origin` header check on WS upgrade.
+- **Frontend reconnect:** jitter + auth-failure terminal state + re-auth path.
+- **Chat store:** idempotent `init()` with stored unsubscribe handles for StrictMode safety.
+- **URL-driven session routing:** `/chat/:sessionId` is the canonical source of truth; message merging uses a de-dupe set to avoid REST/WS races.
+- **Test matrix:** expanded to cover backpressure, progress hints, media attachments, reconnect, proxy size limit, path traversal.
 
 ## Summary
 
@@ -70,14 +86,14 @@ plexus-gateway/
 ### Dependencies
 
 ```toml
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "fs", "trace", "limit"] }
 futures-util = "0.3"
 jsonwebtoken = "9"
 subtle = "2"
 dashmap = "6"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", features = ["json"] }
 dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -87,16 +103,16 @@ uuid = { version = "1", features = ["v4"] }
 plexus-common = { path = "../plexus-common" }
 
 [dev-dependencies]
-tokio-tungstenite = "0.24"  # only for integration test clients
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }  # only for integration test clients
 ```
 
 `axum`'s built-in `ws` feature handles server-side WebSocket upgrades. `tokio-tungstenite` is only pulled in for integration tests that need a client to dial into the gateway. `plexus-common` is reused for error types (`ApiError`, `ErrorCode`) — no separate `error.rs` in the gateway.
 
 ### State
 
-The gateway is deliberately **stateless** beyond what the live WebSocket topology requires:
+The gateway is deliberately **stateless w.r.t. sessions** — it only holds the live WebSocket connection table.
 
-Each browser connection spawns a dedicated writer task that owns the sink directly — other tasks send outbound frames through a bounded channel. This gives us natural per-connection backpressure (see the Backpressure subsection below) and avoids mutex contention on the sink.
+Each browser connection spawns a dedicated writer task that owns the WebSocket sink directly. Other tasks send outbound frames through a bounded `mpsc::channel(64)`. This gives us natural per-connection backpressure and avoids mutex contention on the sink.
 
 ```rust
 pub struct AppState {
@@ -104,20 +120,34 @@ pub struct AppState {
     pub browsers: Arc<DashMap<String, BrowserConnection>>,         // chat_id → per-connection handle
     pub plexus:   Arc<RwLock<Option<tokio::sync::mpsc::Sender<serde_json::Value>>>>,  // single server sender
     pub http_client: reqwest::Client,                              // pooled, shared across all proxy requests
+    pub shutdown: tokio_util::sync::CancellationToken,             // triggered on SIGTERM/SIGINT
 }
 
+#[derive(Clone)]
 pub struct BrowserConnection {
     pub outbound: tokio::sync::mpsc::Sender<OutboundFrame>,        // bounded channel to writer task
     pub user_id: String,                                           // from JWT; needed for sender_id fallback
 }
 
 pub enum OutboundFrame {
-    Message(serde_json::Value),  // final message — must deliver or drop connection
-    Progress(serde_json::Value), // ephemeral — may be dropped under backpressure
+    Message(serde_json::Value),  // final message — on queue-full, evict the browser
+    Progress(serde_json::Value), // ephemeral — on queue-full, drop the oldest
+    Close,                       // shutdown signal — writer must flush and close the sink
 }
 ```
 
-**Session state is not held at the gateway.** The browser sends `session_id` with every message (per PROTOCOL.md); the server is the DB-backed source of truth for session lifecycle. The gateway generates a new `session_id = "gateway:{user_id}:{uuid}"` on connect or on `new_session`, echoes it back, and otherwise passes whatever the browser sends. This makes gateway restarts trivially safe — no session state is lost because the gateway never owned it.
+**`BrowserConnection` is `Clone`** so the routing layer can clone it out of the DashMap shard before any async operation, never holding a shard guard across an await.
+
+**No session state at the gateway.** The browser supplies `session_id` in every `message` frame. The gateway validates the prefix (`gateway:{user_id}:` where `user_id` matches the JWT `sub`) and forwards it to plexus-server. Plexus-server creates the DB row on first use (same pattern as Discord and Telegram channels). This makes gateway restarts trivially safe — no session state is lost because the gateway never owned it.
+
+**Writer task lifecycle rules (prevents leaks under reconnect churn at 500+ sessions):**
+1. On connect, the reader loop creates the `(outbound_tx, outbound_rx)` pair, clones `outbound_tx` into `state.browsers[chat_id]`, and spawns the writer with `outbound_rx`.
+2. On disconnect, the reader calls `cleanup(&state, &chat_id)` which removes the entry from `state.browsers` (dropping the stored clone).
+3. The reader then explicitly `drop(outbound_tx)`s its local clone.
+4. The reader `.await`s the writer join handle. Because all senders are now dropped, `rx.recv()` returns `None` and the writer task exits cleanly.
+5. The routing layer may still hold short-lived clones for concurrent sends, but those are dropped at the end of each `try_send` call (no awaits between clone and drop).
+
+No task can outlive its associated connection. Integration tests verify leak-freedom by connecting 200 browsers and disconnecting them, then asserting `state.browsers.len() == 0`.
 
 ### Environment Variables
 
@@ -128,48 +158,115 @@ pub enum OutboundFrame {
 | `GATEWAY_PORT` | yes | — | listen port |
 | `PLEXUS_SERVER_API_URL` | yes | — | upstream base URL for REST proxy |
 | `PLEXUS_FRONTEND_DIR` | no | `./plexus-frontend/dist` | static file root |
+| `PLEXUS_ALLOWED_ORIGINS` | no | `*` | comma-separated CORS/WS-Origin allow-list; `*` is dev-only |
 
 `dotenvy` loads a `.env` file in the working directory at startup.
+
+Production deployments **must** set `PLEXUS_ALLOWED_ORIGINS` to an explicit list. The default `*` exists only so `cargo run --package plexus-gateway` works locally without extra setup. The integration tests set it explicitly.
 
 ### WebSocket: `/ws/chat` (browsers)
 
 Handler lives in `ws/chat.rs`. Flow:
 
-1. Extract `token` query parameter (JWTs cannot use the `Authorization` header on WS upgrade in browsers).
-2. Validate via `jwt::validate()` using `JWT_SECRET`. Expected claims: `{ sub: String, is_admin: bool, exp: u64 }`.
-3. On failure → return HTTP 401 *before* upgrade. No resources allocated.
-4. On success → upgrade, generate `chat_id = UUIDv4()` and `session_id = format!("gateway:{}:{}", user_id, uuid::new_v4())`.
-5. Insert into `state.browsers[chat_id] = BrowserConnection { sink, user_id }`.
-6. Send `{"type":"session_created","session_id": ...}` immediately.
-7. Enter read loop. Dispatch by `type`:
-   - `message` → call `routing::forward_to_plexus(state, chat_id, user_id, content, media, session_id)`. If the plexus sink is `None`, send `{"type":"error","reason":"Plexus server not connected"}` back to this browser.
-   - `new_session` → generate fresh `session_id`, send `session_created`.
-   - `switch_session` → echo `{"type":"session_switched","session_id": ...}` back.
+1. **Origin check.** Read the `Origin` header. If `PLEXUS_ALLOWED_ORIGINS` is not `*`, reject with HTTP 403 unless the origin is in the allow-list.
+2. Extract `token` query parameter (JWTs cannot use the `Authorization` header on WS upgrade in browsers).
+3. Validate via `jwt::validate()` using `JWT_SECRET`. Expected claims: `{ sub: String, is_admin: bool, exp: i64 }`.
+4. On failure → return HTTP 401 *before* upgrade. No resources allocated.
+5. On success → upgrade. Allocate `chat_id = UUIDv4()`, create the `(outbound_tx, outbound_rx)` mpsc pair with buffer 64.
+6. Insert `state.browsers[chat_id] = BrowserConnection { outbound: outbound_tx.clone(), user_id }`.
+7. Spawn the writer task (owns the sink, drains `outbound_rx`, exits when `rx.recv()` returns `None`).
+8. Spawn the keepalive task (sends `{"type":"ping"}` every 30s; tracks the last `pong` timestamp; closes the connection if no `pong` within 15s of the last `ping`).
+9. Enter the reader loop. Dispatch by incoming JSON `type`:
+   - `message` → validate that `session_id` starts with `gateway:{user_id}:` (prefix compare). On mismatch, send `{"type":"error","reason":"invalid session_id"}` and continue the loop. On match, call `routing::forward_to_plexus(state, chat_id, user_id, &parsed)`. If the plexus sender is `None`, send `{"type":"error","reason":"Plexus server not connected"}`.
+   - `pong` → update last-pong timestamp; no reply.
    - Unknown type → log warn, ignore.
-8. On disconnect → remove `chat_id` from `state.browsers`.
+10. **Shutdown signal (`state.shutdown`) received:** break out of the reader loop, send an `OutboundFrame::Close`, cleanup.
+11. **On disconnect or shutdown:**
+    - `state.browsers.remove(chat_id)` drops the stored `outbound_tx` clone.
+    - Explicit `drop(outbound_tx)` on the reader's local clone.
+    - `writer.await` — safe to complete because all senders are gone.
+    - `keepalive.abort()` — fire-and-forget cancellation.
 
-**Per-connection backpressure.** Each browser gets a bounded `tokio::sync::mpsc::channel(64)` between the router and its sink writer task. If the queue is full:
-- For progress hints: drop the oldest (progress is ephemeral).
-- For final `message` frames: drop the connection (slow client cannot keep up).
+**No session bookkeeping.** The gateway does not remember "current session per chat_id". There are no `new_session` / `switch_session` / `session_created` / `session_switched` messages. The browser is responsible for its own session state.
 
-This prevents one stuck browser from ballooning gateway memory under load.
+**Per-connection backpressure.**
+- **Progress frames:** `try_send` on the outbound channel. On `Full`, the sender uses `try_reserve` to evict the oldest pending progress frame from the channel and then retries once. This gives "drop oldest" semantics without having to peek inside tokio's mpsc internals (implementation: keep a separate `VecDeque<OutboundFrame>` sidecar with a `tokio::sync::Notify` if native-drop-oldest proves awkward; simplest acceptable impl is `try_send` and silently drop on `Full`, documented in code).
+- **Final frames:** `try_send` on the outbound channel. On `Full`, log a warning, remove the entry from `state.browsers` (which drops the stored clone → the writer will exit as soon as the routing layer finishes dropping its local clone → the browser sees a closed connection on its next read). This prevents one slow consumer from head-of-line blocking the shared `/ws/plexus` reader loop.
 
 ### WebSocket: `/ws/plexus` (plexus-server, exactly one)
 
 Handler lives in `ws/plexus.rs`. Flow:
 
 1. Upgrade immediately — no query auth.
-2. Wait for the first text frame (with a 5-second timeout).
+2. Wait for the first text frame with a 5-second timeout.
 3. Parse as `{"type":"auth","token": "..."}`. Any other shape → `auth_fail` + drop.
-4. Compare `token` to `PLEXUS_GATEWAY_TOKEN` using `subtle::ConstantTimeEq::ct_eq()` on equal-length byte slices. Length mismatch short-circuits to false (length is not a secret).
-5. Acquire `state.plexus.write().await`. If already `Some` → `auth_fail` (`reason: "duplicate connection"`) + drop. Otherwise store the sink.
+4. Compare `token` to `PLEXUS_GATEWAY_TOKEN` using `subtle::ConstantTimeEq::ct_eq()`. Length mismatch short-circuits to false (length is not a secret in practice).
+5. Acquire `state.plexus.write().await`. If already `Some` → `auth_fail(reason="duplicate connection")` + drop. Otherwise create the `(plexus_tx, plexus_rx)` mpsc pair (buffer 256), store `plexus_tx` in `state.plexus`.
 6. Send `{"type":"auth_ok"}`.
-7. Enter read loop. Handle `send` messages:
-   - Look up `chat_id` in `state.browsers`. If found → forward.
-   - Fallback: if not found, look up by `metadata.sender_id` and route to *any* open browser for that user (handles cron-triggered pushes when the original `chat_id` is stale).
-   - If neither → log warn, drop silently.
-   - If `metadata._progress == true` → emit as `{"type":"progress",...}`. Otherwise emit as `{"type":"message",...}`. Include `session_id` (from the upstream message) and `media` (from `metadata.media`) when present.
-8. On disconnect → clear `state.plexus`. No browser impact — browsers will just get "server not connected" errors on their next message.
+7. Spawn the writer task (drains `plexus_rx` → sink).
+8. Enter the reader loop. For each `send` message:
+   - Call `routing::route_send(state, &parsed).await` — this function **must** be non-blocking (see Routing below).
+   - For `pong` messages: update last-pong; no reply.
+   - Unknown types: warn, ignore.
+9. **Shutdown signal (`state.shutdown`) received:** break out of the reader loop.
+10. **On disconnect or shutdown:**
+    - `state.plexus.write().await.take()` drops the stored `plexus_tx` clone.
+    - Explicit `drop(plexus_tx)` on any local clone in this task (none in the current design, but documented for future additions).
+    - `writer.await` — the writer exits as soon as the last sender is dropped.
+    - Browsers see `{"type":"error","reason":"Plexus server not connected"}` on their next send; their connections stay alive.
+
+### Routing
+
+Handler lives in `routing.rs`. The contract is: **`route_send` must complete in bounded time with no awaits on slow channels.** Any blocking here stalls the entire `/ws/plexus` reader.
+
+```rust
+pub enum RouteResult {
+    DirectHit,
+    SenderFallback,
+    NoMatch,
+    Evicted, // browser queue was full on a final message; connection was evicted
+}
+
+pub async fn route_send(state: &Arc<AppState>, msg: &Value) -> RouteResult {
+    // 1. Parse chat_id, session_id, content, metadata, media.
+    // 2. Build an OutboundFrame (Progress or Message).
+    // 3. Clone the BrowserConnection OUT of the DashMap shard before any await.
+    let conn = state.browsers.get(chat_id).map(|r| r.clone());
+    // (shard guard dropped here)
+
+    // 4. Try direct send.
+    if let Some(conn) = conn {
+        return try_dispatch(state, chat_id, conn, frame);
+    }
+
+    // 5. Fallback: scan for sender_id match (collect clones first, then try each).
+    // ...
+}
+
+fn try_dispatch(state: &Arc<AppState>, chat_id: &str, conn: BrowserConnection, frame: OutboundFrame) -> RouteResult {
+    match frame {
+        OutboundFrame::Progress(_) => {
+            let _ = conn.outbound.try_send(frame); // drop on full, ignore error
+            RouteResult::DirectHit
+        }
+        OutboundFrame::Message(_) => {
+            match conn.outbound.try_send(frame) {
+                Ok(()) => RouteResult::DirectHit,
+                Err(_) => {
+                    tracing::warn!("evicting slow browser chat_id={chat_id}");
+                    state.browsers.remove(chat_id);
+                    RouteResult::Evicted
+                }
+            }
+        }
+        OutboundFrame::Close => unreachable!("Close is sent by shutdown path, not routing"),
+    }
+}
+```
+
+**Never holds a DashMap shard guard across an await.** The `.clone()` inside the `.map(|r| r.clone())` happens while holding the guard synchronously, then the guard drops, and any async work happens on the owned clone.
+
+**Never blocks on a slow consumer.** `try_send` returns immediately. On progress-frame overflow we drop silently. On final-frame overflow we evict the entry from `state.browsers`; the writer task exits as soon as the routing layer's clone is dropped (end of function) and the reader task's local clone is dropped (on the browser's next read error or shutdown).
 
 ### REST Proxy: `/api/*`
 
@@ -179,64 +276,108 @@ Handler lives in `proxy.rs`. Behavior matches `plexus-gateway/docs/PROTOCOL.md`:
 - All other paths require `Authorization: Bearer <JWT>`, validated at the gateway before proxying.
 - Forward method, headers, and body to `{PLEXUS_SERVER_API_URL}{path}`.
 - Strip hop-by-hop headers: `host`, `connection`, `transfer-encoding`, `upgrade`, `keep-alive`, `proxy-authenticate`, `proxy-authorization`, `te`, `trailer`.
-- Reject path traversal (`..`) with 422.
-- Max body: 25 MB (request and response). Enforced via `tower::limit::RequestBodyLimitLayer` and streamed response copy.
+- Reject path traversal (`..`) with HTTP 422.
+- **Max request body:** 25 MB via `tower_http::limit::RequestBodyLimitLayer`. Oversized → HTTP 413.
+- **Max response body:** 25 MB, enforced explicitly. If the upstream sends a `Content-Length` header > 25 MB, the proxy rejects with HTTP 502 before reading the body. Otherwise, stream the body via `resp.bytes_stream()` accumulating into a `Vec<u8>` with a running check; if the running total exceeds 25 MB, abort and return HTTP 502 with `{"error":{"code":"upstream_too_large","message":"response body exceeded 25 MB limit"}}`.
 - Uses the shared `reqwest::Client` from `AppState`. One pool, many requests.
 - Network failure → 502 Bad Gateway with JSON body `{"error":{"code":"upstream_unreachable","message": ...}}`.
 
 ### Static Files: `/`
 
-Handler lives in `static_files.rs`. Uses `tower-http::services::ServeDir` rooted at `PLEXUS_FRONTEND_DIR`, with a fallback to `index.html` for any path that doesn't match a file (SPA client-side routing). Registered as the **lowest-priority** route so `/ws/*` and `/api/*` always win.
+Handler lives in `static_files.rs`. Uses `tower-http::services::ServeDir` rooted at `PLEXUS_FRONTEND_DIR`, with a fallback to `index.html` for any path that doesn't match a file (SPA client-side routing). Registered as the **lowest-priority** route so `/ws/*`, `/api/*`, and `/healthz` always win.
 
-### CORS
+### Health Check: `/healthz`
 
-Permissive CORS via `tower-http::cors`:
+Handler lives in `main.rs` (or `routing.rs` for colocation with state access). Returns HTTP 200 with:
 
-```rust
-CorsLayer::new()
-    .allow_origin(Any)
-    .allow_methods(Any)
-    .allow_headers(Any)
+```json
+{"status":"ok","plexus_connected":true,"browsers":42}
 ```
 
-Per DEPLOYMENT.md, this is safe because the gateway is behind a reverse proxy in production. For direct exposure, operators can tighten via reverse proxy.
+`plexus_connected` = `state.plexus.read().await.is_some()`. `browsers` = `state.browsers.len()`. Unauthenticated — load balancers need to hit this without a JWT.
+
+### Graceful Shutdown
+
+`main.rs` installs signal handlers for `SIGTERM` and `SIGINT` (via `tokio::signal`). On signal:
+
+1. `state.shutdown.cancel()` — this signals all WS readers to break out of their loops.
+2. `axum::serve(listener, app).with_graceful_shutdown(shutdown_future)` — stops accepting new connections.
+3. Sleep 5 seconds to let in-flight messages drain (progress hints in flight, final messages being written).
+4. The process exits when the axum server future completes.
+
+### CORS / Origin
+
+`PLEXUS_ALLOWED_ORIGINS` env var controls both CORS (for REST) and the WS `Origin` check:
+
+- `*` (default) → permissive, CORS allows any origin, WS upgrade does not check `Origin`. Dev only.
+- `https://plexus.example.com,https://admin.plexus.example.com` → strict list. Both REST and WS upgrade reject any origin not in the list.
+
+Parsed once at startup. Non-`*` config is required for production deployments; this is called out in DEPLOYMENT.md.
 
 ### Error Handling
 
-- **JWT invalid/expired** → 401 (browsers), `ApiError` JSON (REST).
+- **JWT invalid/expired** → HTTP 401 (browsers before WS upgrade, REST proxy at middleware).
+- **Origin rejected** → HTTP 403.
 - **Wrong `PLEXUS_GATEWAY_TOKEN`** → `auth_fail` + drop.
 - **Duplicate plexus connection** → `auth_fail(reason="duplicate connection")` + drop the new one.
 - **Plexus not connected, browser sends message** → `{"type":"error","reason":"Plexus server not connected"}` to the browser; connection stays alive.
+- **Invalid session_id prefix** → `{"type":"error","reason":"invalid session_id"}`; connection stays alive.
 - **Proxy upstream 5xx** → pass through.
 - **Proxy network error** → 502 Bad Gateway JSON.
 - **Path traversal** → 422.
-- **Body > 25 MB** → 413.
-- **DashMap lookup miss, channel full, etc.** → log warn, drop the message, never panic.
+- **Request body > 25 MB** → 413.
+- **Response body > 25 MB** → 502 with `upstream_too_large`.
+- **DashMap lookup miss, channel full (progress), etc.** → log warn, drop the message, never panic.
+- **Channel full on final frame** → evict the browser, log warn.
+
+### Observability
+
+- `tracing::info_span!("ws_chat", chat_id = %chat_id, user_id = %user_id)` wraps the browser reader loop.
+- `tracing::info_span!("ws_plexus")` wraps the plexus reader loop.
+- `tracing::info_span!("proxy", method = %method, path = %path)` wraps each proxy request.
+- `tracing::warn!` on: slow-browser evictions, routing misses, WS upgrade failures, proxy upstream errors.
+- **JWT redaction in access logs:** the integration test setup includes a `tower_http::trace::TraceLayer` with a custom `MakeSpan` that strips the `token` query param from the logged URL. Deployments should configure reverse proxy access logs to do the same.
 
 ### Testing
 
 Unit tests (`cargo test --package plexus-gateway`):
 
-- `jwt.rs`: valid token, expired token, malformed token, wrong secret, missing `sub`.
-- `routing.rs`: direct chat_id lookup, sender_id fallback, no-match drop.
-- Constant-time token comparison: equal-length match, equal-length mismatch, length mismatch returns false without byte comparison.
+- `jwt.rs`: valid token, expired token, malformed token, wrong secret, missing claims.
+- `routing.rs`: direct chat_id lookup, sender_id fallback, no-match, **slow-consumer eviction**, **progress drop on full**.
+- Constant-time token comparison: equal-length match, equal-length mismatch, length mismatch without byte comparison.
 
-Integration tests (in-process, using `axum::serve` on ephemeral port):
+Integration tests (in-process, ephemeral port, isolated `Config` per test):
 
-- Start the gateway, open a mock plexus WS client, authenticate, send `send` messages and assert the browser mock receives them.
-- Open a mock browser WS client with a valid JWT, send `message` and assert the mock plexus receives it.
-- Assert the error flow: browser connects, no plexus, browser sends message → gets error reply, stays connected.
-- Assert REST proxy: mock upstream HTTP server, gateway proxies a GET and POST, headers and body match.
+- Browser↔plexus round-trip (happy path).
+- `send` from plexus → browser receives.
+- Browser with no plexus connected → error reply, stays connected.
+- Invalid JWT → upgrade rejected (HTTP 401).
+- Disallowed `Origin` → upgrade rejected (HTTP 403).
+- Duplicate plexus connection → `auth_fail`.
+- **Invalid session_id prefix → error frame, connection stays alive.**
+- **Progress hint forwarding.**
+- **Media attachment forwarding** (browser sends media array → plexus receives it → plexus sends media in reply → browser receives it).
+- **Slow browser eviction** (stuff the outbound channel, assert eviction, assert other browsers are unaffected).
+- **Reconnect** (browser disconnects and reconnects with same JWT; gateway accepts, issues new `chat_id`).
+- **Reader/writer leak test**: connect 200 browsers, disconnect all, assert `state.browsers.len() == 0` within 100ms.
+- **REST proxy round-trip** (GET and POST via mock upstream).
+- **REST proxy path traversal** rejected with 422.
+- **REST proxy request body > 25 MB** rejected with 413.
+- **REST proxy response body > 25 MB** rejected with 502 (`Content-Length` header path) and via streaming path (no `Content-Length`).
+- **`/healthz` returns correct state** (plexus-disconnected and plexus-connected cases).
+- **Graceful shutdown** (send SIGTERM / cancel token, assert server exits within 6s, live browsers receive close frame).
 
 ### Performance Notes
 
 Target: 1,000 users, 500 concurrent WS sessions. The architecture handles this by design:
 
-- **DashMap** → lock-free concurrent reads, shard-based writes. Browser routing is O(1) with no cross-shard contention.
-- **Stateless routing** → each message is: parse JSON → DashMap lookup → forward bytes. Sub-millisecond.
+- **DashMap** → lock-free concurrent reads, shard-based writes. Browser routing is O(1). Shard guards are never held across awaits (enforced by the "clone out first" rule).
+- **Stateless routing** → each message is: parse JSON → DashMap lookup → clone → non-blocking `try_send`. Sub-millisecond.
+- **Non-blocking `/ws/plexus` reader** → slow consumers are evicted, never block other browsers.
 - **Connection-pooled `reqwest::Client`** → shared across all proxy calls.
-- **Bounded per-browser channels** → prevents slow-client memory blowup.
+- **Bounded per-browser channels** → prevents memory blowup; eviction policy caps per-connection RSS at ~64 × frame size.
 - **`LimitNOFILE=65536`** in the systemd unit from DEPLOYMENT.md covers the fd ceiling.
+- **App-level ping/pong** → detects dead connections without waiting for TCP timeouts; prevents zombie DashMap entries.
 
 The real load is on plexus-server (LLM calls, DB, tool execution). The gateway is a thin multiplexer.
 
@@ -328,30 +469,82 @@ plexus-frontend/
 3. All subsequent `fetch` calls include `Authorization: Bearer <token>`.
 4. WebSocket connection uses `ws://host/ws/chat?token=<token>`.
 5. Logout clears `localStorage` and Zustand, disconnects WebSocket, redirects to `/login`.
+6. **Token expiry:** the fetch wrapper treats HTTP 401 as a logout trigger. The WS manager treats `error` with reason `"invalid token"` or HTTP 401 on upgrade as a terminal auth failure → trigger the same logout path.
+
+### Session Model (frontend side)
+
+The browser owns session state. This aligns with the gateway protocol (r2).
+
+- **Session ID generation:** `gateway:{user_id}:{crypto.randomUUID()}`. Done in the browser on demand.
+- **Current session source of truth:** the URL path `/chat/:sessionId`. The chat store mirrors the URL for ergonomic access; navigation is the write path.
+- **Start a new chat:** generate a new session_id locally, navigate to `/chat/:newSessionId`. No server roundtrip. The session row is created on plexus-server when the first message is sent.
+- **Switch sessions:** click a sidebar entry → navigate to `/chat/:otherSessionId`. Chat store listens to URL changes and loads history.
+- **Resume on reload:** the URL has the session_id, the chat store reads it, loads history via REST, and opens the WS.
+- **Open in new tab:** works automatically — each tab has its own URL.
+
+**There is no `new_session` / `switch_session` / `session_created` / `session_switched` message type.** These were removed from PROTOCOL.md r2.
 
 ### WebSocket Lifecycle
 
 `lib/ws.ts` exports a singleton WebSocket manager:
 
-- Connects on first use (when Chat page mounts).
-- URL derived from `window.location`: `${protocol}//${host}/ws/chat?token=${token}`.
-- Auto-reconnect with exponential backoff (1s, 2s, 4s, 8s, 16s, cap at 30s).
-- On open: emit `connected` event to the chat store.
-- On message: parse JSON, dispatch by `type`:
-  - `session_created` / `session_switched` → update current session in chat store.
-  - `message` → append to message list for that session; clear progress hint for that session.
-  - `progress` → set progress hint for that session (ephemeral).
-  - `error` → show toast, do not append to history.
-- On close: trigger reconnect, emit `disconnected` event.
-- Disposed on logout.
+- **Connect:** called from the Chat page mount effect with the current JWT. Idempotent — calling `connect()` with the same token is a no-op.
+- **URL:** derived from `window.location`: `${protocol}//${host}/ws/chat?token=${token}`.
+- **Reconnect:** exponential backoff with **jitter**. Base delays `1s, 2s, 4s, 8s, 16s, 30s`, each multiplied by `(0.75 + Math.random() * 0.5)` to spread reconnect stampedes after a gateway restart. Max 30s cap.
+- **Auth failure:** if the server closes with an error frame `{"type":"error","reason":"invalid token"}`, or if the upgrade fails with HTTP 401, the manager enters a terminal `auth_failed` state. It does not reconnect. It emits `auth_failed` to the chat store, which triggers `useAuthStore.logout()` → redirect to `/login`.
+- **Ping:** the browser responds to gateway `{"type":"ping"}` with `{"type":"pong"}`. No client-initiated pings (the gateway is authoritative).
+- **Message dispatch:** parse JSON, dispatch by `type`:
+  - `message` → `chat.handleIncomingMessage(sessionId, content, media)` — appends to that session's message list with a **dedup check** against REST-loaded history (see Chat Store below).
+  - `progress` → `chat.setProgressHint(sessionId, content)`.
+  - `error` → `chat.handleError(reason)` — shows toast; if reason is `"invalid token"`, triggers logout.
+  - `ping` → reply with `pong`.
+  - Unknown → log warn, ignore.
+- **Listener management:** `onMessage(fn)` and `onStatus(fn)` return an unsubscribe function. The chat store's `init()` is idempotent (guarded by a `_initialized` flag) and stores the unsubscribes in a module-level variable so React StrictMode double-invocations don't leak listeners.
+- **On close (non-terminal):** trigger reconnect with jitter; emit `disconnected` status.
+- **Disposed on logout.**
+
+### Chat Store Contract
+
+`store/chat.ts` holds:
+
+```ts
+interface ChatState {
+  sessions: Session[]
+  messagesBySession: Record<string, ChatMessage[]>
+  messageIdsBySession: Record<string, Set<string>>  // dedup set, keyed by server message_id when available
+  progressBySession: Record<string, string | null>
+  wsStatus: 'connecting' | 'open' | 'closed' | 'auth_failed'
+
+  // mutations
+  init: () => void                                        // idempotent; attaches WS listeners once
+  loadSessions: () => Promise<void>
+  loadMessages: (sessionId: string) => Promise<void>      // merges into existing list, does not overwrite
+  sendMessage: (sessionId: string, content: string, media?: string[]) => void
+  handleIncomingMessage: (sessionId: string, content: string, media?: string[]) => void
+  setProgressHint: (sessionId: string, hint: string) => void
+  clearProgress: (sessionId: string) => void
+}
+```
+
+**Merge rules (fixes REST/WS race):**
+- Every `ChatMessage` carries an `id`. For REST-loaded messages, `id = message_id` from the server. For WS messages (which don't have a server message_id), `id = crypto.randomUUID()`.
+- `loadMessages` **merges** rather than overwrites: for each row from the REST response, if its `message_id` is not already in `messageIdsBySession[sessionId]`, append it.
+- `handleIncomingMessage` always appends (with a fresh UUID); it never deduplicates against REST history because a WS reply arriving during `loadMessages` is, by definition, newer than the REST snapshot.
+- The optimistic local echo on `sendMessage` uses `crypto.randomUUID()` and is never dedup'd against REST — it's "already on the screen."
+
+**Progress hint lifecycle:**
+- Set by incoming `progress` frames: `progressBySession[sessionId] = content`.
+- Cleared when a final `message` arrives for the same session: `progressBySession[sessionId] = null`.
+- Cleared when the user navigates to a different session.
+- Not persisted to localStorage. Fresh page load = no hints (correct: they are ephemeral and the agent may no longer be running).
 
 ### Chat Page Layout
 
-Two states:
+Two states, keyed off `messagesBySession[currentSessionId]?.length`:
 
-**Empty state (new session, no messages):**
+**Empty state (no messages in this session):**
 - Sidebar (slim) on the left.
-- Center: greeting ("Hey, Yucheng" or similar), input box mid-screen.
+- Center: greeting ("Hey, Yucheng"), input box mid-screen.
 - Responsive: input stays between `min(90vw, 420px)` and `min(90vw, 720px)` — never tiny, never huge.
 
 **Active state (messages present):**
@@ -361,9 +554,17 @@ Two states:
 - Progress hint (if active) shows at the bottom of the list, above the input.
 - Input drops to bottom, same responsive width as empty state.
 
-**Tool progress hint rendering:** ephemeral green spinner + `"Executing shell on laptop..."` text (the exact string comes from the server's `build_tool_hint()`). Not persisted. Cleared when a final `message` arrives, when the user switches sessions, and on page reload (fresh history from `/api/sessions/{id}/messages` has no hints by design).
+**URL-driven session:** `Chat.tsx` reads `useParams<{ sessionId: string }>()`. On mount or URL change:
+1. If `sessionId` is missing from URL → generate one with `crypto.randomUUID()` and `navigate('/chat/:newId', { replace: true })`.
+2. If `!messagesBySession[sessionId]` → `loadMessages(sessionId)`.
+3. Ensure WS is connected (idempotent `wsManager.connect(token)`).
+4. Register `beforeunload` to call `wsManager.disconnect()` on logout only — not on navigation.
 
-**Session history on page load:** `Chat.tsx` calls `GET /api/sessions` for the sidebar and `GET /api/sessions/{id}/messages` for the current session. Messages are paginated (50 per page by default).
+**New chat button:** generates a UUID and navigates — zero server roundtrip. The session row is created on plexus-server when the first message is sent.
+
+**Switch session:** sidebar button navigates. `Chat.tsx` effect runs `loadMessages` and updates `progressBySession` (clears the hint for the old session, since we don't know if it's still running).
+
+**Session history on page load:** `Chat.tsx` calls `GET /api/sessions` for the sidebar and `GET /api/sessions/{id}/messages?limit=200` for the current session. Paginated (50 default, 200 explicit cap).
 
 ### Settings Page
 
@@ -422,7 +623,13 @@ Only accessible to users with `is_admin: true` in JWT claims.
 
 - `tsc -b` type-check as the primary correctness signal.
 - Vitest component smoke tests for `ChatInput`, `Message`, `MarkdownContent`, `ProgressHint`.
-- No Playwright in M3 — manual validation in the browser.
+- Vitest store tests for `chat.ts` covering:
+  - REST/WS race: `loadMessages` followed by `handleIncomingMessage` during the load — the WS message must not be clobbered.
+  - Dedup: loading the same REST page twice does not duplicate messages.
+  - Progress hint cleared on final message.
+  - Progress hint cleared on session switch.
+  - Idempotent `init()` — calling twice registers listeners once.
+- No Playwright in M3 — manual end-to-end validation is the final gate.
 
 ---
 
