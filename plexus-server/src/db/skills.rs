@@ -65,9 +65,3 @@ pub async fn delete_skill(pool: &PgPool, user_id: &str, name: &str) -> Result<bo
         .await?;
     Ok(result.rows_affected() > 0)
 }
-
-pub async fn list_all(pool: &PgPool) -> Result<Vec<Skill>, sqlx::Error> {
-    sqlx::query_as::<_, Skill>("SELECT * FROM skills ORDER BY user_id, name")
-        .fetch_all(pool)
-        .await
-}

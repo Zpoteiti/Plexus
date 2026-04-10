@@ -254,15 +254,6 @@ Get the server-wide default soul.
 { "message": "Default soul updated" }
 ```
 
-### GET /api/admin/skills  (admin)
-
-List all skills across all users.
-
-```json
-// Response 200
-{ "skills": [{ "skill_id": "...", "user_id": "...", "name": "...", "description": "...", "always_on": false, "skill_path": "..." }] }
-```
-
 ### GET /api/admin/rate-limit  (admin)
 
 ```json
@@ -501,6 +492,42 @@ Create or update Discord bot config for the current user.
 ```json
 // Response 200
 { "message": "Discord config deleted" }
+```
+
+---
+
+## Telegram Config
+
+### POST /api/telegram-config  (auth required)
+
+Create or update Telegram bot config for the current user. Starts the bot immediately on success.
+
+```json
+// Request
+{ "bot_token": "123456:ABC...", "partner_telegram_id": "987654321", "allowed_users": ["user_id_1"], "group_policy": "mention" }
+
+// Response 200
+{ "user_id": "uuid", "enabled": true, "partner_telegram_id": "987654321", "allowed_users": ["user_id_1"], "group_policy": "mention" }
+```
+
+`group_policy` defaults to `"mention"` if omitted. Options: `"mention"` (respond only when @mentioned in groups), `"all"` (respond to all messages in groups).
+
+### GET /api/telegram-config  (auth required)
+
+```json
+// Response 200
+{ "user_id": "uuid", "enabled": true, "partner_telegram_id": "987654321", "allowed_users": ["..."], "group_policy": "mention" }
+```
+
+**Errors:** `404 Not Found` if Telegram not configured.
+
+### DELETE /api/telegram-config  (auth required)
+
+Stops the bot and removes config.
+
+```json
+// Response 200
+{ "message": "Telegram config deleted" }
 ```
 
 ---

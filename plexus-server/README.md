@@ -139,7 +139,6 @@ LLM configuration (`api_base`, `api_key`, `model`, `context_window`) is managed 
 |--------|------|-------------|
 | GET | `/api/admin/default-soul` | Get default soul (system prompt) |
 | PUT | `/api/admin/default-soul` | Set default soul |
-| GET | `/api/admin/skills` | List all users' skills |
 | GET | `/api/llm-config` | Get LLM configuration |
 | PUT | `/api/llm-config` | Update LLM configuration |
 | GET | `/api/server-mcp` | Get server MCP config |

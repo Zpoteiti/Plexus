@@ -161,19 +161,6 @@ async fn put_llm_config(
     Ok(Json(serde_json::json!({ "message": "LLM config updated" })))
 }
 
-// -- Admin Skills (list all) --
-
-async fn get_all_skills(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    admin_claims(&headers, &state)?;
-    let skills = crate::db::skills::list_all(&state.db)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
-    Ok(Json(serde_json::json!({ "skills": skills })))
-}
-
 // -- Server MCP --
 
 async fn get_server_mcp(
@@ -226,6 +213,5 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
             get(get_rate_limit).put(put_rate_limit),
         )
         .route("/api/llm-config", get(get_llm_config).put(put_llm_config))
-        .route("/api/admin/skills", get(get_all_skills))
         .route("/api/server-mcp", get(get_server_mcp).put(put_server_mcp))
 }
