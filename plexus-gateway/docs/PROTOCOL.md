@@ -150,12 +150,6 @@ With media:
 {"type": "auth_fail", "reason": "invalid token"}
 ```
 
-### `pong` -- keepalive response to server ping
-
-```json
-{"type": "pong"}
-```
-
 ---
 
 ## Plexus Server -> Gateway (`/ws/plexus`)
@@ -201,14 +195,6 @@ With metadata (progress indicator, media, fallback routing):
 }
 ```
 
-### `ping` -- keepalive
-
-Plexus-server sends these periodically so the gateway can detect a silent half-open connection. Gateway replies with `pong`. If plexus-server doesn't receive a pong within 30s, it reconnects.
-
-```json
-{"type": "ping"}
-```
-
 ---
 
 ## Auth Flows
@@ -246,18 +232,19 @@ When plexus-server sends a `send` message:
 3. **Progress vs final:** `metadata._progress == true` → emit as `progress` type; otherwise emit as `message` type.
 4. **Media extraction:** `metadata.media` array is forwarded to the browser when present.
 5. **Non-blocking delivery:**
-   - Progress frames: `try_send` — on full, the oldest queued progress frame is dropped. Progress is ephemeral.
-   - Final frames: `try_send` — on full, the browser is evicted from the DashMap and its writer task is signaled to close. A slow final-message consumer blocks every other browser, so we drop it entirely rather than head-of-line block the plexus read loop.
+   - Progress frames: `try_send` — on full, the incoming progress frame is dropped silently. Progress is ephemeral and the user already has a recent hint on screen.
+   - Final frames: `try_send` — on full, the browser is evicted: the gateway removes the entry from its `DashMap` and cancels the per-connection `CancellationToken`, which triggers the reader, writer, and keepalive tasks to exit. A slow final-message consumer cannot head-of-line block the `/ws/plexus` reader loop.
 6. **No match:** warning logged, message dropped silently.
 
 ---
 
 ## Keepalive & Liveness
 
-Both WebSocket endpoints use application-level ping/pong frames (distinct from the WebSocket protocol's built-in PING/PONG control frames, which some reverse proxies strip).
+**Browser ↔ Gateway:** the gateway sends application-level `{"type":"ping"}` frames every 30 seconds and expects `{"type":"pong"}` within 15 seconds. On timeout, the gateway cancels the per-connection `CancellationToken`, which causes the reader, writer, and keepalive tasks to exit and the `DashMap` entry to be removed. Application-level frames are used (not WebSocket control frames) because some reverse proxies strip control frames.
 
-- **Browser ↔ Gateway:** gateway sends `{"type":"ping"}` every 30 seconds. If no `{"type":"pong"}` arrives within 15 seconds, the gateway closes the connection and cleans up the DashMap entry.
-- **Plexus-server ↔ Gateway:** plexus-server sends `{"type":"ping"}` every 30 seconds. The gateway replies with `{"type":"pong"}`. If plexus-server doesn't see a pong within 30 seconds it closes and reconnects; the gateway similarly evicts its stored sink if no activity for 60 seconds.
+Pings use a dedicated bounded `mpsc::channel(4)` (the "control channel"), separate from the data channel that carries `message` / `progress` frames. The writer task does `tokio::select!` over both channels, so a full data channel cannot starve keepalives. The keepalive task holds only the control-channel sender, and it is `abort()`ed before the writer is awaited on disconnect.
+
+**Plexus-server ↔ Gateway:** no application-level keepalive in M3. The TCP keepalive and the plexus-server's own reconnect loop (1s → 30s exponential backoff) are relied on to detect dead connections. If operational experience shows this is insufficient, app-level keepalive can be added in a later milestone.
 
 ---
 
