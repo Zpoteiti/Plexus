@@ -57,8 +57,18 @@ export default function Chat() {
   const progress = sessionId ? (progressBySession[sessionId] ?? null) : null
   const isConnected = wsStatus === 'open'
 
+  // Non-gateway sessions (discord:…, telegram:…, cron:…) are read-only in the browser
+  const channel = sessionId?.split(':')[0] ?? 'gateway'
+  const isReadOnly = channel !== 'gateway'
+
+  const channelLabel: Record<string, string> = {
+    discord: 'Discord',
+    telegram: 'Telegram',
+    cron: 'Cron',
+  }
+
   function handleSend(content: string) {
-    if (!sessionId) return
+    if (!sessionId || isReadOnly) return
     sendMessage(sessionId, content)
   }
 
@@ -82,14 +92,20 @@ export default function Chat() {
                 {isConnected ? 'What can I help you with?' : 'Connecting to Plexus…'}
               </p>
             </div>
-            <ChatInput onSend={handleSend} disabled={!isConnected} />
+            {!isReadOnly && <ChatInput onSend={handleSend} disabled={!isConnected} />}
           </div>
         ) : (
           /* Active state */
           <>
             <MessageList messages={messages} progressHint={progress} />
             <div className="flex justify-center pb-4 pt-2">
-              <ChatInput onSend={handleSend} disabled={!isConnected} />
+              {isReadOnly ? (
+                <p className="text-xs px-4 py-2 rounded-lg" style={{ color: 'var(--muted)', border: '1px solid var(--border)' }}>
+                  Read-only — send messages via {channelLabel[channel] ?? channel}
+                </p>
+              ) : (
+                <ChatInput onSend={handleSend} disabled={!isConnected} />
+              )}
             </div>
           </>
         )}
