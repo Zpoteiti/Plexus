@@ -1,0 +1,189 @@
+import { create } from 'zustand'
+import { api } from '../lib/api'
+import { wsManager, WsStatus } from '../lib/ws'
+import type { Session, ChatMessage, ApiMessage } from '../lib/types'
+
+interface ChatState {
+  sessions: Session[]
+  currentSessionId: string | null
+  messagesBySession: Record<string, ChatMessage[]>
+  restLoadedSessions: Set<string>
+  progressBySession: Record<string, string | null>
+  wsStatus: WsStatus
+
+  init: () => void
+  loadSessions: () => Promise<void>
+  loadMessages: (sessionId: string) => Promise<void>
+  setCurrentSession: (sessionId: string | null) => void
+  sendMessage: (sessionId: string, content: string, media?: string[]) => void
+  handleIncomingMessage: (sessionId: string, content: string, media?: string[] | undefined) => void
+  setProgressHint: (sessionId: string, hint: string) => void
+  clearProgress: (sessionId: string) => void
+  handleError: (reason: string) => void
+}
+
+// Module-level init guard (survives React StrictMode double-invocations)
+let initialized = false
+let unsubMsg: (() => void) | null = null
+let unsubStatus: (() => void) | null = null
+
+export const useChatStore = create<ChatState>((set, get) => ({
+  sessions: [],
+  currentSessionId: null,
+  messagesBySession: {},
+  restLoadedSessions: new Set(),
+  progressBySession: {},
+  wsStatus: 'closed',
+
+  init: () => {
+    if (initialized) return
+    initialized = true
+
+    unsubMsg = wsManager.onMessage((data) => {
+      const store = get()
+      const sessionId = data['session_id'] as string | undefined
+      if (!sessionId) return
+
+      if (data['type'] === 'message') {
+        store.handleIncomingMessage(
+          sessionId,
+          data['content'] as string,
+          data['media'] as string[] | undefined,
+        )
+      } else if (data['type'] === 'progress') {
+        store.setProgressHint(sessionId, data['content'] as string)
+      } else if (data['type'] === 'error') {
+        store.handleError((data['reason'] as string | undefined) ?? 'Unknown error')
+      }
+    })
+
+    unsubStatus = wsManager.onStatus((status) => {
+      set({ wsStatus: status })
+    })
+
+    set({ wsStatus: wsManager.getStatus() })
+  },
+
+  loadSessions: async () => {
+    const sessions = await api.get<Session[]>('/api/sessions')
+    set({ sessions })
+  },
+
+  loadMessages: async (sessionId) => {
+    // Guard: only load once per session per page load
+    if (get().restLoadedSessions.has(sessionId)) return
+
+    const apiMsgs = await api.get<ApiMessage[]>(
+      `/api/sessions/${sessionId}/messages?limit=200`,
+    )
+
+    const msgs: ChatMessage[] = apiMsgs.map(m => ({
+      id: m.message_id,
+      session_id: m.session_id,
+      role: m.role,
+      content: m.content,
+      created_at: m.created_at,
+    }))
+
+    set(s => {
+      const existing = s.messagesBySession[sessionId] ?? []
+      // Prepend REST history; preserve any WS messages that arrived during fetch
+      const merged = [...msgs, ...existing].sort(
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+      )
+      const loaded = new Set(s.restLoadedSessions)
+      loaded.add(sessionId)
+      return {
+        messagesBySession: { ...s.messagesBySession, [sessionId]: merged },
+        restLoadedSessions: loaded,
+      }
+    })
+  },
+
+  setCurrentSession: (sessionId) => {
+    set(s => ({
+      currentSessionId: sessionId,
+      // Clear progress hint for the previous session on switch
+      progressBySession: s.currentSessionId
+        ? { ...s.progressBySession, [s.currentSessionId]: null }
+        : s.progressBySession,
+    }))
+  },
+
+  sendMessage: (sessionId, content, media) => {
+    // Optimistic local echo
+    const localMsg: ChatMessage = {
+      id: crypto.randomUUID(),
+      session_id: sessionId,
+      role: 'user',
+      content,
+      media,
+      created_at: new Date().toISOString(),
+    }
+    set(s => ({
+      messagesBySession: {
+        ...s.messagesBySession,
+        [sessionId]: [...(s.messagesBySession[sessionId] ?? []), localMsg],
+      },
+    }))
+
+    wsManager.send({
+      type: 'message',
+      session_id: sessionId,
+      content,
+      ...(media && media.length > 0 ? { media } : {}),
+    })
+  },
+
+  handleIncomingMessage: (sessionId, content, media) => {
+    const msg: ChatMessage = {
+      id: crypto.randomUUID(),
+      session_id: sessionId,
+      role: 'assistant',
+      content,
+      media,
+      created_at: new Date().toISOString(),
+    }
+    set(s => ({
+      messagesBySession: {
+        ...s.messagesBySession,
+        [sessionId]: [...(s.messagesBySession[sessionId] ?? []), msg],
+      },
+      // Clear progress when a final message arrives
+      progressBySession: { ...s.progressBySession, [sessionId]: null },
+    }))
+  },
+
+  setProgressHint: (sessionId, hint) => {
+    set(s => ({
+      progressBySession: { ...s.progressBySession, [sessionId]: hint },
+    }))
+  },
+
+  clearProgress: (sessionId) => {
+    set(s => ({
+      progressBySession: { ...s.progressBySession, [sessionId]: null },
+    }))
+  },
+
+  handleError: (reason) => {
+    console.warn('[plexus] WS error:', reason)
+  },
+}))
+
+// Cleanup for logout / tests
+export function resetChatStore() {
+  initialized = false
+  unsubMsg?.()
+  unsubStatus?.()
+  unsubMsg = null
+  unsubStatus = null
+  useChatStore.setState({
+    sessions: [],
+    currentSessionId: null,
+    messagesBySession: {},
+    restLoadedSessions: new Set(),
+    progressBySession: {},
+    wsStatus: 'closed',
+  })
+}
