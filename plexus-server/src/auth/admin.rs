@@ -199,6 +199,8 @@ async fn put_server_mcp(
         .await
         .reinitialize(&req.mcp_servers)
         .await;
+    // Server MCP tools are shared — invalidate cache for all users
+    state.tool_schema_cache.clear();
     Ok(Json(serde_json::json!({ "mcp_servers": req.mcp_servers })))
 }
 
