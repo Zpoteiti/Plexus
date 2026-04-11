@@ -14,8 +14,9 @@
   box-sizing: border-box;
 }
 
-/* Scale UI proportionally on larger screens */
-@media (min-width: 2000px) { :root { zoom: 1.2; } }
+/* Scale UI proportionally by screen size */
+@media (max-width: 1024px) { :root { zoom: 0.85; } }
+@media (min-width: 2000px) { :root { zoom: 1.2;  } }
 @media (min-width: 2560px) { :root { zoom: 1.35; } }
 @media (min-width: 3840px) { :root { zoom: 1.75; } }
 
