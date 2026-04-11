@@ -14,6 +14,7 @@ interface ChatState {
   init: () => void
   loadSessions: () => Promise<void>
   loadMessages: (sessionId: string) => Promise<void>
+  deleteSessions: (sessionIds: string[]) => Promise<void>
   setCurrentSession: (sessionId: string | null) => void
   sendMessage: (sessionId: string, content: string, media?: string[]) => void
   handleIncomingMessage: (sessionId: string, content: string, media?: string[] | undefined) => void
@@ -67,6 +68,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   loadSessions: async () => {
     const sessions = await api.get<Session[]>('/api/sessions')
     set({ sessions })
+  },
+
+  deleteSessions: async (sessionIds) => {
+    await Promise.all(sessionIds.map(id => api.delete(`/api/sessions/${id}`).catch(() => {})))
+    set(s => ({
+      sessions: s.sessions.filter(s => !sessionIds.includes(s.session_id)),
+      messagesBySession: Object.fromEntries(
+        Object.entries(s.messagesBySession).filter(([id]) => !sessionIds.includes(id))
+      ),
+    }))
   },
 
   loadMessages: async (sessionId) => {
