@@ -8,6 +8,7 @@ interface AuthState {
   userId: string | null
   isAdmin: boolean
   login: (email: string, password: string) => Promise<void>
+  register: (email: string, password: string, adminToken?: string) => Promise<void>
   logout: () => void
 }
 
@@ -28,6 +29,23 @@ export const useAuthStore = create<AuthState>()(
           const errObj = body?.['error'] as Record<string, unknown> | undefined
           const msg = errObj?.['message']
           throw new Error(typeof msg === 'string' ? msg : 'Login failed')
+        }
+        const data = await res.json() as { token: string; user_id: string; is_admin: boolean }
+        set({ token: data.token, userId: data.user_id, isAdmin: data.is_admin })
+      },
+      register: async (email, password, adminToken) => {
+        const body: Record<string, string> = { email, password }
+        if (adminToken) body['admin_token'] = adminToken
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({})) as Record<string, unknown>
+          const errObj = data?.['error'] as Record<string, unknown> | undefined
+          const msg = errObj?.['message']
+          throw new Error(typeof msg === 'string' ? msg : 'Registration failed')
         }
         const data = await res.json() as { token: string; user_id: string; is_admin: boolean }
         set({ token: data.token, userId: data.user_id, isAdmin: data.is_admin })
