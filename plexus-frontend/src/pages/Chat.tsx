@@ -12,7 +12,8 @@ import ChatInput from '../components/ChatInput'
 export default function Chat() {
   const { sessionId } = useParams<{ sessionId: string }>()
   const navigate = useNavigate()
-  const { token, userId } = useAuthStore(s => ({ token: s.token, userId: s.userId }))
+  const token = useAuthStore(s => s.token)
+  const userId = useAuthStore(s => s.userId)
   const {
     init,
     loadSessions,
