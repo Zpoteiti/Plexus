@@ -31,29 +31,36 @@ function markDone() {
 export default function Wizard() {
   const [step, setStep] = useState<number | null>(null) // null = loading
   const navigate = useNavigate()
+  const isAdmin = useAuthStore(s => s.isAdmin)
 
   // Detect starting step: check LLM then Soul server-side
   useEffect(() => {
     async function detectStart() {
       try {
-        const [profile, llm, soul] = await Promise.all([
-          api.get<{ display_name: string | null }>('/api/user/profile').catch(() => ({ display_name: null })),
+        const profile = await api.get<{ display_name: string | null }>('/api/user/profile')
+          .catch(() => ({ display_name: null }))
+        const nameSet = (profile as { display_name: string | null }).display_name?.trim() !== '' &&
+                        (profile as { display_name: string | null }).display_name != null
+
+        if (!nameSet) { setStep(0); return }
+
+        // Non-admins only need the name step
+        if (!isAdmin) { markDone(); navigate('/chat', { replace: true }); return }
+
+        // Admins: check LLM + Soul progress
+        const [llm, soul] = await Promise.all([
           api.get<LlmConfig | { status: string }>('/api/llm-config').catch(() => ({ status: 'not_configured' })),
           api.get<{ soul: string }>('/api/admin/default-soul').catch(() => ({ soul: '' })),
         ])
-        const nameSet = (profile as { display_name: string | null }).display_name?.trim() !== '' &&
-                        (profile as { display_name: string | null }).display_name != null
         const llmConfigured = !('status' in llm) || (llm as { status: string }).status !== 'not_configured'
         const soulConfigured = (soul as { soul: string }).soul?.trim() !== ''
-        if (nameSet && llmConfigured && soulConfigured) {
+        if (llmConfigured && soulConfigured) {
           markDone()
           navigate('/chat', { replace: true })
-        } else if (nameSet && llmConfigured) {
+        } else if (llmConfigured) {
           setStep(2) // Resume at Soul
-        } else if (nameSet) {
-          setStep(1) // Resume at LLM
         } else {
-          setStep(0) // Start at Your Name
+          setStep(1) // Resume at LLM
         }
       } catch {
         setStep(0)
@@ -68,6 +75,8 @@ export default function Wizard() {
   }
 
   function next() {
+    // Non-admins only need the name step
+    if (step === 0 && !isAdmin) { finish(); return }
     if (step !== null && step < STEPS.length - 1) setStep(s => (s ?? 0) + 1)
     else finish()
   }

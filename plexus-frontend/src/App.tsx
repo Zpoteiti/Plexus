@@ -20,11 +20,15 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-// Redirect first-time admins to the setup wizard
+// Redirect all users without a display name, and admins who haven't finished setup
 function RequireSetup({ children }: { children: React.ReactNode }) {
   const token = useAuthStore(s => s.token)
   const isAdmin = useAuthStore(s => s.isAdmin)
+  const displayName = useAuthStore(s => s.displayName)
   if (!token) return <Navigate to="/login" replace />
+  // Everyone must set a name first
+  if (!displayName) return <Navigate to="/setup" replace />
+  // Admins must also complete the full setup wizard
   if (isAdmin && !localStorage.getItem(WIZARD_KEY)) return <Navigate to="/setup" replace />
   return <>{children}</>
 }
@@ -39,7 +43,7 @@ export default function App() {
         <Route path="/chat/:sessionId" element={<RequireSetup><Chat /></RequireSetup>} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
         <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
-        <Route path="/setup" element={<RequireAdmin><Wizard /></RequireAdmin>} />
+        <Route path="/setup" element={<RequireAuth><Wizard /></RequireAuth>} />
         <Route path="*" element={<Navigate to="/chat" replace />} />
       </Routes>
     </BrowserRouter>
