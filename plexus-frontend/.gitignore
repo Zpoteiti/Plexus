@@ -1,0 +1,7 @@
+# Override root gitignore — these files are needed for the frontend
+!package.json
+!package-lock.json
+
+# Ignore node_modules and build output
+node_modules/
+dist/
