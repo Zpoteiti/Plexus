@@ -95,13 +95,15 @@ export default function Wizard() {
             </span>
             <p className="mt-1 text-xs" style={{ color: 'var(--muted)' }}>Setup &amp; Configuration</p>
           </div>
-          <button
-            onClick={finish}
-            className="text-xs px-3 py-1.5 rounded-lg border transition-colors hover:border-[var(--accent)]"
-            style={{ color: 'var(--muted)', borderColor: 'var(--border)', background: 'transparent' }}
-          >
-            Skip all
-          </button>
+          {step !== 0 && (
+            <button
+              onClick={finish}
+              className="text-xs px-3 py-1.5 rounded-lg border transition-colors hover:border-[var(--accent)]"
+              style={{ color: 'var(--muted)', borderColor: 'var(--border)', background: 'transparent' }}
+            >
+              Skip all
+            </button>
+          )}
         </div>
 
         {/* Progress dots */}
@@ -132,7 +134,7 @@ export default function Wizard() {
         </div>
 
         {/* Step content */}
-        {step === 0 && <NameStep onNext={next} onSkip={next} />}
+        {step === 0 && <NameStep onNext={next} />}
         {step === 1 && <LlmStep onNext={next} onSkip={next} />}
         {step === 2 && <SoulStep onNext={next} onSkip={next} />}
         {step === 3 && <RateLimitStep onNext={next} onSkip={next} />}
@@ -144,7 +146,7 @@ export default function Wizard() {
 
 // ── Step: Your Name ───────────────────────────────────────────────────────────
 
-function NameStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
+function NameStep({ onNext }: { onNext: () => void }) {
   const [name, setName] = useState('')
   const [msg, setMsg] = useState('')
   const [loading, setLoading] = useState(false)
@@ -152,7 +154,7 @@ function NameStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }
 
   async function handleSave(e: FormEvent) {
     e.preventDefault()
-    if (!name.trim()) { onSkip(); return }
+    if (!name.trim()) return
     setLoading(true)
     try {
       await api.patch('/api/user/display-name', { display_name: name.trim() })
@@ -171,9 +173,17 @@ function NameStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }
         value={name}
         onChange={setName}
         placeholder="e.g. Yucheng"
+        required
       />
       {msg && <p className="text-xs text-red-400">{msg}</p>}
-      <StepButtons loading={loading} onSkip={onSkip} saveLabel="Save & Continue" />
+      <button
+        type="submit"
+        disabled={loading || !name.trim()}
+        className="self-start px-5 py-2 rounded-lg text-sm font-semibold tracking-wider uppercase transition-all disabled:opacity-50 cursor-pointer"
+        style={{ background: 'var(--accent)', color: '#000', boxShadow: loading ? 'none' : '0 0 10px var(--accent)' }}
+      >
+        {loading ? 'Saving…' : 'Continue'}
+      </button>
     </form>
   )
 }
@@ -342,8 +352,8 @@ function McpStep({ onNext, onSkip, isLast }: { onNext: () => void; onSkip: () =>
 
 // ── Shared primitives ─────────────────────────────────────────────────────────
 
-function WizardField({ label, value, onChange, type = 'text', placeholder }: {
-  label: string; value: string; onChange: (v: string) => void; type?: string; placeholder?: string
+function WizardField({ label, value, onChange, type = 'text', placeholder, required }: {
+  label: string; value: string; onChange: (v: string) => void; type?: string; placeholder?: string; required?: boolean
 }) {
   return (
     <div className="flex flex-col gap-1">
@@ -353,6 +363,7 @@ function WizardField({ label, value, onChange, type = 'text', placeholder }: {
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
+        required={required}
         className="rounded-lg px-3 py-2 text-sm outline-none border focus:border-[#39ff14] transition-colors"
         style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
       />
