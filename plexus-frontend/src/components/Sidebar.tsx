@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { MessageSquare, Plus, ChevronLeft, ChevronRight, Settings, Shield } from 'lucide-react'
+import { MessageSquare, Plus, ChevronLeft, ChevronRight, Settings, Shield, LogOut } from 'lucide-react'
 import { useChatStore } from '../store/chat'
 import { useAuthStore } from '../store/auth'
 
@@ -9,6 +9,7 @@ export default function Sidebar() {
   const { sessionId: activeId } = useParams<{ sessionId: string }>()
   const sessions = useChatStore(s => s.sessions)
   const isAdmin = useAuthStore(s => s.isAdmin)
+  const logout = useAuthStore(s => s.logout)
   const navigate = useNavigate()
 
   function newSession() {
@@ -106,6 +107,15 @@ export default function Sidebar() {
             {!collapsed && <span>Admin</span>}
           </button>
         )}
+        <button
+          onClick={() => { logout(); navigate('/login', { replace: true }) }}
+          className="flex items-center gap-2 w-full rounded-lg px-2 py-1.5 text-xs transition-colors hover:bg-[#1a2332]"
+          style={{ color: 'var(--muted)' }}
+          title="Log out"
+        >
+          <LogOut size={14} />
+          {!collapsed && <span>Log out</span>}
+        </button>
       </div>
     </aside>
   )
