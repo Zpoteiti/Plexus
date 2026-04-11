@@ -27,8 +27,34 @@ function markDone() {
 // ── Shell ──────────────────────────────────────────────────────────────────────
 
 export default function Wizard() {
-  const [step, setStep] = useState(0) // 0-indexed
+  const [step, setStep] = useState<number | null>(null) // null = loading
   const navigate = useNavigate()
+
+  // Detect starting step: check LLM then Soul server-side
+  useEffect(() => {
+    async function detectStart() {
+      try {
+        const [llm, soul] = await Promise.all([
+          api.get<LlmConfig | { status: string }>('/api/llm-config').catch(() => ({ status: 'not_configured' })),
+          api.get<{ soul: string }>('/api/admin/default-soul').catch(() => ({ soul: '' })),
+        ])
+        const llmConfigured = !('status' in llm) || (llm as { status: string }).status !== 'not_configured'
+        const soulConfigured = (soul as { soul: string }).soul?.trim() !== ''
+        if (llmConfigured && soulConfigured) {
+          // Both set — skip wizard for this admin
+          markDone()
+          navigate('/chat', { replace: true })
+        } else if (llmConfigured) {
+          setStep(1) // Resume at Soul
+        } else {
+          setStep(0) // Start at LLM
+        }
+      } catch {
+        setStep(0)
+      }
+    }
+    void detectStart()
+  }, [navigate])
 
   function finish() {
     markDone()
@@ -36,8 +62,17 @@ export default function Wizard() {
   }
 
   function next() {
-    if (step < STEPS.length - 1) setStep(s => s + 1)
+    if (step !== null && step < STEPS.length - 1) setStep(s => (s ?? 0) + 1)
     else finish()
+  }
+
+  // Loading state
+  if (step === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--bg)' }}>
+        <span className="text-xs" style={{ color: 'var(--muted)' }}>Loading…</span>
+      </div>
+    )
   }
 
   const current = STEPS[step]
