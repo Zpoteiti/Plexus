@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { api } from '../lib/api'
+import { useAuthStore } from '../store/auth'
 import type {
   User,
   Device,
@@ -76,6 +77,8 @@ function ProfileTab() {
   const [memory, setMemory] = useState('')
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
+  const logout = useAuthStore(s => s.logout)
+  const navigate = useNavigate()
 
   useEffect(() => {
     void (async () => {
@@ -151,6 +154,18 @@ function ProfileTab() {
       </Section>
 
       {msg && <p className="text-xs" style={{ color: 'var(--accent)' }}>{msg}</p>}
+
+      <Section title="Session">
+        <button
+          onClick={() => { logout(); navigate('/login', { replace: true }) }}
+          className="self-start px-4 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wider transition-colors"
+          style={{ color: '#ef4444', border: '1px solid #ef4444', background: 'transparent' }}
+          onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(239,68,68,0.1)' }}
+          onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
+        >
+          Log Out
+        </button>
+      </Section>
     </div>
   )
 }
