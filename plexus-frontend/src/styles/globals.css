@@ -14,11 +14,29 @@
   box-sizing: border-box;
 }
 
-/* Scale UI proportionally by screen size */
-@media (max-width: 1024px) { :root { zoom: 0.85; } }
-@media (min-width: 2000px) { :root { zoom: 1.2;  } }
-@media (min-width: 2560px) { :root { zoom: 1.35; } }
-@media (min-width: 3840px) { :root { zoom: 1.75; } }
+/* Scale UI proportionally by screen size.
+   vh units are pre-zoom CSS px, so h-screen / min-h-screen must be
+   divided by the zoom factor to fill exactly the visible viewport. */
+@media (max-width: 1024px) {
+  :root        { zoom: 0.85; }
+  .h-screen    { height:     calc(100vh / 0.85) !important; }
+  .min-h-screen{ min-height: calc(100vh / 0.85) !important; }
+}
+@media (min-width: 2000px) {
+  :root        { zoom: 1.2; }
+  .h-screen    { height:     calc(100vh / 1.2) !important; }
+  .min-h-screen{ min-height: calc(100vh / 1.2) !important; }
+}
+@media (min-width: 2560px) {
+  :root        { zoom: 1.35; }
+  .h-screen    { height:     calc(100vh / 1.35) !important; }
+  .min-h-screen{ min-height: calc(100vh / 1.35) !important; }
+}
+@media (min-width: 3840px) {
+  :root        { zoom: 1.75; }
+  .h-screen    { height:     calc(100vh / 1.75) !important; }
+  .min-h-screen{ min-height: calc(100vh / 1.75) !important; }
+}
 
 body {
   margin: 0;
