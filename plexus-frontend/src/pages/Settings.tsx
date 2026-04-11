@@ -149,7 +149,7 @@ function ProfileTab() {
                 type="text"
                 value={displayName}
                 onChange={e => setDisplayName(e.target.value)}
-                placeholder="e.g. Bob"
+                placeholder="Your name (shown in chat and to the agent)"
                 className="flex-1 rounded-lg px-3 py-2 text-sm outline-none border"
                 style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
               />
