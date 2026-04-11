@@ -390,7 +390,28 @@ async fn execute_tool_call(
         }
     };
 
-    // TODO: server MCP routing (device_name == "server" for MCP)
+    // Server MCP tools (device_name == "server")
+    if device_name == "server" {
+        let mut args_without_device = args.clone();
+        if let Some(obj) = args_without_device.as_object_mut() {
+            obj.remove("device_name");
+        }
+        let result = state
+            .server_mcp
+            .read()
+            .await
+            .call_tool(tool_name, args_without_device)
+            .await;
+        let (exit_code, output) = match result {
+            Ok(out) => (0, out),
+            Err(e) => (1, e),
+        };
+        return plexus_common::protocol::ToolExecutionResult {
+            request_id: String::new(),
+            exit_code,
+            output,
+        };
+    }
 
     // Route to client device
     crate::tools_registry::route_to_device(state, user_id, &device_name, tool_name, args).await
