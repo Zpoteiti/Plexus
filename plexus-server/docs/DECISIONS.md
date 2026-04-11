@@ -323,3 +323,38 @@ To reply here, respond with text directly. To send media, use the message tool w
 Each channel (Discord, Telegram, Gateway) constructs a `ChannelIdentity` with sender info and whether the sender is the partner or an authorized non-partner. For non-partner senders, the prompt includes a security warning. Gateway/cron default to partner identity.
 
 **Outcome:** The agent knows who it's talking to, can address them by name, and has the exact channel + chat_id needed for the message tool. Non-partner users get an untrusted-input wrapper on their messages plus a system prompt warning -- defense in depth against prompt injection via authorized guests.
+
+---
+
+## ADR-27: Server MCP is lightweight and shared; heavy MCPs belong on client devices
+
+**Context:** Server MCP servers (admin-configured via `PUT /api/server-mcp`) run as child processes on the Plexus server machine and are shared across all users. A pool of connections per MCP server was considered to handle ~1K concurrent users.
+
+**Decision:** No connection pool. One persistent child process per server MCP entry. Server MCP is restricted by policy to lightweight, cloud API-proxy style servers (e.g. web search, image understanding via external APIs). Heavy, resource-intensive MCPs (local filesystem tools, computation, single-threaded binaries) are not appropriate for server MCP -- users who need them configure their own MCP servers on their own client devices via the web UI (Settings > Devices).
+
+**Rationale:**
+- API-proxy MCPs are I/O-bound and handle concurrency internally (async HTTP to external API). One child process handles 1K parallel calls without queuing.
+- MCP protocol is JSON-RPC with request IDs -- rmcp multiplexes concurrent calls on one connection naturally.
+- The real bottleneck at scale is LLM API rate limits, not MCP call throughput.
+- A pool would multiply child process memory × N with no clear benefit for the intended workload.
+- Policy separation eliminates the problem: if a user needs a heavy local MCP, it runs on their device, using their hardware, and doesn't affect other users.
+
+**Outcome:** Simple, single-connection MCP manager. If a server MCP ever becomes a bottleneck (observable via call queue depth under load), a semaphore-limited process pool can be added then -- not speculative upfront design.
+
+---
+
+## ADR-28: Three-tier tool schema merge with unified device_name enum
+
+**Context:** The agent sees tools from three sources: native server tools, server MCP tools (admin-configured), and client tools (native + MCP). A user and an admin may independently configure the same MCP server (e.g. "minimax") with different API keys -- one on the server, one on a client device. The merge strategy must present a clean tool list to the LLM without duplicating tool descriptions.
+
+**Decision:** Three distinct tiers with different merge rules:
+
+1. **Native server tools** (e.g. `web_fetch`, `save_memory`): emitted as-is, no `device_name`. Always run on the server. Never deduped.
+
+2. **MCP tools** (`mcp_{server}_{tool}` prefix): dedup key = full prefixed name. `mcp_minimax_web_search` and `mcp_anthropic_web_search` are distinct keys -- never merged across MCP server names. Sources from server MCP ("server") and client devices accumulate into a single `device_name` enum per key. The agent selects which source to use by specifying `device_name`.
+
+3. **Client native tools** (e.g. `read_file`, `shell`): no prefix, dedup key = bare tool name. `device_name` enum = all client devices that have the tool. Server injects the enum -- client never injects its own `device_name`.
+
+**Example:** Admin configures "minimax" MCP on server (tools: `web_search`, `image_understanding`). User configures the same "minimax" MCP on their `linux_devbox`. Agent sees one tool `mcp_minimax_web_search` with `device_name: enum["server", "linux_devbox"]` -- two sources, one schema.
+
+**Outcome:** LLM sees a clean, deduplicated tool list. Overlapping MCP installs collapse into one tool with a source selector. Different MCP server names never collide regardless of shared tool names. Client native tools remain simple with device routing injected transparently.

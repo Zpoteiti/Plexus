@@ -1,11 +1,19 @@
 //! Tool schema merging, device_name injection, and tool call routing.
-//! Server tools have no device_name. Client + MCP tools get device_name enum.
+//!
+//! Three categories:
+//! - Native server tools (e.g. web_fetch): no device_name, emitted as-is.
+//! - MCP tools (mcp_{server}_{tool}): from server MCP and/or client devices.
+//!   Dedup key = full prefixed name. device_name enum = "server" + any client
+//!   devices that also have it. mcp_minimax_* and mcp_anthropic_* never merged.
+//! - Client native tools (e.g. read_file): device_name enum = all client devices
+//!   that have the tool.
 
 use crate::state::AppState;
 use futures_util::SinkExt;
 use plexus_common::consts::TOOL_EXECUTION_TIMEOUT_SEC;
 use plexus_common::protocol::{ExecuteToolRequest, ServerToClient, ToolExecutionResult};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -18,10 +26,10 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
 
     let mut schemas = Vec::new();
 
-    // 1. Server native tool schemas (no device_name)
+    // 1. Native server tools — no device_name, emitted as-is.
     schemas.extend(crate::server_tools::tool_schemas());
 
-    // 2. Collect device names and their tools
+    // 2. Collect all client device tools: (device_name, tool_schema)
     let mut device_tools: Vec<(String, Vec<Value>)> = Vec::new();
     if let Some(keys) = state.devices_by_user.get(user_id) {
         for key in keys.value() {
@@ -31,64 +39,74 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
         }
     }
 
-    // 3. Build online device name list
-    let device_names: Vec<String> = device_tools.iter().map(|(n, _)| n.clone()).collect();
+    // 3. Build two accumulation maps keyed by tool name:
+    //    - mcp_sources: mcp_* tools → ordered list of device names (may include "server")
+    //    - native_sources: non-mcp client tools → ordered list of device names
+    //    - representative: first schema seen for each key (used as template)
+    let mut mcp_sources: HashMap<String, Vec<String>> = HashMap::new();
+    let mut native_sources: HashMap<String, Vec<String>> = HashMap::new();
+    let mut representatives: HashMap<String, Value> = HashMap::new();
 
-    // 4. Merge client tools with device_name enum
-    // Collect unique tool names across all devices
-    let mut seen_tools: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
+    // 3a. Seed mcp_sources from server MCP ("server" device).
+    for schema in state.server_mcp.try_read().map(|g| g.tool_schemas()).unwrap_or_default() {
+        let name = tool_name(&schema).to_string();
+        if name.is_empty() { continue; }
+        mcp_sources.entry(name.clone()).or_default().push("server".to_string());
+        representatives.entry(name).or_insert(schema);
+    }
+
+    // 3b. Accumulate client tools into mcp_sources or native_sources.
     for (device_name, tools) in &device_tools {
-        for tool in tools {
-            let name = tool
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !name.is_empty() {
-                seen_tools
-                    .entry(name)
-                    .or_default()
-                    .push(device_name.clone());
+        for schema in tools {
+            let name = tool_name(schema).to_string();
+            if name.is_empty() { continue; }
+            if name.starts_with("mcp_") {
+                mcp_sources.entry(name.clone()).or_default().push(device_name.clone());
+            } else {
+                native_sources.entry(name.clone()).or_default().push(device_name.clone());
             }
+            representatives.entry(name).or_insert_with(|| schema.clone());
         }
     }
 
-    // For each unique tool, create schema with device_name enum
-    for (device_name, tools) in &device_tools {
-        for tool in tools {
-            let name = tool
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("");
-            if name.is_empty() {
-                continue;
-            }
-
-            // Skip if we already added this tool (from another device)
-            if let Some(devices) = seen_tools.get(name) {
-                if devices.first().map(|d| d.as_str()) != Some(device_name) {
-                    continue; // Already added from first device
-                }
-            }
-
-            let available_devices = seen_tools.get(name).cloned().unwrap_or_default();
-
-            // TODO: Also include "server" if server MCP has this tool name
-            let mut schema = tool.clone();
-            inject_device_name_enum(&mut schema, &available_devices);
+    // 4. Emit MCP tools — one schema per unique mcp_* name, device_name enum = all sources.
+    let mut mcp_keys: Vec<String> = mcp_sources.keys().cloned().collect();
+    mcp_keys.sort();
+    for name in mcp_keys {
+        let devices = &mcp_sources[&name];
+        if let Some(template) = representatives.get(&name) {
+            let mut schema = template.clone();
+            inject_device_name_enum(&mut schema, devices);
             schemas.push(schema);
         }
     }
 
-    // Cache result (wrapped in Arc for cheap clones on cache hits)
+    // 5. Emit client native tools — one schema per unique name, device_name enum = all devices.
+    let mut native_keys: Vec<String> = native_sources.keys().cloned().collect();
+    native_keys.sort();
+    for name in native_keys {
+        let devices = &native_sources[&name];
+        if let Some(template) = representatives.get(&name) {
+            let mut schema = template.clone();
+            inject_device_name_enum(&mut schema, devices);
+            schemas.push(schema);
+        }
+    }
+
+    // Cache result
     state
         .tool_schema_cache
         .insert(user_id.to_string(), Arc::new(schemas.clone()));
 
     schemas
+}
+
+fn tool_name(schema: &Value) -> &str {
+    schema
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
 }
 
 /// Inject device_name enum into a tool schema's parameters.
