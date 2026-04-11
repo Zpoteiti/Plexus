@@ -234,7 +234,7 @@ function ServerMcpTab() {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-xs" style={{ color: 'var(--muted)' }}>
-        Admin-configured MCP servers shared across all users. Use lightweight, API-proxy style servers only (ADR-27).
+        MCP servers available to all users on this instance.
       </p>
       <textarea
         value={json}
