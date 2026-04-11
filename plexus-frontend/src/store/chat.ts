@@ -88,13 +88,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       `/api/sessions/${sessionId}/messages?limit=200`,
     )
 
-    const msgs: ChatMessage[] = apiMsgs.map(m => ({
-      id: m.message_id,
-      session_id: m.session_id,
-      role: m.role,
-      content: m.content,
-      created_at: m.created_at,
-    }))
+    // Filter to only user and assistant text messages — tool calls and tool
+    // results are internal LLM context and should never be shown in the UI
+    const msgs: ChatMessage[] = apiMsgs
+      .filter(m => m.role === 'user' || (m.role === 'assistant' && !m.tool_name && m.content?.trim()))
+      .map(m => ({
+        id: m.message_id,
+        session_id: m.session_id,
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+        created_at: m.created_at,
+      }))
 
     set(s => {
       const existing = s.messagesBySession[sessionId] ?? []

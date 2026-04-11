@@ -30,8 +30,10 @@ export interface ChatMessage {
 export interface ApiMessage {
   message_id: string
   session_id: string
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'tool'
   content: string
+  tool_name: string | null
+  tool_call_id: string | null
   created_at: string
 }
 
