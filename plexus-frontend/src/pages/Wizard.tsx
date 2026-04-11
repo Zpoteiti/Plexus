@@ -181,7 +181,7 @@ function NameStep({ onNext }: { onNext: () => void }) {
         label="Your Name"
         value={name}
         onChange={setName}
-        placeholder="e.g. Yucheng"
+        placeholder="e.g. Bob"
         required
       />
       {msg && <p className="text-xs text-red-400">{msg}</p>}
