@@ -31,6 +31,7 @@ async fn get_profile(
         "user_id": user.user_id,
         "email": user.email,
         "is_admin": user.is_admin,
+        "display_name": user.display_name,
         "created_at": user.created_at.to_rfc3339(),
     })))
 }
@@ -64,6 +65,30 @@ async fn patch_soul(
         .await
         .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
     Ok(Json(serde_json::json!({ "message": "Soul updated" })))
+}
+
+// -- Display Name --
+
+#[derive(Deserialize)]
+struct DisplayNameUpdate {
+    display_name: String,
+}
+
+async fn patch_display_name(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DisplayNameUpdate>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let c = claims(&headers, &state)?;
+    let name = if req.display_name.trim().is_empty() {
+        None
+    } else {
+        Some(req.display_name.trim())
+    };
+    crate::db::users::update_display_name(&state.db, &c.sub, name)
+        .await
+        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
+    Ok(Json(serde_json::json!({ "message": "Display name updated" })))
 }
 
 // -- Memory --
@@ -213,6 +238,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/user/profile", get(get_profile))
         .route("/api/user/soul", get(get_soul).patch(patch_soul))
+        .route("/api/user/display-name", patch(patch_display_name))
         .route("/api/user/memory", get(get_memory).patch(patch_memory))
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{session_id}", delete(delete_session))

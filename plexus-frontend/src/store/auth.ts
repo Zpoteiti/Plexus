@@ -7,9 +7,11 @@ interface AuthState {
   token: string | null
   userId: string | null
   isAdmin: boolean
+  displayName: string | null
   login: (email: string, password: string) => Promise<void>
   register: (email: string, password: string, adminToken?: string) => Promise<void>
   logout: () => void
+  refreshProfile: () => Promise<void>
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -18,6 +20,7 @@ export const useAuthStore = create<AuthState>()(
       token: null,
       userId: null,
       isAdmin: false,
+      displayName: null,
       login: async (email, password) => {
         const res = await fetch('/api/auth/login', {
           method: 'POST',
@@ -50,14 +53,24 @@ export const useAuthStore = create<AuthState>()(
         const data = await res.json() as { token: string; user_id: string; is_admin: boolean }
         set({ token: data.token, userId: data.user_id, isAdmin: data.is_admin })
       },
+      refreshProfile: async () => {
+        const token = useAuthStore.getState().token
+        if (!token) return
+        const res = await fetch('/api/user/profile', {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!res.ok) return
+        const data = await res.json() as { display_name: string | null }
+        set({ displayName: data.display_name ?? null })
+      },
       logout: () => {
         wsManager.disconnect()
-        set({ token: null, userId: null, isAdmin: false })
+        set({ token: null, userId: null, isAdmin: false, displayName: null })
       },
     }),
     {
       name: 'plexus-auth',
-      partialize: (s) => ({ token: s.token, userId: s.userId, isAdmin: s.isAdmin }),
+      partialize: (s) => ({ token: s.token, userId: s.userId, isAdmin: s.isAdmin, displayName: s.displayName }),
     },
   ),
 )

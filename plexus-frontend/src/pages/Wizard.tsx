@@ -1,6 +1,7 @@
 import { useState, useEffect, FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
+import { useAuthStore } from '../store/auth'
 import type { LlmConfig, McpServerEntry } from '../lib/types'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -12,6 +13,7 @@ interface Step {
 }
 
 const STEPS: Step[] = [
+  { id: 0, title: 'Your Name', subtitle: 'How should Plexus address you? Used in greetings and the agent context.' },
   { id: 1, title: 'LLM Provider', subtitle: 'Connect to any OpenAI-compatible API endpoint.' },
   { id: 2, title: 'Default Soul', subtitle: 'A system prompt applied to all users by default.' },
   { id: 3, title: 'Rate Limits', subtitle: 'Cap messages per minute per user. 0 = unlimited.' },
@@ -34,20 +36,24 @@ export default function Wizard() {
   useEffect(() => {
     async function detectStart() {
       try {
-        const [llm, soul] = await Promise.all([
+        const [profile, llm, soul] = await Promise.all([
+          api.get<{ display_name: string | null }>('/api/user/profile').catch(() => ({ display_name: null })),
           api.get<LlmConfig | { status: string }>('/api/llm-config').catch(() => ({ status: 'not_configured' })),
           api.get<{ soul: string }>('/api/admin/default-soul').catch(() => ({ soul: '' })),
         ])
+        const nameSet = (profile as { display_name: string | null }).display_name?.trim() !== '' &&
+                        (profile as { display_name: string | null }).display_name != null
         const llmConfigured = !('status' in llm) || (llm as { status: string }).status !== 'not_configured'
         const soulConfigured = (soul as { soul: string }).soul?.trim() !== ''
-        if (llmConfigured && soulConfigured) {
-          // Both set — skip wizard for this admin
+        if (nameSet && llmConfigured && soulConfigured) {
           markDone()
           navigate('/chat', { replace: true })
-        } else if (llmConfigured) {
-          setStep(1) // Resume at Soul
+        } else if (nameSet && llmConfigured) {
+          setStep(2) // Resume at Soul
+        } else if (nameSet) {
+          setStep(1) // Resume at LLM
         } else {
-          setStep(0) // Start at LLM
+          setStep(0) // Start at Your Name
         }
       } catch {
         setStep(0)
@@ -126,12 +132,49 @@ export default function Wizard() {
         </div>
 
         {/* Step content */}
-        {step === 0 && <LlmStep onNext={next} onSkip={next} />}
-        {step === 1 && <SoulStep onNext={next} onSkip={next} />}
-        {step === 2 && <RateLimitStep onNext={next} onSkip={next} />}
-        {step === 3 && <McpStep onNext={finish} onSkip={finish} isLast />}
+        {step === 0 && <NameStep onNext={next} onSkip={next} />}
+        {step === 1 && <LlmStep onNext={next} onSkip={next} />}
+        {step === 2 && <SoulStep onNext={next} onSkip={next} />}
+        {step === 3 && <RateLimitStep onNext={next} onSkip={next} />}
+        {step === 4 && <McpStep onNext={finish} onSkip={finish} isLast />}
       </div>
     </div>
+  )
+}
+
+// ── Step: Your Name ───────────────────────────────────────────────────────────
+
+function NameStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => void }) {
+  const [name, setName] = useState('')
+  const [msg, setMsg] = useState('')
+  const [loading, setLoading] = useState(false)
+  const refreshProfile = useAuthStore(s => s.refreshProfile)
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault()
+    if (!name.trim()) { onSkip(); return }
+    setLoading(true)
+    try {
+      await api.patch('/api/user/display-name', { display_name: name.trim() })
+      await refreshProfile()
+      onNext()
+    } catch (err) {
+      setMsg(err instanceof Error ? err.message : 'Save failed')
+      setLoading(false)
+    }
+  }
+
+  return (
+    <form onSubmit={handleSave} className="flex flex-col gap-4">
+      <WizardField
+        label="Your Name"
+        value={name}
+        onChange={setName}
+        placeholder="e.g. Yucheng"
+      />
+      {msg && <p className="text-xs text-red-400">{msg}</p>}
+      <StepButtons loading={loading} onSkip={onSkip} saveLabel="Save & Continue" />
+    </form>
   )
 }
 

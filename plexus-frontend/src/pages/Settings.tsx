@@ -73,11 +73,13 @@ export default function Settings() {
 
 function ProfileTab() {
   const [profile, setProfile] = useState<User | null>(null)
+  const [displayName, setDisplayName] = useState('')
   const [soul, setSoul] = useState('')
   const [memory, setMemory] = useState('')
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
   const logout = useAuthStore(s => s.logout)
+  const refreshProfile = useAuthStore(s => s.refreshProfile)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -88,10 +90,24 @@ function ProfileTab() {
         api.get<{ memory: string }>('/api/user/memory'),
       ])
       setProfile(p)
+      setDisplayName(p.display_name ?? '')
       setSoul(s.soul ?? '')
       setMemory(m.memory ?? '')
     })()
   }, [])
+
+  async function saveDisplayName() {
+    setSaving(true)
+    try {
+      await api.patch('/api/user/display-name', { display_name: displayName })
+      await refreshProfile()
+      setMsg('Name saved.')
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'Error')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   async function saveSoul() {
     setSaving(true)
@@ -124,6 +140,22 @@ function ProfileTab() {
           <Field label="Email" value={profile.email} />
           <Field label="User ID" value={profile.user_id} mono />
           <Field label="Role" value={profile.is_admin ? 'Admin' : 'User'} />
+          <div className="flex flex-col gap-1 pt-1">
+            <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
+              Display Name
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={displayName}
+                onChange={e => setDisplayName(e.target.value)}
+                placeholder="Your name (shown in chat and to the agent)"
+                className="flex-1 rounded-lg px-3 py-2 text-sm outline-none border"
+                style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
+              />
+              <SaveButton onClick={saveDisplayName} loading={saving} label="Save" />
+            </div>
+          </div>
         </Section>
       )}
 

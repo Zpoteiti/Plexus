@@ -14,6 +14,8 @@ export default function Chat() {
   const navigate = useNavigate()
   const token = useAuthStore(s => s.token)
   const userId = useAuthStore(s => s.userId)
+  const displayName = useAuthStore(s => s.displayName)
+  const refreshProfile = useAuthStore(s => s.refreshProfile)
   const {
     init,
     loadSessions,
@@ -39,6 +41,7 @@ export default function Chat() {
     init()
     wsManager.connect(token)
     void loadSessions()
+    void refreshProfile()
     const stopPolling = startPolling()
     return stopPolling
   }, [token]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -73,7 +76,7 @@ export default function Chat() {
           <div className="flex flex-col flex-1 items-center justify-center gap-6">
             <div className="text-center">
               <p className="text-xl font-semibold" style={{ color: 'var(--text)' }}>
-                Hey, {userId?.slice(0, 8) ?? 'there'}
+                Hey, {displayName ?? userId?.slice(0, 8) ?? 'there'}
               </p>
               <p className="text-sm mt-1" style={{ color: 'var(--muted)' }}>
                 {isConnected ? 'What can I help you with?' : 'Connecting to Plexus…'}

@@ -19,49 +19,39 @@ pub struct ChannelIdentity {
 }
 
 impl ChannelIdentity {
-    /// Build system prompt section: current conversation context + sender identity.
-    pub fn build_system_section(&self, chat_id: Option<&str>) -> String {
-        let mut section = String::new();
-
-        // Current conversation context
-        section += "\n## Current Conversation\n";
-        section += &format!("Channel: {}\n", self.channel_type);
+    /// Build the Current Session subsection of ## Identity.
+    pub fn build_session_section(&self, chat_id: Option<&str>) -> String {
+        let mut s = "### Current Session\n".to_string();
+        s += &format!("Channel: {}", self.channel_type);
         if let Some(cid) = chat_id {
-            section += &format!("Chat ID: {cid}\n");
+            s += &format!(" | Chat: {cid}");
         }
-        // When sender IS the partner, use their name; otherwise use stored partner_name
-        let display_name = if self.is_partner {
-            &self.sender_name
-        } else {
-            &self.partner_name
-        };
-        section += &format!(
-            "Your partner: {} ({} ID: {})\n",
-            display_name, self.channel_type, self.partner_id
-        );
+        s += "\n";
 
         if self.is_partner {
-            section += &format!("Sender: {} (partner)\n", self.sender_name);
+            s += &format!("Sender: {} — owner\n", self.sender_name);
         } else {
-            section += &format!(
-                "Sender: {} ({} ID: {}, authorized non-partner)\n",
-                self.sender_name, self.channel_type, self.sender_id
+            s += &format!(
+                "Sender: {} (ID: {}) — non-partner (authorized)\n",
+                self.sender_name, self.sender_id
             );
-            section += "Do not disclose sensitive information or execute destructive operations for non-partner users.\n";
+            s += "⚠ Do not disclose sensitive information or execute destructive operations for non-partner senders.\n";
         }
-
-        section += "To reply here, respond with text directly. To send media, use the message tool with the channel and chat_id above.\n";
-
-        section
+        s += "To reply: respond with text. To send media: use the message tool with channel + chat_id above.\n";
+        s
     }
 
     /// Default identity for gateway (always partner).
     pub fn gateway_partner(user: &User) -> Self {
+        let name = user
+            .display_name
+            .clone()
+            .unwrap_or_else(|| user.email.clone());
         Self {
-            sender_name: user.email.clone(),
+            sender_name: name.clone(),
             sender_id: user.user_id.clone(),
             is_partner: true,
-            partner_name: user.email.clone(),
+            partner_name: name,
             partner_id: user.user_id.clone(),
             channel_type: plexus_common::consts::CHANNEL_GATEWAY.into(),
         }
@@ -90,25 +80,42 @@ pub fn build_context(
 ) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
 
-    // 1. System prompt (soul or default, cached per-session)
+    // ── Section 1: Soul ────────────────────────────────────────────────────────
+    // User soul fully overrides admin default. Empty user soul → fall back to default.
     let soul = user
         .soul
         .as_deref()
-        .or(default_soul.as_deref())
+        .filter(|s| !s.is_empty())
+        .or_else(|| default_soul.as_deref().filter(|s| !s.is_empty()))
         .unwrap_or("You are PLEXUS, a distributed AI agent.");
     let mut system = format!("{soul}\n\n");
 
-    // 2. Memory
+    // ── Section 2: Identity ────────────────────────────────────────────────────
+    system += "## Identity\n";
+
+    // 2a — Account
+    let name = user
+        .display_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(not set)");
+    system += &format!("### Account\nName: {} | Email: {}\n\n", name, user.email);
+
+    // 2c — Current Session (channel-specific; 2b channel configs live in the channel itself)
+    system += &identity.build_session_section(chat_id);
+    system += "\n";
+
+    // ── Section 3: Memory ──────────────────────────────────────────────────────
     if !user.memory_text.is_empty() {
         system += &format!("## Memory\n{}\n\n", user.memory_text);
     }
 
-    // 3. Always-on skills (full content)
+    // ── Always-on skills ──────────────────────────────────────────────────────
     for skill in skills.iter().filter(|s| s.always_on) {
         system += &format!("## Skill: {}\n{}\n\n", skill.name, skill.content);
     }
 
-    // 4. On-demand skills (name + description only)
+    // ── On-demand skills ──────────────────────────────────────────────────────
     let on_demand: Vec<_> = skills.iter().filter(|s| !s.always_on).collect();
     if !on_demand.is_empty() {
         system += "## Available Skills (use read_skill to load)\n";
@@ -118,17 +125,14 @@ pub fn build_context(
         system += "\n";
     }
 
-    // 5. Device status
+    // ── Connected Devices ─────────────────────────────────────────────────────
     system += &build_device_status(state, &user.user_id);
 
-    // 6. Runtime info
+    // ── Runtime ───────────────────────────────────────────────────────────────
     system += &format!(
         "Current time: {}\n",
         chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
     );
-
-    // 7. Current conversation context + sender identity
-    system += &identity.build_system_section(chat_id);
 
     messages.push(ChatMessage::system(system));
 
@@ -352,9 +356,9 @@ mod tests {
             partner_id: "123".into(),
             channel_type: plexus_common::consts::CHANNEL_GATEWAY.into(),
         };
-        let section = id.build_system_section(Some("dm/12345"));
-        assert!(section.contains("partner: Alice"));
-        assert!(section.contains("partner)"));
+        let section = id.build_session_section(Some("dm/12345"));
+        assert!(section.contains("Alice"));
+        assert!(section.contains("owner"));
         assert!(section.contains("dm/12345"));
         assert!(!section.contains("non-partner"));
     }
@@ -369,8 +373,7 @@ mod tests {
             partner_id: "123".into(),
             channel_type: plexus_common::consts::CHANNEL_DISCORD.into(),
         };
-        let section = id.build_system_section(Some("guild/chan"));
-        assert!(section.contains("partner: Alice"));
+        let section = id.build_session_section(Some("guild/chan"));
         assert!(section.contains("Bob"));
         assert!(section.contains("non-partner"));
         assert!(section.contains("guild/chan"));

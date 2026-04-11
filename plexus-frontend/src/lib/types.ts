@@ -3,6 +3,7 @@ export interface User {
   user_id: string
   email: string
   is_admin: boolean
+  display_name: string | null
   created_at: string
 }
 

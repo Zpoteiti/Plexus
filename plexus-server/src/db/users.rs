@@ -7,6 +7,7 @@ pub struct User {
     pub email: String,
     pub password_hash: String,
     pub is_admin: bool,
+    pub display_name: Option<String>,
     pub soul: Option<String>,
     pub memory_text: String,
     pub created_at: DateTime<Utc>,
@@ -52,6 +53,19 @@ pub async fn update_soul(
 ) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE users SET soul = $1 WHERE user_id = $2")
         .bind(soul)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn update_display_name(
+    pool: &PgPool,
+    user_id: &str,
+    display_name: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET display_name = $1 WHERE user_id = $2")
+        .bind(display_name)
         .bind(user_id)
         .execute(pool)
         .await?;

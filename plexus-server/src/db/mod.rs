@@ -35,10 +35,13 @@ async fn create_tables(pool: &PgPool) {
             email          TEXT UNIQUE NOT NULL,
             password_hash  TEXT NOT NULL DEFAULT '',
             is_admin       BOOLEAN DEFAULT FALSE,
+            display_name   TEXT,
             soul           TEXT,
             memory_text    TEXT NOT NULL DEFAULT '',
             created_at     TIMESTAMPTZ DEFAULT NOW()
         )",
+        // Migration: add display_name to existing installs
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT",
         "CREATE TABLE IF NOT EXISTS device_tokens (
             token          TEXT PRIMARY KEY,
             user_id        TEXT NOT NULL REFERENCES users(user_id),
