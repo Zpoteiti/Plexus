@@ -485,8 +485,8 @@ function SkillsTab() {
   useEffect(() => { void loadSkills() }, [])
 
   async function loadSkills() {
-    const s = await api.get<Skill[]>('/api/skills')
-    setSkills(s)
+    const s = await api.get<{ skills: Skill[] }>('/api/skills')
+    setSkills(s.skills)
   }
 
   async function installFromGithub() {
@@ -575,8 +575,8 @@ function CronTab() {
   useEffect(() => { void loadJobs() }, [])
 
   async function loadJobs() {
-    const j = await api.get<CronJob[]>('/api/cron-jobs')
-    setJobs(j)
+    const j = await api.get<{ cron_jobs: CronJob[] }>('/api/cron-jobs')
+    setJobs(j.cron_jobs)
   }
 
   async function createJob() {
