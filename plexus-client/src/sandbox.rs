@@ -74,10 +74,9 @@ pub fn wrap_command(command: &str, workspace: &Path) -> Vec<String> {
         "--new-session".into(),
         "--die-with-parent".into(),
         "--".into(),
-        "bash".into(),
-        "-l".into(),
+        "sh".into(),
         "-c".into(),
-        format!("'{}'", command.replace('\'', "'\\''")),
+        command.to_string(),
     ]
 }
 

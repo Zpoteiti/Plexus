@@ -17,7 +17,7 @@ Execute a shell command on the device. Runs via `sh -c` on Linux/macOS, `cmd /C`
 | `working_dir` | string | no | workspace root | Must be within workspace. Validated via `sanitize_path()` |
 
 **Behavior:**
-- Environment is **always** isolated via `env_clear()` + `min_env()`, even in Unrestricted mode. Only `PATH`, `HOME`, `LANG`, `TERM` are passed through (with a hardcoded safe `PATH`).
+- Environment is **always** isolated via `env_clear()` + `min_env()`, even in Unrestricted mode. Only `PATH` (inherited from system), `HOME`, `LANG`, `TERM` are passed through.
 - In `Sandbox` policy + Linux + bwrap available: command is wrapped in a bubblewrap sandbox (see SECURITY.md).
 - In `Sandbox` policy: command passes through `guardrails::check_shell_command()` (deny patterns + SSRF check). In `Unrestricted` mode: guardrails are skipped.
 - Absolute paths in the command are extracted and validated against workspace. Path traversal (`../`) is blocked.

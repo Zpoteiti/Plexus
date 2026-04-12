@@ -40,9 +40,9 @@ export interface ApiMessage {
 // Connected client device
 export interface Device {
   device_name: string
-  online: boolean
-  tool_count: number
-  last_seen: string
+  status: 'online' | 'offline'
+  tools_count: number
+  fs_policy: { mode: 'sandbox' | 'unrestricted' }
 }
 
 // Device auth token

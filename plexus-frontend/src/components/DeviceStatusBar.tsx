@@ -28,7 +28,7 @@ export default function DeviceStatusBar({ sessionId }: Props) {
   const gwColor = wsStatus === 'open' ? '#39ff14' : wsStatus === 'connecting' ? '#facc15' : '#ef4444'
   const gwGlow  = wsStatus === 'open' ? '0 0 6px #39ff14' : 'none'
 
-  const onlineCount  = devices.filter(d => d.online).length
+  const onlineCount  = devices.filter(d => d.status === 'online').length
   const offlineCount = devices.length - onlineCount
   // Pill color: all online → green, any offline → yellow, no devices → muted
   const pillColor = devices.length === 0
@@ -82,11 +82,11 @@ export default function DeviceStatusBar({ sessionId }: Props) {
                   <span className="font-mono truncate">{d.device_name}</span>
                   <div className="flex items-center gap-1.5 shrink-0">
                     <span style={{ color: 'var(--muted)' }}>
-                      {d.online ? `${d.tool_count} tools` : 'offline'}
+                      {d.status === 'online' ? `${d.tools_count} tools` : 'offline'}
                     </span>
                     <Dot
-                      color={d.online ? '#39ff14' : '#ef4444'}
-                      glow={d.online ? '0 0 6px #39ff14' : 'none'}
+                      color={d.status === 'online' ? '#39ff14' : '#ef4444'}
+                      glow={d.status === 'online' ? '0 0 6px #39ff14' : 'none'}
                     />
                   </div>
                 </div>

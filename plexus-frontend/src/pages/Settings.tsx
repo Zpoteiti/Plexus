@@ -314,12 +314,12 @@ function DevicesTab() {
               <div className="flex items-center gap-2">
                 <span style={{
                   width: 8, height: 8, borderRadius: '50%',
-                  background: d.online ? '#39ff14' : '#ef4444',
-                  boxShadow: d.online ? '0 0 6px #39ff14' : 'none',
+                  background: d.status === 'online' ? '#39ff14' : '#ef4444',
+                  boxShadow: d.status === 'online' ? '0 0 6px #39ff14' : 'none',
                   display: 'inline-block',
                 }} />
                 <span style={{ color: 'var(--text)' }}>{d.device_name}</span>
-                <span style={{ color: 'var(--muted)' }}>({d.tool_count} tools)</span>
+                <span style={{ color: 'var(--muted)' }}>({d.tools_count} tools)</span>
               </div>
               <span style={{ color: 'var(--muted)', fontSize: 10 }}>
                 {expandedDevice === d.device_name ? '▲' : '▼'}

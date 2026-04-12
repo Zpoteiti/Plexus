@@ -135,7 +135,7 @@ async fn handle_event(
             &identity,
             &cached_default_soul,
             event.chat_id.as_deref(),
-        );
+        ).await;
 
         // Check compression
         let llm_config = state.llm_config.read().await;

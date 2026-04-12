@@ -36,6 +36,7 @@ async fn main() {
 
     let config = Config::from_env();
     let port = config.port;
+    #[cfg(not(feature = "embed-frontend"))]
     let frontend_dir = config.frontend_dir.clone();
 
     let state = Arc::new(AppState {
@@ -46,14 +47,21 @@ async fn main() {
         shutdown: CancellationToken::new(),
     });
 
-    let static_service = static_files::static_file_service(&frontend_dir);
-
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/ws/chat", get(ws::chat::ws_chat))
         .route("/ws/plexus", get(ws::plexus::ws_plexus))
-        .route("/api/{*rest}", any(proxy::proxy_handler))
-        .fallback_service(static_service)
+        .route("/api/{*rest}", any(proxy::proxy_handler));
+
+    // Embedded frontend: files baked into the binary at compile time.
+    #[cfg(feature = "embed-frontend")]
+    let app = app.fallback_service(static_files::static_file_service());
+
+    // Disk frontend: serve files from the filesystem (default for dev).
+    #[cfg(not(feature = "embed-frontend"))]
+    let app = app.fallback_service(static_files::static_file_service(&frontend_dir));
+
+    let app = app
         .layer(RequestBodyLimitLayer::new(25 * 1024 * 1024))
         .with_state(state.clone());
 

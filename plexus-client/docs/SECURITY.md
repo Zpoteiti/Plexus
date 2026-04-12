@@ -84,9 +84,7 @@ TERM=xterm-256color
 ```
 
 Key points:
-- `PATH` is **hardcoded**, not inherited. The parent process's PATH (which might include `~/.cargo/bin`, custom tool dirs, etc.) is not passed through.
-- The process is spawned with `env_clear().envs(min_env())` -- this applies **unconditionally**, including in `Unrestricted` mode.
-- Secrets in the host environment (`AWS_SECRET_ACCESS_KEY`, `PLEXUS_AUTH_TOKEN`, `DATABASE_URL`, etc.) are never visible to agent-executed commands.
+- `PATH` is **inherited** from the parent process so custom tools (like conda or node) can be found. Secrets in the host environment (`AWS_SECRET_ACCESS_KEY`, `PLEXUS_AUTH_TOKEN`, `DATABASE_URL`, etc.) are never visible to agent-executed commands because the environment is explicitly cleared first.
 - Windows uses `C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem` as safe PATH.
 
 ## Bubblewrap Sandbox

@@ -68,7 +68,7 @@ pub struct SkillInfo {
 
 /// Build the full context for an LLM call.
 /// Returns (messages, tool_schemas).
-pub fn build_context(
+pub async fn build_context(
     state: &AppState,
     user: &User,
     history: &[Message],
@@ -126,7 +126,7 @@ pub fn build_context(
     }
 
     // ── Connected Devices ─────────────────────────────────────────────────────
-    system += &build_device_status(state, &user.user_id);
+    system += &build_device_status(state, &user.user_id).await;
 
     // ── Runtime ───────────────────────────────────────────────────────────────
     system += &format!(
@@ -146,28 +146,33 @@ pub fn build_context(
 }
 
 /// Build device status section for system prompt.
-fn build_device_status(state: &AppState, user_id: &str) -> String {
+async fn build_device_status(state: &AppState, user_id: &str) -> String {
     let mut section = "## Connected Devices\n".to_string();
     let mut has_devices = false;
+
+    let tokens = crate::db::devices::list_by_user(&state.db, user_id)
+        .await
+        .unwrap_or_default();
+    
+    let mut token_map = std::collections::HashMap::new();
+    for token in tokens {
+        token_map.insert(token.device_name.clone(), token);
+    }
 
     // Get all device tokens for this user from the devices_by_user map
     if let Some(keys) = state.devices_by_user.get(user_id) {
         for key in keys.value() {
             if let Some(conn) = state.devices.get(key) {
-                let tool_names: Vec<String> = conn
-                    .tools
-                    .iter()
-                    .filter_map(|t| {
-                        t.get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(|n| n.as_str())
-                            .map(|s| s.to_string())
-                    })
-                    .collect();
+                let (mode, workspace) = if let Some(t) = token_map.get(&conn.device_name) {
+                    let m = t.fs_policy.get("mode").and_then(|v| v.as_str()).unwrap_or("sandbox").to_string();
+                    (m, t.workspace_path.clone())
+                } else {
+                    ("sandbox".to_string(), "~/.plexus/workspace".to_string())
+                };
+
                 section += &format!(
-                    "- {}: online ({})\n",
-                    conn.device_name,
-                    tool_names.join(", ")
+                    "- {}: online ({} mode, workspace: {})\n",
+                    conn.device_name, mode, workspace
                 );
                 has_devices = true;
             }
