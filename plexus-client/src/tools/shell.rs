@@ -59,7 +59,7 @@ async fn exec(args: Value, config: &ClientConfig) -> ToolResult {
 
     // Build command
     let mut cmd = if config.fs_policy == FsPolicy::Sandbox && *sandbox::BWRAP_AVAILABLE {
-        let a = sandbox::wrap_command(command, &config.workspace);
+        let a = sandbox::wrap_command(command, &config.workspace, &wd);
         let mut c = Command::new(&a[0]);
         c.args(&a[1..]);
         c
