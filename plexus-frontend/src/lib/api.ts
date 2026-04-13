@@ -3,9 +3,14 @@
 
 type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
+// Cache the store after first import to avoid per-request microtask yield
+let _authStore: typeof import('../store/auth')['useAuthStore'] | null = null
+async function getAuthStore() {
+  return _authStore ??= (await import('../store/auth')).useAuthStore
+}
+
 async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
-  // Lazy import avoids circular dependency at module load time
-  const { useAuthStore } = await import('../store/auth')
+  const useAuthStore = await getAuthStore()
   const token = useAuthStore.getState().token
 
   const headers: Record<string, string> = {}

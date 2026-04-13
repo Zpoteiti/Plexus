@@ -7,7 +7,7 @@ interface ChatState {
   sessions: Session[]
   currentSessionId: string | null
   messagesBySession: Record<string, ChatMessage[]>
-  restLoadedSessions: Set<string>
+  restLoadedSessions: Record<string, true>
   progressBySession: Record<string, string | null>
   wsStatus: WsStatus
 
@@ -32,7 +32,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   currentSessionId: null,
   messagesBySession: {},
-  restLoadedSessions: new Set(),
+  restLoadedSessions: {},
   progressBySession: {},
   wsStatus: 'closed',
 
@@ -82,7 +82,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   loadMessages: async (sessionId) => {
     // Guard: only load once per session per page load
-    if (get().restLoadedSessions.has(sessionId)) return
+    if (get().restLoadedSessions[sessionId]) return
 
     const apiMsgs = await api.get<ApiMessage[]>(
       `/api/sessions/${sessionId}/messages?limit=200`,
@@ -106,11 +106,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const merged = [...msgs, ...existing].sort(
         (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
       )
-      const loaded = new Set(s.restLoadedSessions)
-      loaded.add(sessionId)
       return {
         messagesBySession: { ...s.messagesBySession, [sessionId]: merged },
-        restLoadedSessions: loaded,
+        restLoadedSessions: { ...s.restLoadedSessions, [sessionId]: true as const },
       }
     })
   },
@@ -197,7 +195,7 @@ export function resetChatStore() {
     sessions: [],
     currentSessionId: null,
     messagesBySession: {},
-    restLoadedSessions: new Set(),
+    restLoadedSessions: {},
     progressBySession: {},
     wsStatus: 'closed',
   })

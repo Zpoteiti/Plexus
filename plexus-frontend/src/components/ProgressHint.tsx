@@ -18,7 +18,6 @@ export default function ProgressHint({ hint }: Props) {
         }}
       />
       <span className="truncate">{hint}</span>
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   )
 }

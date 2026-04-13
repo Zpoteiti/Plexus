@@ -14,6 +14,8 @@
   box-sizing: border-box;
 }
 
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* Scale UI proportionally by screen size.
    vh units are pre-zoom CSS px, so h-screen / min-h-screen must be
    divided by the zoom factor to fill exactly the visible viewport. */

@@ -8,6 +8,8 @@ interface Props {
   content: string
 }
 
+const plugins = [remarkGfm]
+
 const components: Components = {
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className ?? '')
@@ -63,7 +65,7 @@ const components: Components = {
 
 export default function MarkdownContent({ content }: Props) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+    <ReactMarkdown remarkPlugins={plugins} components={components}>
       {content}
     </ReactMarkdown>
   )
