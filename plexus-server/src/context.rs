@@ -101,7 +101,7 @@ pub async fn build_context(
         .unwrap_or("(not set)");
     system += &format!("### Account\nName: {} | Email: {}\n\n", name, user.email);
 
-    // 2c — Current Session (channel-specific; 2b channel configs live in the channel itself)
+    // 2b — Current Session
     system += &identity.build_session_section(chat_id);
     system += "\n";
 
@@ -136,7 +136,7 @@ pub async fn build_context(
 
     messages.push(ChatMessage::system(system));
 
-    // 8. Message history (reconstruct from DB rows — includes current user message)
+    // Message history (reconstruct from DB rows — includes current user message)
     messages.extend(reconstruct_history(history));
 
     // Note: current user message is already in DB history (saved before agent loop starts).
@@ -148,34 +148,36 @@ pub async fn build_context(
 /// Build device status section for system prompt.
 async fn build_device_status(state: &AppState, user_id: &str) -> String {
     let mut section = "## Connected Devices\n".to_string();
-    let mut has_devices = false;
 
+    let Some(keys) = state.devices_by_user.get(user_id) else {
+        section += "- No devices connected\n\n";
+        return section;
+    };
+
+    // Only query DB when at least one device is online (avoids hot-path DB hit for disconnected users)
     let tokens = crate::db::devices::list_by_user(&state.db, user_id)
         .await
         .unwrap_or_default();
-    
-    let mut token_map = std::collections::HashMap::new();
-    for token in tokens {
-        token_map.insert(token.device_name.clone(), token);
-    }
+    let token_map: std::collections::HashMap<_, _> = tokens
+        .into_iter()
+        .map(|t| (t.device_name.clone(), t))
+        .collect();
 
-    // Get all device tokens for this user from the devices_by_user map
-    if let Some(keys) = state.devices_by_user.get(user_id) {
-        for key in keys.value() {
-            if let Some(conn) = state.devices.get(key) {
-                let (mode, workspace) = if let Some(t) = token_map.get(&conn.device_name) {
-                    let m = t.fs_policy.get("mode").and_then(|v| v.as_str()).unwrap_or("sandbox").to_string();
-                    (m, t.workspace_path.clone())
-                } else {
-                    ("sandbox".to_string(), "~/.plexus/workspace".to_string())
-                };
+    let mut has_devices = false;
+    for key in keys.value() {
+        if let Some(conn) = state.devices.get(key) {
+            let (mode, workspace) = if let Some(t) = token_map.get(&conn.device_name) {
+                let m = t.fs_policy.get("mode").and_then(|v| v.as_str()).unwrap_or("sandbox").to_string();
+                (m, t.workspace_path.clone())
+            } else {
+                ("sandbox".to_string(), "~/.plexus/workspace".to_string())
+            };
 
-                section += &format!(
-                    "- {}: online ({} mode, workspace: {})\n",
-                    conn.device_name, mode, workspace
-                );
-                has_devices = true;
-            }
+            section += &format!(
+                "- {}: online ({} mode, workspace: {})\n",
+                conn.device_name, mode, workspace
+            );
+            has_devices = true;
         }
     }
 

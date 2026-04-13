@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+use plexus_common::consts::FILE_UPLOAD_MAX_BYTES;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -62,7 +63,7 @@ async fn main() {
     let app = app.fallback_service(static_files::static_file_service(&frontend_dir));
 
     let app = app
-        .layer(RequestBodyLimitLayer::new(25 * 1024 * 1024))
+        .layer(RequestBodyLimitLayer::new(FILE_UPLOAD_MAX_BYTES))
         .with_state(state.clone());
 
     let addr = format!("0.0.0.0:{port}");

@@ -14,14 +14,19 @@ export const useDevicesStore = create<DevicesState>((set, get) => ({
   loading: false,
 
   fetchDevices: async () => {
-    set({ loading: true })
+    const hasData = get().devices.length > 0
+    if (!hasData) set({ loading: true })
     try {
       const devices = await api.get<Device[]>('/api/devices')
-      set({ devices })
+      // Skip store update if nothing changed (avoids polling re-renders)
+      const current = get().devices
+      if (JSON.stringify(current) !== JSON.stringify(devices)) {
+        set({ devices })
+      }
     } catch {
       // silently ignore — UI shows stale state
     } finally {
-      set({ loading: false })
+      if (!hasData) set({ loading: false })
     }
   },
 

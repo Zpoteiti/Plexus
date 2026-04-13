@@ -4,7 +4,8 @@ import Login from './pages/Login'
 import Chat from './pages/Chat'
 import Settings from './pages/Settings'
 import Admin from './pages/Admin'
-import Wizard, { WIZARD_KEY } from './pages/Wizard'
+import Wizard from './pages/Wizard'
+import { WIZARD_KEY } from './lib/constants'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const token = useAuthStore(s => s.token)

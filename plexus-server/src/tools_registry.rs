@@ -10,7 +10,7 @@
 
 use crate::state::AppState;
 use futures_util::SinkExt;
-use plexus_common::consts::TOOL_EXECUTION_TIMEOUT_SEC;
+use plexus_common::consts::{SERVER_DEVICE_NAME, TOOL_EXECUTION_TIMEOUT_SEC};
 use plexus_common::protocol::{ExecuteToolRequest, ServerToClient, ToolExecutionResult};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -47,11 +47,18 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
     let mut native_sources: HashMap<String, Vec<String>> = HashMap::new();
     let mut representatives: HashMap<String, Value> = HashMap::new();
 
-    // 3a. Seed mcp_sources from server MCP ("server" device).
-    for schema in state.server_mcp.try_read().map(|g| g.tool_schemas()).unwrap_or_default() {
+    // 3a. Seed mcp_sources from server MCP (SERVER_DEVICE_NAME device).
+    let server_mcp_schemas = match state.server_mcp.try_read() {
+        Ok(g) => g.tool_schemas(),
+        Err(_) => {
+            warn!("build_tool_schemas: server_mcp lock contention — MCP tools excluded this call");
+            vec![]
+        }
+    };
+    for schema in server_mcp_schemas {
         let name = tool_name(&schema).to_string();
         if name.is_empty() { continue; }
-        mcp_sources.entry(name.clone()).or_default().push("server".to_string());
+        mcp_sources.entry(name.clone()).or_default().push(SERVER_DEVICE_NAME.to_string());
         representatives.entry(name).or_insert(schema);
     }
 

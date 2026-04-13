@@ -2,6 +2,7 @@ import { useState, useEffect, FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useAuthStore } from '../store/auth'
+import { WIZARD_KEY } from '../lib/constants'
 import type { LlmConfig, McpServerEntry } from '../lib/types'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -19,8 +20,6 @@ const STEPS: Step[] = [
   { id: 3, title: 'Rate Limits', subtitle: 'Cap messages per minute per user. 0 = unlimited.' },
   { id: 4, title: 'Server MCP', subtitle: 'Shared MCP tool servers available to all users.' },
 ]
-
-const WIZARD_KEY = 'plexus-wizard-done'
 
 function markDone() {
   localStorage.setItem(WIZARD_KEY, 'true')
@@ -67,7 +66,7 @@ export default function Wizard() {
       }
     }
     void detectStart()
-  }, [navigate])
+  }, [navigate, isAdmin])
 
   function finish() {
     markDone()
@@ -405,4 +404,3 @@ function StepButtons({ loading, onSkip, saveLabel, skipLabel = 'Skip' }: {
   )
 }
 
-export { WIZARD_KEY }

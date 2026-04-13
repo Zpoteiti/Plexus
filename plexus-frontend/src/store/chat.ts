@@ -114,6 +114,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setCurrentSession: (sessionId) => {
+    if (get().currentSessionId === sessionId) return
     set(s => ({
       currentSessionId: sessionId,
       // Clear progress hint for the previous session on switch
@@ -168,6 +169,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setProgressHint: (sessionId, hint) => {
+    if (get().progressBySession[sessionId] === hint) return
     set(s => ({
       progressBySession: { ...s.progressBySession, [sessionId]: hint },
     }))
