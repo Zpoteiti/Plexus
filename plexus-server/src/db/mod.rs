@@ -104,6 +104,10 @@ async fn create_tables(pool: &PgPool) {
             run_count       INTEGER DEFAULT 0,
             created_at      TIMESTAMPTZ DEFAULT NOW()
         )",
+        // Migration: add claimed_at for atomic job claiming (cron nanobot-parity)
+        "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ",
+        // Migration: add last_status for execution result tracking
+        "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS last_status TEXT",
         "CREATE TABLE IF NOT EXISTS skills (
             skill_id       TEXT PRIMARY KEY,
             user_id        TEXT NOT NULL REFERENCES users(user_id),
