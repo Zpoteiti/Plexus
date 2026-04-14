@@ -27,7 +27,19 @@ pub async fn run_session(
         };
         let _guard = lock.lock().await;
 
-        if let Err(e) = handle_event(&state, &session_id, &user_id, event).await {
+        // Extract cron_job_id before event is moved into handle_event.
+        let cron_job_id = event.cron_job_id.clone();
+
+        let result = handle_event(&state, &session_id, &user_id, event).await;
+
+        // If this was a cron event, notify the scheduler that the full ReAct
+        // turn has finished. This is the nanobot-parity "wait until done" step:
+        // next_run_at is computed from now (after execution), not from dispatch time.
+        if let Some(job_id) = &cron_job_id {
+            crate::cron::reschedule_after_completion(&state, job_id, result.is_ok()).await;
+        }
+
+        if let Err(e) = result {
             error!("Session {session_id} error: {e}");
         }
     }
