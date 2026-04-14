@@ -64,7 +64,9 @@ async fn poll_and_execute(state: &Arc<AppState>) -> Result<(), String> {
             // Dispatch failed — unclaim immediately so it retries in 1 minute
             // rather than waiting 30 min for the stuck recovery sweep.
             error!("Cron dispatch failed for {} [{}]: {e}", job.name, job.job_id);
-            let _ = crate::db::cron::unclaim_job(&state.db, &job.job_id).await;
+            if let Err(ue) = crate::db::cron::unclaim_job(&state.db, &job.job_id).await {
+                warn!("Cron: failed to unclaim job {} after dispatch failure: {ue}", job.job_id);
+            }
         }
         // Rescheduling intentionally omitted — see reschedule_after_completion below.
     }
@@ -99,7 +101,9 @@ pub async fn reschedule_after_completion(
 
     if job.delete_after_run {
         // One-shot with delete semantics: remove the job now that it has run.
-        let _ = crate::db::cron::delete_job(&state.db, job_id, &job.user_id).await;
+        if let Err(e) = crate::db::cron::delete_job(&state.db, job_id, &job.user_id).await {
+            error!("Cron: failed to delete one-shot job {job_id}: {e}");
+        }
         info!("Cron: deleted one-shot job {} [{}]", job.name, job_id);
         return;
     }
@@ -108,7 +112,9 @@ pub async fn reschedule_after_completion(
 
     if next_run.is_none() {
         // at-mode without delete_after_run: disable (job has fulfilled its single purpose).
-        let _ = crate::db::cron::disable_job(&state.db, job_id).await;
+        if let Err(e) = crate::db::cron::disable_job(&state.db, job_id).await {
+            error!("Cron: failed to disable at-mode job {job_id}: {e}");
+        }
         info!("Cron: disabled at-mode job {} [{}]", job.name, job_id);
         return;
     }
