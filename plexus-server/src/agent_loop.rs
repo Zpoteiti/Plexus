@@ -35,7 +35,7 @@ pub async fn run_session(
         // If this was a cron event, notify the scheduler that the full ReAct
         // turn has finished. This is the nanobot-parity "wait until done" step:
         // next_run_at is computed from now (after execution), not from dispatch time.
-        if let Some(ref job_id) = cron_job_id {
+        if let Some(job_id) = &cron_job_id {
             crate::cron::reschedule_after_completion(&state, job_id, result.is_ok()).await;
         }
 
