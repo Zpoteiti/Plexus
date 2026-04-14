@@ -103,8 +103,9 @@ pub async fn reschedule_after_completion(
         // One-shot with delete semantics: remove the job now that it has run.
         if let Err(e) = crate::db::cron::delete_job(&state.db, job_id, &job.user_id).await {
             error!("Cron: failed to delete one-shot job {job_id}: {e}");
+        } else {
+            info!("Cron: deleted one-shot job {} [{}]", job.name, job_id);
         }
-        info!("Cron: deleted one-shot job {} [{}]", job.name, job_id);
         return;
     }
 
@@ -114,8 +115,9 @@ pub async fn reschedule_after_completion(
         // at-mode without delete_after_run: disable (job has fulfilled its single purpose).
         if let Err(e) = crate::db::cron::disable_job(&state.db, job_id).await {
             error!("Cron: failed to disable at-mode job {job_id}: {e}");
+        } else {
+            info!("Cron: disabled at-mode job {} [{}]", job.name, job_id);
         }
-        info!("Cron: disabled at-mode job {} [{}]", job.name, job_id);
         return;
     }
 
