@@ -188,7 +188,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cron_job_struct_has_new_fields() {
+    fn cron_job_struct_compiles_with_new_fields() {
         let j = CronJob {
             job_id: "test".into(),
             user_id: "u1".into(),
