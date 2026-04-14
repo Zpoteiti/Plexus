@@ -358,3 +358,24 @@ Each channel (Discord, Telegram, Gateway) constructs a `ChannelIdentity` with se
 **Example:** Admin configures "minimax" MCP on server (tools: `web_search`, `image_understanding`). User configures the same "minimax" MCP on their `linux_devbox`. Agent sees one tool `mcp_minimax_web_search` with `device_name: enum["server", "linux_devbox"]` -- two sources, one schema.
 
 **Outcome:** LLM sees a clean, deduplicated tool list. Overlapping MCP installs collapse into one tool with a source selector. Different MCP server names never collide regardless of shared tool names. Client native tools remain simple with device routing injected transparently.
+
+---
+
+## ADR-29: Claim-based cron execution with post-execution rescheduling (nanobot parity)
+
+**Context:** The original cron implementation used a fire-and-forget polling model: the poller claimed a job, dispatched it to the message bus, and immediately computed the next run time. This had two problems: (1) next_run_at was computed from dispatch time, not completion time, so a slow agent run would cause the next execution to fire while the previous one was still in progress; (2) there was no safe atomic ownership of a job across multiple server nodes, risking double-firing in multi-node deployments.
+
+**Options:**
+- Option A (old): Fire-and-forget — poller dispatches and reschedules immediately.
+- Option B (nanobot parity): Claim-based — poller atomically claims jobs (sets next_run_at = NULL, claimed_at = NOW()), agent loop computes next_run after execution completes, crash recovery resets stuck claims after 30 minutes.
+
+**Decision:** Option B — claim-based model mirroring nanobot's "wait-until-done-then-reschedule" pattern. Key properties:
+- `claim_due_jobs`: atomic `UPDATE ... RETURNING` prevents double-firing across nodes
+- `reschedule_after_completion`: called by agent_loop after full ReAct turn, computes next_run from Utc::now() (after execution)
+- `unclaim_job`: on dispatch failure, resets to retry in 1 minute rather than waiting 30 min
+- `recover_stuck_jobs`: crash recovery sweep resets jobs claimed > 30 min ago
+- `delete_after_run` and `disable_job` paths for one-shot semantics
+
+**Outcome:** Cron jobs are never double-fired. Next interval starts after execution finishes (nanobot parity). Crash recovery prevents permanent job loss. Two new DB columns: `claimed_at TIMESTAMPTZ`, `last_status TEXT`.
+
+---
