@@ -121,7 +121,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
 
 async fn handle_message(
     state: &Arc<AppState>,
-    _bot: &Bot,
+    bot: &Bot,
     msg: &Message,
     plexus_user_id: &str,
     partner_telegram_id: &str,
@@ -129,11 +129,8 @@ async fn handle_message(
     group_policy: &str,
     bot_username: &str,
 ) {
-    // Extract text content
-    let text = match msg.text() {
-        Some(t) => t.to_string(),
-        None => return,
-    };
+    // Extract text content (empty if the message is media-only).
+    let text = msg.text().unwrap_or("").to_string();
 
     // Get sender info
     let sender = match msg.from.as_ref() {
@@ -167,11 +164,118 @@ async fn handle_message(
     }
 
     // Strip @mention from content
-    let content = text
+    let mut content = text
         .replace(&format!("@{bot_username}"), "")
         .trim()
         .to_string();
-    if content.is_empty() {
+
+    // Harvest inbound attachments into the file store.
+    let now = chrono::Utc::now();
+    let mut media_urls: Vec<String> = Vec::new();
+
+    let attachments: Vec<(String, String)> = {
+        let mut v: Vec<(String, String)> = Vec::new();
+        if let Some(photos) = msg.photo() {
+            if let Some(largest) = photos.last() {
+                v.push((largest.file.id.clone(), synth_filename_for_photo(now)));
+            }
+        }
+        if let Some(voice) = msg.voice() {
+            v.push((voice.file.id.clone(), synth_filename_for_voice(now)));
+        }
+        if let Some(audio) = msg.audio() {
+            let name = audio
+                .title
+                .clone()
+                .unwrap_or_else(|| synth_filename_for_audio(now));
+            v.push((audio.file.id.clone(), name));
+        }
+        if let Some(document) = msg.document() {
+            let name = document
+                .file_name
+                .clone()
+                .unwrap_or_else(|| format!("document_{}", now.format("%Y%m%d_%H%M%S")));
+            v.push((document.file.id.clone(), name));
+        }
+        if let Some(video) = msg.video() {
+            let name = video
+                .file_name
+                .clone()
+                .unwrap_or_else(|| synth_filename_for_video(now));
+            v.push((video.file.id.clone(), name));
+        }
+        if let Some(video_note) = msg.video_note() {
+            v.push((
+                video_note.file.id.clone(),
+                synth_filename_for_video_note(now),
+            ));
+        }
+        if let Some(animation) = msg.animation() {
+            let name = animation
+                .file_name
+                .clone()
+                .unwrap_or_else(|| synth_filename_for_animation(now));
+            v.push((animation.file.id.clone(), name));
+        }
+        v
+    };
+
+    for (file_id, filename) in attachments {
+        let file = match bot.get_file(&file_id).await {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("telegram getFile failed ({filename}): {e}");
+                content.push('\n');
+                content.push_str(&format!("[Attachment: {filename} — download failed]"));
+                continue;
+            }
+        };
+
+        if (file.size as usize) > plexus_common::consts::FILE_UPLOAD_MAX_BYTES {
+            content.push('\n');
+            content.push_str(&format!(
+                "[Attachment: {filename} ({:.1} MB) — exceeds {} MB limit, not downloaded]",
+                file.size as f64 / 1024.0 / 1024.0,
+                plexus_common::consts::FILE_UPLOAD_MAX_BYTES / 1024 / 1024
+            ));
+            continue;
+        }
+
+        let download_url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            bot.token(),
+            file.path
+        );
+
+        let bytes = match state.http_client.get(&download_url).send().await {
+            Ok(r) => match r.bytes().await {
+                Ok(b) => b.to_vec(),
+                Err(e) => {
+                    warn!("telegram file read failed ({filename}): {e}");
+                    content.push('\n');
+                    content.push_str(&format!("[Attachment: {filename} — download failed]"));
+                    continue;
+                }
+            },
+            Err(e) => {
+                warn!("telegram file fetch failed ({filename}): {e}");
+                content.push('\n');
+                content.push_str(&format!("[Attachment: {filename} — download failed]"));
+                continue;
+            }
+        };
+
+        match crate::file_store::save_upload(plexus_user_id, &filename, &bytes).await {
+            Ok(fid) => media_urls.push(format!("/api/files/{fid}")),
+            Err(e) => {
+                warn!("telegram save_upload failed ({filename}): {e:?}");
+                content.push('\n');
+                content.push_str(&format!("[Attachment: {filename} — storage failed]"));
+            }
+        }
+    }
+
+    if content.is_empty() && media_urls.is_empty() {
         return;
     }
 
@@ -184,7 +288,7 @@ async fn handle_message(
         content,
         channel: crate::channels::CHANNEL_TELEGRAM.to_string(),
         chat_id: Some(chat_id),
-        media: vec![],
+        media: media_urls,
         cron_job_id: None,
         identity: Some(crate::context::ChannelIdentity {
             sender_name: sender_name.clone(),
@@ -287,4 +391,46 @@ fn split_message(text: &str, limit: usize) -> Vec<String> {
         remaining = remaining[split_at..].trim_start();
     }
     chunks
+}
+
+fn synth_filename_for_voice(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("voice_message_{}.ogg", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_photo(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("photo_{}.jpg", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_video(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("video_{}.mp4", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_audio(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("audio_{}.mp3", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_animation(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("animation_{}.mp4", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_video_note(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("video_note_{}.mp4", ts.format("%Y%m%d_%H%M%S"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn test_synth_filename_voice() {
+        let ts = Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 5).unwrap();
+        assert_eq!(synth_filename_for_voice(ts), "voice_message_20260415_103005.ogg");
+    }
+
+    #[test]
+    fn test_synth_filename_photo() {
+        let ts = Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 5).unwrap();
+        assert_eq!(synth_filename_for_photo(ts), "photo_20260415_103005.jpg");
+    }
 }
