@@ -170,6 +170,8 @@ fn mime_from_filename(name: &str) -> String {
         "webp" => "image/webp",
         "bmp" => "image/bmp",
         "svg" => "image/svg+xml",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
         "pdf" => "application/pdf",
         "txt" | "md" | "log" => "text/plain",
         "json" => "application/json",
