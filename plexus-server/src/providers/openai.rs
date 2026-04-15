@@ -34,7 +34,7 @@ pub struct ImageUrl {
 pub struct ChatMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<Content>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -47,7 +47,7 @@ impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: "system".into(),
-            content: Some(content.into()),
+            content: Some(Content::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -57,7 +57,18 @@ impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".into(),
-            content: Some(content.into()),
+            content: Some(Content::Text(content.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn user_with_blocks(blocks: Vec<ContentBlock>) -> Self {
+        Self {
+            role: "user".into(),
+            content: Some(Content::Blocks(blocks)),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -67,7 +78,7 @@ impl ChatMessage {
     pub fn assistant_text(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".into(),
-            content: Some(content.into()),
+            content: Some(Content::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -87,10 +98,28 @@ impl ChatMessage {
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
             role: "tool".into(),
-            content: Some(content.into()),
+            content: Some(Content::Text(content.into())),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
+        }
+    }
+}
+
+impl Content {
+    /// Returns the concatenated text from this content. For Blocks, image
+    /// blocks are dropped and text blocks joined in order.
+    pub fn as_text(&self) -> String {
+        match self {
+            Content::Text(s) => s.clone(),
+            Content::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    ContentBlock::ImageUrl { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
         }
     }
 }
@@ -138,7 +167,7 @@ struct Choice {
 
 #[derive(Deserialize)]
 struct ChoiceMessage {
-    content: Option<String>,
+    content: Option<Content>,
     tool_calls: Option<Vec<ToolCall>>,
 }
 
@@ -241,7 +270,18 @@ pub async fn call_llm(
         }
 
         if let Some(content) = choice.message.content {
-            let cleaned = strip_think_tags(&content);
+            let text = match content {
+                Content::Text(s) => s,
+                Content::Blocks(blocks) => blocks
+                    .into_iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text),
+                        ContentBlock::ImageUrl { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            };
+            let cleaned = strip_think_tags(&text);
             return Ok(LlmResponse::Text(cleaned));
         }
 
@@ -273,17 +313,32 @@ mod tests {
     fn test_chat_message_system() {
         let m = ChatMessage::system("hello");
         assert_eq!(m.role, "system");
-        assert_eq!(m.content.unwrap(), "hello");
+        assert!(matches!(m.content.as_ref().unwrap(), Content::Text(t) if t == "hello"));
     }
 
     #[test]
-    fn test_chat_message_serialization() {
-        let m = ChatMessage::user("test");
+    fn test_chat_message_user_serializes_as_text() {
+        // Plain user constructor keeps string wire form for backwards compat;
+        // user messages with blocks use user_with_blocks.
+        let m = ChatMessage::user("hi");
         let json = serde_json::to_string(&m).unwrap();
-        assert!(json.contains("\"role\":\"user\""));
-        // Optional None fields should be skipped
+        assert!(json.contains(r#""role":"user""#));
+        assert!(json.contains(r#""content":"hi""#));
         assert!(!json.contains("tool_calls"));
-        assert!(!json.contains("tool_call_id"));
+    }
+
+    #[test]
+    fn test_chat_message_user_with_blocks_serializes_as_array() {
+        let m = ChatMessage::user_with_blocks(vec![
+            ContentBlock::Text { text: "describe".into() },
+            ContentBlock::ImageUrl {
+                image_url: ImageUrl { url: "data:image/png;base64,AA".into() },
+            },
+        ]);
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains(r#""role":"user""#));
+        assert!(json.contains(r#""content":[{"type":"text","text":"describe"}"#));
+        assert!(json.contains(r#"{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]"#));
     }
 
     #[test]

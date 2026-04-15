@@ -254,7 +254,7 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
         .map(|m| {
-            let content_len = m.content.as_deref().map(|c| c.len()).unwrap_or(0);
+            let content_len = m.content.as_ref().map(|c| c.as_text().len()).unwrap_or(0);
             let tool_calls_len = m
                 .tool_calls
                 .as_ref()
@@ -312,7 +312,10 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].role, "user");
         assert_eq!(result[1].role, "assistant");
-        assert_eq!(result[1].content.as_deref(), Some("hello"));
+        assert_eq!(
+            result[1].content.as_ref().map(|c| c.as_text()),
+            Some("hello".to_string())
+        );
     }
 
     #[test]
