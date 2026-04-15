@@ -14,6 +14,5 @@ pub struct SessionHandle {
     /// session. When true, context::build_user_content replaces image
     /// blocks with text placeholders. Reset to false when the admin
     /// updates the LLM config.
-    #[allow(dead_code)]
     pub vision_stripped: Arc<AtomicBool>,
 }

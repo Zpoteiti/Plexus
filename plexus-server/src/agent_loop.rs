@@ -137,9 +137,14 @@ async fn handle_event(
         // Build tool schemas
         let tool_schemas = crate::tools_registry::build_tool_schemas(state, user_id);
 
+        // Read vision_stripped flag from session handle before building context
+        let session_handle = state.sessions.get(session_id).unwrap();
+        let vision_stripped = session_handle
+            .vision_stripped
+            .load(std::sync::atomic::Ordering::Relaxed);
+
         // Build context
-        // Task 8: pass &event.media for the latest user message, vision_stripped=false.
-        // Task 9 will thread the real session flag through SessionHandle.
+        // Pass vision_stripped flag to determine if images should be replaced with text placeholders
         let messages = context::build_context(
             state,
             &user,
@@ -149,7 +154,7 @@ async fn handle_event(
             &cached_default_soul,
             event.chat_id.as_deref(),
             &event.media,
-            false,
+            vision_stripped,
         ).await;
 
         // Check compression
@@ -187,7 +192,14 @@ async fn handle_event(
         let response = openai::call_llm(&state.http_client, &config, messages, tools).await;
 
         match response {
-            Ok(LlmResponse::Text { content, vision_stripped: _ }) => {
+            Ok(LlmResponse::Text { content, vision_stripped: stripped }) => {
+                // Persist vision_stripped flag to session handle if provider stripped images
+                if stripped {
+                    session_handle
+                        .vision_stripped
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+
                 // Save assistant message
                 let msg_id = uuid::Uuid::new_v4().to_string();
                 crate::db::messages::insert(
@@ -220,7 +232,14 @@ async fn handle_event(
 
                 return Ok(());
             }
-            Ok(LlmResponse::ToolCalls { calls, vision_stripped: _ }) => {
+            Ok(LlmResponse::ToolCalls { calls, vision_stripped: stripped }) => {
+                // Persist vision_stripped flag to session handle if provider stripped images
+                if stripped {
+                    session_handle
+                        .vision_stripped
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+
                 // Save assistant message with tool_calls
                 for tc in &calls {
                     let msg_id = uuid::Uuid::new_v4().to_string();
