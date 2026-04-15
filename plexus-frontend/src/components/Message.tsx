@@ -1,8 +1,39 @@
+import { useState } from 'react'
 import type { ChatMessage } from '../lib/types'
 import MarkdownContent from './MarkdownContent'
 
 interface Props {
   message: ChatMessage
+}
+
+function MediaItem({ url }: { url: string }) {
+  const [failed, setFailed] = useState(false)
+
+  if (failed) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs no-underline"
+        style={{ background: 'var(--muted)', color: 'var(--text)' }}
+      >
+        📎 Attachment
+      </a>
+    )
+  }
+
+  return (
+    <a href={url} target="_blank" rel="noreferrer">
+      <img
+        src={url}
+        alt="attachment"
+        className="max-w-xs rounded border"
+        style={{ borderColor: 'var(--border)', maxHeight: 240 }}
+        onError={() => setFailed(true)}
+      />
+    </a>
+  )
 }
 
 export default function Message({ message }: Props) {
@@ -20,7 +51,14 @@ export default function Message({ message }: Props) {
             border: '1px solid rgba(57,255,20,0.15)',
           }}
         >
-          {message.content}
+          {message.content && <div>{message.content}</div>}
+          {message.media && message.media.length > 0 && (
+            <div className={`flex flex-wrap gap-1 ${message.content ? 'mt-2' : ''}`}>
+              {message.media.map((url, i) => (
+                <MediaItem key={i} url={url} />
+              ))}
+            </div>
+          )}
         </div>
       </div>
     )
@@ -41,16 +79,7 @@ export default function Message({ message }: Props) {
         {message.media && message.media.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1">
             {message.media.map((url, i) => (
-              <a
-                key={i}
-                href={url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs underline"
-                style={{ color: 'var(--accent)' }}
-              >
-                Attachment {i + 1}
-              </a>
+              <MediaItem key={i} url={url} />
             ))}
           </div>
         )}
