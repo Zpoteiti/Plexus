@@ -67,9 +67,9 @@ export default function Chat() {
     cron: 'Cron',
   }
 
-  function handleSend(content: string) {
+  function handleSend(content: string, media: string[]) {
     if (!sessionId || isReadOnly) return
-    sendMessage(sessionId, content)
+    sendMessage(sessionId, content, media)
   }
 
   const hasMessages = messages.length > 0
