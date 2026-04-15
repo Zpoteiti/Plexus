@@ -220,7 +220,47 @@ pub async fn call_llm(
 ) -> Result<LlmResponse, String> {
     let url = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
 
-    let tool_choice = if tools.as_ref().is_some_and(|t| !t.is_empty()) {
+    // First attempt: original messages (may contain images).
+    let first = attempt_chat(client, &url, config, &messages, tools.as_ref()).await;
+
+    match first {
+        Ok(resp) => Ok(resp),
+        Err(CallError::Transient(msg)) => Err(msg),
+        Err(CallError::NonTransient(msg)) => {
+            // Strip images and retry once if any image was in the payload.
+            let mut stripped = messages.clone();
+            if !strip_images_in_place(&mut stripped) {
+                return Err(msg);
+            }
+            warn!("LLM non-transient error with images; retrying stripped");
+            match attempt_chat(client, &url, config, &stripped, tools.as_ref()).await {
+                Ok(mut r) => {
+                    // Flip vision_stripped on successful retry.
+                    match &mut r {
+                        LlmResponse::Text { vision_stripped, .. } => *vision_stripped = true,
+                        LlmResponse::ToolCalls { vision_stripped, .. } => *vision_stripped = true,
+                    }
+                    Ok(r)
+                }
+                Err(CallError::Transient(m)) | Err(CallError::NonTransient(m)) => Err(m),
+            }
+        }
+    }
+}
+
+enum CallError {
+    Transient(String),
+    NonTransient(String),
+}
+
+async fn attempt_chat(
+    client: &reqwest::Client,
+    url: &str,
+    config: &LlmConfig,
+    messages: &[ChatMessage],
+    tools: Option<&Vec<Value>>,
+) -> Result<LlmResponse, CallError> {
+    let tool_choice = if tools.is_some_and(|t| !t.is_empty()) {
         Some("auto".to_string())
     } else {
         None
@@ -228,8 +268,8 @@ pub async fn call_llm(
 
     let body = CompletionRequest {
         model: config.model.clone(),
-        messages,
-        tools,
+        messages: messages.to_vec(),
+        tools: tools.cloned(),
         tool_choice,
     };
 
@@ -242,20 +282,19 @@ pub async fn call_llm(
             debug!("LLM retry attempt {attempt}");
         }
 
-        let resp = client
-            .post(&url)
+        let resp = match client
+            .post(url)
             .header("Authorization", format!("Bearer {}", config.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
-            .await;
-
-        let resp = match resp {
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 last_error = format!("HTTP error: {e}");
                 warn!("LLM request failed: {last_error}");
-                continue;
+                continue; // transient network error
             }
         };
 
@@ -269,31 +308,29 @@ pub async fn call_llm(
 
         if status != 200 {
             let body_text = resp.text().await.unwrap_or_default();
-            last_error = format!("HTTP {status}: {body_text}");
-            warn!("LLM non-transient error: {last_error}");
-            // Don't retry non-transient errors
-            break;
+            let msg = format!("HTTP {status}: {body_text}");
+            warn!("LLM non-transient error: {msg}");
+            return Err(CallError::NonTransient(msg));
         }
 
         let body_text = resp
             .text()
             .await
-            .map_err(|e| format!("Read response body: {e}"))?;
+            .map_err(|e| CallError::NonTransient(format!("Read response body: {e}")))?;
 
         let parsed: CompletionResponse = serde_json::from_str(&body_text).map_err(|e| {
-            format!(
+            CallError::NonTransient(format!(
                 "Parse LLM response: {e}\nBody: {}",
                 &body_text[..body_text.len().min(500)]
-            )
+            ))
         })?;
 
         let choice = parsed
             .choices
             .into_iter()
             .next()
-            .ok_or("No choices in LLM response")?;
+            .ok_or_else(|| CallError::NonTransient("No choices in LLM response".into()))?;
 
-        // Tool calls take priority over content
         if let Some(tool_calls) = choice.message.tool_calls {
             if !tool_calls.is_empty() {
                 return Ok(LlmResponse::ToolCalls { calls: tool_calls, vision_stripped: false });
@@ -305,10 +342,36 @@ pub async fn call_llm(
             return Ok(LlmResponse::Text { content: cleaned, vision_stripped: false });
         }
 
-        return Err("LLM returned empty response (no content, no tool_calls)".into());
+        return Err(CallError::NonTransient(
+            "LLM returned empty response (no content, no tool_calls)".into(),
+        ));
     }
 
-    Err(format!("LLM failed after 3 attempts: {last_error}"))
+    Err(CallError::Transient(format!(
+        "LLM failed after 3 attempts: {last_error}"
+    )))
+}
+
+/// Replace every ContentBlock::ImageUrl in every user message with a text
+/// placeholder. Returns true if any image was stripped.
+pub(crate) fn strip_images_in_place(messages: &mut [ChatMessage]) -> bool {
+    let mut found = false;
+    for m in messages.iter_mut() {
+        if m.role != "user" {
+            continue;
+        }
+        if let Some(Content::Blocks(blocks)) = m.content.as_mut() {
+            for b in blocks.iter_mut() {
+                if let ContentBlock::ImageUrl { .. } = b {
+                    *b = ContentBlock::Text {
+                        text: "[Image omitted: model does not support vision]".into(),
+                    };
+                    found = true;
+                }
+            }
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -421,6 +484,45 @@ mod tests {
             ContentBlock::Text { text: "b".into() },
         ]);
         assert_eq!(c.into_text(), "ab");
+    }
+
+    fn make_user_with_image() -> ChatMessage {
+        ChatMessage::user_with_blocks(vec![
+            ContentBlock::Text { text: "what is this".into() },
+            ContentBlock::ImageUrl {
+                image_url: ImageUrl { url: "data:image/png;base64,AA".into() },
+            },
+        ])
+    }
+
+    #[test]
+    fn test_strip_images_in_place_replaces_image_blocks() {
+        let mut msgs = vec![ChatMessage::system("hi"), make_user_with_image()];
+        let had_images = strip_images_in_place(&mut msgs);
+        assert!(had_images);
+        // system untouched
+        assert!(matches!(
+            msgs[0].content.as_ref().unwrap(),
+            Content::Text(t) if t == "hi"
+        ));
+        // user message: image block replaced with placeholder text block
+        match msgs[1].content.as_ref().unwrap() {
+            Content::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "what is this"));
+                assert!(matches!(
+                    &blocks[1],
+                    ContentBlock::Text { text } if text.starts_with("[Image omitted")
+                ));
+            }
+            _ => panic!("expected Blocks"),
+        }
+    }
+
+    #[test]
+    fn test_strip_images_in_place_returns_false_when_no_images() {
+        let mut msgs = vec![ChatMessage::system("x"), ChatMessage::user("y")];
+        assert!(!strip_images_in_place(&mut msgs));
     }
 
     #[test]
