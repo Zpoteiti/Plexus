@@ -11,6 +11,25 @@ use tracing::{debug, warn};
 
 // -- Request/Response types --
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum Content {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ImageUrl {
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -265,5 +284,36 @@ mod tests {
         // Optional None fields should be skipped
         assert!(!json.contains("tool_calls"));
         assert!(!json.contains("tool_call_id"));
+    }
+
+    #[test]
+    fn test_content_text_serializes_as_string() {
+        let c = Content::Text("hello".into());
+        assert_eq!(serde_json::to_string(&c).unwrap(), "\"hello\"");
+    }
+
+    #[test]
+    fn test_content_blocks_serializes_as_array() {
+        let c = Content::Blocks(vec![
+            ContentBlock::Text { text: "hi".into() },
+            ContentBlock::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,AAAA".into(),
+                },
+            },
+        ]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(
+            json,
+            r#"[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]"#
+        );
+    }
+
+    #[test]
+    fn test_content_deserializes_from_string_or_array() {
+        let s: Content = serde_json::from_str("\"hello\"").unwrap();
+        assert!(matches!(s, Content::Text(ref t) if t == "hello"));
+        let a: Content = serde_json::from_str(r#"[{"type":"text","text":"hi"}]"#).unwrap();
+        assert!(matches!(a, Content::Blocks(ref v) if v.len() == 1));
     }
 }
