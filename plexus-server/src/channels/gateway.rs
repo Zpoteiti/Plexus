@@ -111,9 +111,14 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
             .unwrap_or("")
             .to_string();
 
-        if content.is_empty() || session_id.is_empty() {
+        if session_id.is_empty() {
             continue;
         }
+        if content.is_empty() && extract_media(&parsed).is_empty() {
+            continue;
+        }
+
+        let media = extract_media(&parsed);
 
         // The sender_id from gateway is the user_id (JWT-authenticated)
         let user_id = sender_id.clone().unwrap_or_default();
@@ -125,7 +130,7 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
             content,
             channel: plexus_common::consts::CHANNEL_GATEWAY.to_string(),
             chat_id,
-            media: vec![],
+            media,
             cron_job_id: None,
             identity: None, // Gateway = always partner, built from User in agent_loop
             metadata: Default::default(),
@@ -143,6 +148,52 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
     }
 
     Ok(())
+}
+
+fn extract_media(parsed: &serde_json::Value) -> Vec<String> {
+    parsed
+        .get("media")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_media_from_gateway_frame() {
+        let raw = r#"{
+            "type": "message",
+            "chat_id": "c1",
+            "sender_id": "u1",
+            "session_id": "s1",
+            "content": "hi",
+            "media": ["/api/files/a", "/api/files/b"]
+        }"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let media = extract_media(&parsed);
+        assert_eq!(media, vec!["/api/files/a".to_string(), "/api/files/b".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_media_missing() {
+        let raw = r#"{"type":"message","chat_id":"c","session_id":"s","content":"hi"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(extract_media(&parsed).is_empty());
+    }
+
+    #[test]
+    fn test_parse_media_malformed() {
+        let raw = r#"{"type":"message","media":"not-an-array"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(extract_media(&parsed).is_empty());
+    }
 }
 
 /// Deliver an outbound event to the gateway.
