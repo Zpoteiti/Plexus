@@ -138,6 +138,8 @@ async fn handle_event(
         let tool_schemas = crate::tools_registry::build_tool_schemas(state, user_id);
 
         // Build context
+        // Task 8: pass &event.media for the latest user message, vision_stripped=false.
+        // Task 9 will thread the real session flag through SessionHandle.
         let messages = context::build_context(
             state,
             &user,
@@ -146,6 +148,8 @@ async fn handle_event(
             &identity,
             &cached_default_soul,
             event.chat_id.as_deref(),
+            &event.media,
+            false,
         ).await;
 
         // Check compression

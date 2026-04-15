@@ -72,7 +72,6 @@ use base64::Engine;
 /// Build the content blocks for a user message that may include media.
 /// Ordering: text → image blocks → trailing attachment-references text block.
 /// When `vision_stripped=true`, image media is replaced with text placeholders.
-#[allow(dead_code)]
 pub async fn build_user_content(
     user_id: &str,
     content: &str,
@@ -187,6 +186,12 @@ fn mime_from_filename(name: &str) -> String {
 }
 
 /// Build the full context for an LLM call.
+///
+/// `latest_user_media` / `vision_stripped` apply only to the last pending user
+/// message (assumed to be the tail of `history` when it is a user row). All
+/// earlier history rows are reconstructed as plain-text `ChatMessage`s — the
+/// DB still persists plain strings in this milestone.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_context(
     state: &AppState,
     user: &User,
@@ -195,6 +200,8 @@ pub async fn build_context(
     identity: &ChannelIdentity,
     default_soul: &Option<String>,
     chat_id: Option<&str>,
+    latest_user_media: &[String],
+    vision_stripped: bool,
 ) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
 
@@ -254,13 +261,36 @@ pub async fn build_context(
 
     messages.push(ChatMessage::system(system));
 
-    // Message history (reconstruct from DB rows — includes current user message)
-    messages.extend(reconstruct_history(history));
+    // Split off the trailing user row (the current pending user message) so we
+    // can rebuild it as multimodal content blocks via `build_user_content`.
+    // Earlier rows stay plain-text via `reconstruct_history`.
+    let (prior, latest_user_text) = split_trailing_user(history);
+    messages.extend(reconstruct_history(prior));
 
-    // Note: current user message is already in DB history (saved before agent loop starts).
-    // Non-partner untrusted wrapper is applied when saving to DB in agent_loop.rs.
+    if let Some(text) = latest_user_text {
+        let blocks =
+            build_user_content(&user.user_id, text, latest_user_media, vision_stripped).await;
+        if !blocks.is_empty() {
+            messages.push(ChatMessage::user_with_blocks(blocks));
+        }
+    }
+
+    // Non-partner untrusted wrapper is applied when saving to DB in agent_loop.rs,
+    // so it is already present in `latest_user_text`.
 
     messages
+}
+
+/// Returns `(prior_history, latest_user_text)` when the final row is a user
+/// message. If the tail is not a user row (e.g. mid-turn tool result),
+/// returns `(history, None)`.
+fn split_trailing_user(history: &[Message]) -> (&[Message], Option<&str>) {
+    if let Some(last) = history.last()
+        && last.role == plexus_common::consts::ROLE_USER
+    {
+        return (&history[..history.len() - 1], Some(last.content.as_str()));
+    }
+    (history, None)
 }
 
 /// Build device status section for system prompt.
