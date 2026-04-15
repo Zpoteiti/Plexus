@@ -11,7 +11,6 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct InboundEvent {
     pub session_id: String,
     pub user_id: String,
@@ -21,6 +20,7 @@ pub struct InboundEvent {
     pub media: Vec<String>,
     pub cron_job_id: Option<String>,
     pub identity: Option<crate::context::ChannelIdentity>,
+    #[allow(dead_code)]
     pub metadata: HashMap<String, String>,
 }
 

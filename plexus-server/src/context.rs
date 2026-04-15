@@ -9,12 +9,13 @@ use crate::state::AppState;
 /// Channel-agnostic sender identity for security boundaries.
 /// Constructed by each channel (Discord, Telegram, Gateway) and passed through InboundEvent.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ChannelIdentity {
     pub sender_name: String,
     pub sender_id: String,
     pub is_partner: bool,
+    #[allow(dead_code)]
     pub partner_name: String,
+    #[allow(dead_code)]
     pub partner_id: String,
     pub channel_type: String,
 }
@@ -88,7 +89,6 @@ pub async fn build_user_content(
 }
 
 /// Test-friendly inner that accepts a loader closure for mocking file_store.
-#[allow(dead_code)]
 async fn build_user_content_inner<F, Fut>(
     content: &str,
     media: &[String],
@@ -159,7 +159,6 @@ where
     blocks
 }
 
-#[allow(dead_code)]
 fn mime_from_filename(name: &str) -> String {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
