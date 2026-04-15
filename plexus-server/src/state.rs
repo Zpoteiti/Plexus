@@ -51,7 +51,7 @@ pub struct AppState {
     pub default_soul: Arc<RwLock<Option<String>>>,
 
     // Session handles
-    pub sessions: DashMap<String, SessionHandle>,
+    pub sessions: DashMap<String, Arc<SessionHandle>>,
 
     // Web fetch concurrency limit
     pub web_fetch_semaphore: Arc<Semaphore>,

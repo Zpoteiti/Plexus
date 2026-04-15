@@ -5,6 +5,7 @@ use crate::state::AppState;
 use plexus_common::consts::RATE_LIMIT_CACHE_TTL_SEC;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
@@ -60,11 +61,12 @@ pub async fn publish_inbound(state: &Arc<AppState>, event: InboundEvent) -> Resu
         // Create inbox channel
         let (tx, rx) = mpsc::channel(100);
 
-        let handle = SessionHandle {
+        let handle = Arc::new(SessionHandle {
             user_id: event.user_id.clone(),
             inbox_tx: tx.clone(),
             lock: Arc::new(Mutex::new(())),
-        };
+            vision_stripped: Arc::new(AtomicBool::new(false)),
+        });
 
         // Use entry API to atomically insert only if still absent (prevents double-spawn)
         let session_id = event.session_id.clone();
