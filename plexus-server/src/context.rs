@@ -2,7 +2,8 @@
 
 use crate::db::messages::Message;
 use crate::db::users::User;
-use crate::providers::openai::{ChatMessage, FunctionCall, ToolCall};
+use crate::file_store;
+use crate::providers::openai::{ChatMessage, ContentBlock, FunctionCall, ImageUrl, ToolCall};
 use crate::state::AppState;
 
 /// Channel-agnostic sender identity for security boundaries.
@@ -64,6 +65,123 @@ pub struct SkillInfo {
     pub description: String,
     pub always_on: bool,
     pub content: String,
+}
+
+use base64::Engine;
+
+/// Build the content blocks for a user message that may include media.
+/// Ordering: text → image blocks → trailing attachment-references text block.
+/// When `vision_stripped=true`, image media is replaced with text placeholders.
+#[allow(dead_code)]
+pub async fn build_user_content(
+    user_id: &str,
+    content: &str,
+    media: &[String],
+    vision_stripped: bool,
+) -> Vec<ContentBlock> {
+    let uid = user_id.to_string();
+    build_user_content_inner(content, media, vision_stripped, move |fid| {
+        let uid = uid.clone();
+        let fid = fid.to_string();
+        async move { file_store::load_file(&uid, &fid).await.map_err(|e| e.message) }
+    })
+    .await
+}
+
+/// Test-friendly inner that accepts a loader closure for mocking file_store.
+#[allow(dead_code)]
+async fn build_user_content_inner<F, Fut>(
+    content: &str,
+    media: &[String],
+    vision_stripped: bool,
+    load: F,
+) -> Vec<ContentBlock>
+where
+    F: Fn(&str) -> Fut,
+    Fut: std::future::Future<Output = Result<(Vec<u8>, String), String>>,
+{
+    let mut blocks: Vec<ContentBlock> = Vec::new();
+
+    if !content.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: content.to_string(),
+        });
+    }
+
+    let mut non_image_refs: Vec<String> = Vec::new();
+
+    for url in media {
+        let Some(file_id) = url.strip_prefix("/api/files/") else {
+            non_image_refs.push(format!("[Attachment: {url} — unknown reference]"));
+            continue;
+        };
+
+        let (bytes, filename) = match load(file_id).await {
+            Ok(x) => x,
+            Err(_) => {
+                non_image_refs.push(format!(
+                    "[Attachment: {file_id} — storage read failed]"
+                ));
+                continue;
+            }
+        };
+
+        let mime = mime_from_filename(&filename);
+
+        if mime.starts_with("image/") {
+            if vision_stripped {
+                blocks.push(ContentBlock::Text {
+                    text: format!(
+                        "[Image: {filename} — not displayed, model does not support vision]"
+                    ),
+                });
+            } else {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                blocks.push(ContentBlock::ImageUrl {
+                    image_url: ImageUrl {
+                        url: format!("data:{mime};base64,{b64}"),
+                    },
+                });
+            }
+        } else {
+            non_image_refs.push(format!(
+                "[Attachment: {filename} → {url}]\n\
+                 Use file_transfer to move it to a client device for further processing."
+            ));
+        }
+    }
+
+    if !non_image_refs.is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: non_image_refs.join("\n"),
+        });
+    }
+
+    blocks
+}
+
+#[allow(dead_code)]
+fn mime_from_filename(name: &str) -> String {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "svg" => "image/svg+xml",
+        "pdf" => "application/pdf",
+        "txt" | "md" | "log" => "text/plain",
+        "json" => "application/json",
+        "csv" => "text/csv",
+        "mp3" => "audio/mpeg",
+        "ogg" | "oga" => "audio/ogg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 /// Build the full context for an LLM call.
@@ -369,6 +487,119 @@ mod tests {
         assert!(section.contains("owner"));
         assert!(section.contains("dm/12345"));
         assert!(!section.contains("non-partner"));
+    }
+
+    #[tokio::test]
+    async fn test_build_user_content_text_only() {
+        let blocks = build_user_content_inner("hello", &[], false, |_| async {
+            Err::<(Vec<u8>, String), String>("should not be called".into())
+        })
+        .await;
+
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "hello"));
+    }
+
+    #[tokio::test]
+    async fn test_build_user_content_with_image() {
+        let png_bytes = vec![0x89u8, 0x50, 0x4E, 0x47];
+        let blocks = build_user_content_inner(
+            "what is this",
+            &["/api/files/abc123".to_string()],
+            false,
+            |fid| {
+                let bytes = png_bytes.clone();
+                let fid = fid.to_string();
+                async move {
+                    assert_eq!(fid, "abc123");
+                    Ok::<_, String>((bytes, "photo.png".to_string()))
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "what is this"));
+        match &blocks[1] {
+            ContentBlock::ImageUrl { image_url } => {
+                assert!(image_url.url.starts_with("data:image/png;base64,"));
+            }
+            _ => panic!("expected ImageUrl"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_user_content_with_non_image() {
+        let blocks = build_user_content_inner(
+            "",
+            &["/api/files/xyz".to_string()],
+            false,
+            |_| async { Ok::<_, String>((b"hello".to_vec(), "notes.txt".to_string())) },
+        )
+        .await;
+
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("[Attachment: notes.txt → /api/files/xyz]"));
+                assert!(text.contains("Use file_transfer to move it to a client device for further processing."));
+            }
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_user_content_vision_stripped() {
+        let blocks = build_user_content_inner(
+            "look",
+            &["/api/files/img".to_string()],
+            true, // vision_stripped
+            |_| async { Ok::<_, String>((vec![0x89], "photo.png".to_string())) },
+        )
+        .await;
+
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "look"));
+        match &blocks[1] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("[Image: photo.png — not displayed, model does not support vision]"));
+            }
+            _ => panic!("expected Text placeholder"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_user_content_order_text_images_attachments() {
+        // text + 1 image + 1 doc → [text, image, trailing-text-with-attachment]
+        let blocks = build_user_content_inner(
+            "mixed",
+            &[
+                "/api/files/i1".to_string(),
+                "/api/files/d1".to_string(),
+            ],
+            false,
+            |fid| {
+                let fid = fid.to_string();
+                async move {
+                    if fid == "i1" {
+                        Ok::<_, String>((vec![0x89], "pic.jpg".to_string()))
+                    } else {
+                        Ok::<_, String>((b"hi".to_vec(), "doc.txt".to_string()))
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "mixed"));
+        assert!(matches!(&blocks[1], ContentBlock::ImageUrl { .. }));
+        match &blocks[2] {
+            ContentBlock::Text { text } => {
+                assert!(text.contains("[Attachment: doc.txt → /api/files/d1]"));
+            }
+            _ => panic!("expected trailing text"),
+        }
     }
 
     #[test]
