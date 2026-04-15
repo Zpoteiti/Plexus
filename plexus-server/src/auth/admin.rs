@@ -10,6 +10,7 @@ use axum::{Json, Router};
 use plexus_common::error::{ApiError, ErrorCode};
 use serde::Deserialize;
 use std::sync::Arc;
+use tracing::info;
 
 fn admin_claims(headers: &HeaderMap, state: &AppState) -> Result<crate::auth::Claims, ApiError> {
     let c = extract_claims(headers, &state.config.jwt_secret)?;
@@ -157,6 +158,19 @@ async fn put_llm_config(
         .await
         .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
     *state.llm_config.write().await = Some(new_config);
+
+    // Reset vision_stripped on every live session so the next turn retries
+    // images against the newly configured model.
+    for entry in state.sessions.iter() {
+        entry
+            .value()
+            .vision_stripped
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    info!(
+        "Reset vision_stripped on {} live sessions after LLM config update",
+        state.sessions.len()
+    );
 
     Ok(Json(serde_json::json!({ "message": "LLM config updated" })))
 }
