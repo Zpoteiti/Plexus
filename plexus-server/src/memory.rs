@@ -62,8 +62,8 @@ pub async fn compress(
     // Call LLM for summary (reuse shared HTTP client)
     let summary =
         match openai::call_llm(&state.http_client, llm_config, summary_messages, None).await {
-            Ok(openai::LlmResponse::Text(text)) => text,
-            Ok(openai::LlmResponse::ToolCalls(_)) => {
+            Ok(openai::LlmResponse::Text { content, vision_stripped: _ }) => content,
+            Ok(openai::LlmResponse::ToolCalls { calls: _, vision_stripped: _ }) => {
                 warn!("Compression LLM returned tool calls instead of summary");
                 return;
             }

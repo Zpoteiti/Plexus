@@ -170,8 +170,8 @@ pub struct FunctionCall {
 }
 
 pub enum LlmResponse {
-    Text(String),
-    ToolCalls(Vec<ToolCall>),
+    Text { content: String, vision_stripped: bool },
+    ToolCalls { calls: Vec<ToolCall>, vision_stripped: bool },
 }
 
 // -- Internal request/response structs --
@@ -296,13 +296,13 @@ pub async fn call_llm(
         // Tool calls take priority over content
         if let Some(tool_calls) = choice.message.tool_calls {
             if !tool_calls.is_empty() {
-                return Ok(LlmResponse::ToolCalls(tool_calls));
+                return Ok(LlmResponse::ToolCalls { calls: tool_calls, vision_stripped: false });
             }
         }
 
         if let Some(content) = choice.message.content {
             let cleaned = strip_think_tags(&content.into_text());
-            return Ok(LlmResponse::Text(cleaned));
+            return Ok(LlmResponse::Text { content: cleaned, vision_stripped: false });
         }
 
         return Err("LLM returned empty response (no content, no tool_calls)".into());
@@ -421,5 +421,20 @@ mod tests {
             ContentBlock::Text { text: "b".into() },
         ]);
         assert_eq!(c.into_text(), "ab");
+    }
+
+    #[test]
+    fn test_llm_response_has_vision_stripped_flag() {
+        let r = LlmResponse::Text {
+            content: "hi".into(),
+            vision_stripped: false,
+        };
+        match r {
+            LlmResponse::Text { content, vision_stripped } => {
+                assert_eq!(content, "hi");
+                assert!(!vision_stripped);
+            }
+            _ => panic!("expected Text"),
+        }
     }
 }

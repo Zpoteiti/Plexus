@@ -183,7 +183,7 @@ async fn handle_event(
         let response = openai::call_llm(&state.http_client, &config, messages, tools).await;
 
         match response {
-            Ok(LlmResponse::Text(text)) => {
+            Ok(LlmResponse::Text { content, vision_stripped: _ }) => {
                 // Save assistant message
                 let msg_id = uuid::Uuid::new_v4().to_string();
                 crate::db::messages::insert(
@@ -191,7 +191,7 @@ async fn handle_event(
                     &msg_id,
                     session_id,
                     "assistant",
-                    &text,
+                    &content,
                     None,
                     None,
                     None,
@@ -207,7 +207,7 @@ async fn handle_event(
                         chat_id: event.chat_id.clone(),
                         session_id: session_id.to_string(),
                         user_id: user_id.to_string(),
-                        content: text,
+                        content: content,
                         media: vec![],
                         is_progress: false,
                         metadata: Default::default(),
@@ -216,9 +216,9 @@ async fn handle_event(
 
                 return Ok(());
             }
-            Ok(LlmResponse::ToolCalls(tool_calls)) => {
+            Ok(LlmResponse::ToolCalls { calls, vision_stripped: _ }) => {
                 // Save assistant message with tool_calls
-                for tc in &tool_calls {
+                for tc in &calls {
                     let msg_id = uuid::Uuid::new_v4().to_string();
                     crate::db::messages::insert(
                         &state.db,
@@ -235,7 +235,7 @@ async fn handle_event(
                 }
 
                 // Execute each tool call
-                for tc in &tool_calls {
+                for tc in &calls {
                     // Send human-friendly progress hint BEFORE execution
                     let progress_hint = build_tool_hint(&tc.function.name, &tc.function.arguments);
                     let _ = state
@@ -322,7 +322,7 @@ async fn handle_event(
                 // Continue to next iteration (LLM call with updated history)
                 info!(
                     "Session {session_id}: iteration {iteration}, {} tool calls",
-                    tool_calls.len()
+                    calls.len()
                 );
             }
             Err(e) => {
