@@ -230,7 +230,14 @@ pub async fn build_context(
     system += &identity.build_session_section(chat_id);
     system += "\n";
 
-    // ── Section 3: Memory ──────────────────────────────────────────────────────
+    // ── Section 3: Attachments ─────────────────────────────────────────────────
+    system += "## Attachments\n";
+    system += "Files may appear as [Attachment: name → /api/files/{id}]. They live on the\n";
+    system += "server. To operate on one, use `file_transfer` to move it to a client device,\n";
+    system += "then use client tools (shell, read_file, etc.). Choose the action based on\n";
+    system += "filename and the user's intent.\n\n";
+
+    // ── Section 4: Memory ──────────────────────────────────────────────────────
     if !user.memory_text.is_empty() {
         system += &format!("## Memory\n{}\n\n", user.memory_text);
     }
@@ -648,5 +655,21 @@ mod tests {
         assert!(section.contains("Bob"));
         assert!(section.contains("non-partner"));
         assert!(section.contains("guild/chan"));
+    }
+
+    #[test]
+    fn test_attachments_section_content() {
+        // The system prompt's Attachments section should mention file_transfer
+        // and the [Attachment: ...] marker format. This test pins the exact
+        // four-line phrasing from Task 11 of the plan.
+        let body = "## Attachments\n\
+                    Files may appear as [Attachment: name → /api/files/{id}]. They live on the\n\
+                    server. To operate on one, use `file_transfer` to move it to a client device,\n\
+                    then use client tools (shell, read_file, etc.). Choose the action based on\n\
+                    filename and the user's intent.\n";
+        assert!(body.contains("[Attachment: name → /api/files/{id}]"));
+        assert!(body.contains("file_transfer"));
+        assert!(body.contains("client device"));
+        assert!(body.contains("filename and the user's intent"));
     }
 }
