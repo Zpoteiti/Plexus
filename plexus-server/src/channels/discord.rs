@@ -263,7 +263,6 @@ impl EventHandler for DiscordHandler {
         let session_id = format!("discord:{}", msg.channel_id);
 
         // Download any attachments into the file store.
-        let http_client = reqwest::Client::new();
         let mut media_urls: Vec<String> = Vec::new();
 
         for att in &msg.attachments {
@@ -273,7 +272,7 @@ impl EventHandler for DiscordHandler {
                 content.push_str(&marker);
                 continue;
             }
-            let bytes = match http_client.get(&att.url).send().await {
+            let bytes = match self.state.http_client.get(&att.url).send().await {
                 Ok(r) => match r.bytes().await {
                     Ok(b) => b.to_vec(),
                     Err(e) => {
