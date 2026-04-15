@@ -233,11 +233,7 @@ async fn handle_message(
 
         if (file.size as usize) > plexus_common::consts::FILE_UPLOAD_MAX_BYTES {
             content.push('\n');
-            content.push_str(&format!(
-                "[Attachment: {filename} ({:.1} MB) — exceeds {} MB limit, not downloaded]",
-                file.size as f64 / 1024.0 / 1024.0,
-                plexus_common::consts::FILE_UPLOAD_MAX_BYTES / 1024 / 1024
-            ));
+            content.push_str(&oversize_attachment_marker(&filename, file.size as u64));
             continue;
         }
 
@@ -417,6 +413,15 @@ fn synth_filename_for_video_note(ts: chrono::DateTime<chrono::Utc>) -> String {
     format!("video_note_{}.mp4", ts.format("%Y%m%d_%H%M%S"))
 }
 
+/// Inline marker for an attachment that exceeds the upload size limit.
+fn oversize_attachment_marker(name: &str, size: u64) -> String {
+    format!(
+        "[Attachment: {name} ({:.1} MB) — exceeds {} MB limit, not downloaded]",
+        size as f64 / 1024.0 / 1024.0,
+        plexus_common::consts::FILE_UPLOAD_MAX_BYTES / 1024 / 1024
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +437,14 @@ mod tests {
     fn test_synth_filename_photo() {
         let ts = Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 5).unwrap();
         assert_eq!(synth_filename_for_photo(ts), "photo_20260415_103005.jpg");
+    }
+
+    #[test]
+    fn test_oversize_attachment_marker() {
+        use plexus_common::consts::FILE_UPLOAD_MAX_BYTES;
+        let marker = oversize_attachment_marker("big.zip", (FILE_UPLOAD_MAX_BYTES + 1) as u64);
+        assert!(marker.contains("big.zip"));
+        assert!(marker.contains("exceeds"));
+        assert!(marker.contains("20 MB"));
     }
 }
