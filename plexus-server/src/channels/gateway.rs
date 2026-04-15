@@ -111,14 +111,14 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
             .unwrap_or("")
             .to_string();
 
+        let media = extract_media(&parsed);
+
         if session_id.is_empty() {
             continue;
         }
-        if content.is_empty() && extract_media(&parsed).is_empty() {
+        if content.is_empty() && media.is_empty() {
             continue;
         }
-
-        let media = extract_media(&parsed);
 
         // The sender_id from gateway is the user_id (JWT-authenticated)
         let user_id = sender_id.clone().unwrap_or_default();

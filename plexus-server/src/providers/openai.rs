@@ -64,7 +64,6 @@ impl ChatMessage {
         }
     }
 
-    #[allow(dead_code)]
     pub fn user_with_blocks(blocks: Vec<ContentBlock>) -> Self {
         Self {
             role: "user".into(),
