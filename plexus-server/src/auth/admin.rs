@@ -5,7 +5,7 @@ use crate::config::LlmConfig;
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::routing::{get, put};
+use axum::routing::get;
 use axum::{Json, Router};
 use plexus_common::error::{ApiError, ErrorCode};
 use serde::Deserialize;

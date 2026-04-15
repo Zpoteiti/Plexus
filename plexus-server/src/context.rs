@@ -4,11 +4,11 @@ use crate::db::messages::Message;
 use crate::db::users::User;
 use crate::providers::openai::{ChatMessage, FunctionCall, ToolCall};
 use crate::state::AppState;
-use serde_json::Value;
 
 /// Channel-agnostic sender identity for security boundaries.
 /// Constructed by each channel (Discord, Telegram, Gateway) and passed through InboundEvent.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ChannelIdentity {
     pub sender_name: String,
     pub sender_id: String,
@@ -67,13 +67,11 @@ pub struct SkillInfo {
 }
 
 /// Build the full context for an LLM call.
-/// Returns (messages, tool_schemas).
 pub async fn build_context(
     state: &AppState,
     user: &User,
     history: &[Message],
     skills: &[SkillInfo],
-    tool_schemas: &[Value],
     identity: &ChannelIdentity,
     default_soul: &Option<String>,
     chat_id: Option<&str>,

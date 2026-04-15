@@ -16,6 +16,7 @@ pub struct AppState {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct BrowserConnection {
     pub tx: mpsc::Sender<OutboundFrame>,
     pub user_id: String,

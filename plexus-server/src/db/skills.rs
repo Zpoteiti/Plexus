@@ -45,6 +45,7 @@ pub async fn list_by_user(pool: &PgPool, user_id: &str) -> Result<Vec<Skill>, sq
         .await
 }
 
+#[allow(dead_code)]
 pub async fn find_by_name(
     pool: &PgPool,
     user_id: &str,

@@ -121,7 +121,7 @@ pub async fn stop_bot(user_id: &str) {
 }
 
 /// Deliver an outbound event via Discord.
-pub async fn deliver(state: &AppState, event: &OutboundEvent) {
+pub async fn deliver(_state: &AppState, event: &OutboundEvent) {
     let registry = BOT_REGISTRY.read().await;
     let handle = match registry.get(&event.user_id) {
         Some(h) => h,
@@ -271,7 +271,6 @@ impl EventHandler for DiscordHandler {
             content,
             channel: CHANNEL_DISCORD.to_string(),
             chat_id: Some(chat_id),
-            sender_id: Some(sender_id.clone()),
             media: vec![],
             cron_job_id: None,
             identity: Some(crate::context::ChannelIdentity {

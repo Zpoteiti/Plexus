@@ -2,7 +2,7 @@
 
 use crate::bus::{InboundEvent, OutboundEvent};
 use crate::context::{self, ChannelIdentity, SkillInfo};
-use crate::providers::openai::{self, ChatMessage, LlmResponse};
+use crate::providers::openai::{self, LlmResponse};
 use crate::server_tools::{self, ToolContext};
 use crate::state::AppState;
 use plexus_common::consts::{MAX_AGENT_ITERATIONS, USER_MESSAGE_MAX_CHARS};
@@ -143,7 +143,6 @@ async fn handle_event(
             &user,
             &history,
             &skills,
-            &tool_schemas,
             &identity,
             &cached_default_soul,
             event.chat_id.as_deref(),

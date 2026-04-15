@@ -125,7 +125,6 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
             content,
             channel: plexus_common::consts::CHANNEL_GATEWAY.to_string(),
             chat_id,
-            sender_id: Some(user_id.clone()),
             media: vec![],
             cron_job_id: None,
             identity: None, // Gateway = always partner, built from User in agent_loop

@@ -4,6 +4,7 @@ use crate::bus::InboundEvent;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
+#[allow(dead_code)]
 pub struct SessionHandle {
     pub user_id: String,
     pub inbox_tx: mpsc::Sender<InboundEvent>,

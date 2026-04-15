@@ -93,6 +93,7 @@ impl ServerMcpManager {
     }
 
     /// Check if a prefixed tool name belongs to server MCP.
+    #[allow(dead_code)]
     pub fn has_tool(&self, prefixed_name: &str) -> bool {
         if let Some(rest) = prefixed_name.strip_prefix("mcp_") {
             self.sessions
@@ -103,6 +104,7 @@ impl ServerMcpManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn session_count(&self) -> usize {
         self.sessions.len()
     }

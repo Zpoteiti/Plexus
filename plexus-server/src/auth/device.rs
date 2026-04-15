@@ -4,7 +4,7 @@ use crate::auth::extract_claims;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::SinkExt;
 use plexus_common::consts::DEVICE_TOKEN_PREFIX;

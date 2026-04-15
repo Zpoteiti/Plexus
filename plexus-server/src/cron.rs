@@ -53,7 +53,6 @@ async fn poll_and_execute(state: &Arc<AppState>) -> Result<(), String> {
             content: job.message.clone(),
             channel: job.channel.clone(),
             chat_id: Some(job.chat_id.clone()),
-            sender_id: None,
             media: vec![],
             cron_job_id: Some(job.job_id.clone()),
             identity: None,

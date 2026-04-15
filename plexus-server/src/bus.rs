@@ -10,13 +10,13 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct InboundEvent {
     pub session_id: String,
     pub user_id: String,
     pub content: String,
     pub channel: String,
     pub chat_id: Option<String>,
-    pub sender_id: Option<String>,
     pub media: Vec<String>,
     pub cron_job_id: Option<String>,
     pub identity: Option<crate::context::ChannelIdentity>,

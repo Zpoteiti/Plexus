@@ -110,7 +110,10 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
             }
             _ = &mut shutdown_rx => {
                 info!("Telegram bot shutdown requested");
-                dispatcher.shutdown_token().shutdown().expect("shutdown");
+                match dispatcher.shutdown_token().shutdown() {
+                    Ok(fut) => fut.await,
+                    Err(e) => warn!("Telegram shutdown failed: {e}"),
+                }
             }
         }
     });
@@ -181,7 +184,6 @@ async fn handle_message(
         content,
         channel: crate::channels::CHANNEL_TELEGRAM.to_string(),
         chat_id: Some(chat_id),
-        sender_id: Some(sender_id.clone()),
         media: vec![],
         cron_job_id: None,
         identity: Some(crate::context::ChannelIdentity {

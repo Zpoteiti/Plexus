@@ -7,7 +7,6 @@ use regex::Regex;
 use serde_json::Value;
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock};
-use tracing::warn;
 
 static BLOCKED_RANGES: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
     [

@@ -4,7 +4,7 @@ use crate::auth::extract_claims;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{get, patch};
 use axum::{Json, Router};
 use plexus_common::error::{ApiError, ErrorCode};
 use serde::Deserialize;

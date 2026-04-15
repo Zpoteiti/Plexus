@@ -85,6 +85,7 @@ pub struct AppState {
     >,
 
     // Shutdown signal
+    #[allow(dead_code)]
     pub shutdown: CancellationToken,
 }
 
