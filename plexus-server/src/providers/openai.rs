@@ -109,6 +109,7 @@ impl ChatMessage {
 impl Content {
     /// Returns the concatenated text from this content. For Blocks, image
     /// blocks are dropped and text blocks joined in order.
+    #[allow(dead_code)]
     pub fn as_text(&self) -> String {
         match self {
             Content::Text(s) => s.clone(),
@@ -120,6 +121,36 @@ impl Content {
                 })
                 .collect::<Vec<_>>()
                 .join(""),
+        }
+    }
+
+    /// Consuming variant that avoids cloning when the caller owns the Content.
+    pub fn into_text(self) -> String {
+        match self {
+            Content::Text(s) => s,
+            Content::Blocks(blocks) => blocks
+                .into_iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text),
+                    ContentBlock::ImageUrl { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+
+    /// Length in bytes of the text this content would produce, without
+    /// materializing the string.
+    pub fn len(&self) -> usize {
+        match self {
+            Content::Text(s) => s.len(),
+            Content::Blocks(blocks) => blocks
+                .iter()
+                .map(|b| match b {
+                    ContentBlock::Text { text } => text.len(),
+                    ContentBlock::ImageUrl { .. } => 0,
+                })
+                .sum(),
         }
     }
 }
@@ -270,18 +301,7 @@ pub async fn call_llm(
         }
 
         if let Some(content) = choice.message.content {
-            let text = match content {
-                Content::Text(s) => s,
-                Content::Blocks(blocks) => blocks
-                    .into_iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text),
-                        ContentBlock::ImageUrl { .. } => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(""),
-            };
-            let cleaned = strip_think_tags(&text);
+            let cleaned = strip_think_tags(&content.into_text());
             return Ok(LlmResponse::Text(cleaned));
         }
 
@@ -370,5 +390,36 @@ mod tests {
         assert!(matches!(s, Content::Text(ref t) if t == "hello"));
         let a: Content = serde_json::from_str(r#"[{"type":"text","text":"hi"}]"#).unwrap();
         assert!(matches!(a, Content::Blocks(ref v) if v.len() == 1));
+    }
+
+    #[test]
+    fn test_content_len_matches_as_text_len() {
+        let text = Content::Text("hello".into());
+        assert_eq!(text.len(), 5);
+
+        let blocks = Content::Blocks(vec![
+            ContentBlock::Text { text: "ab".into() },
+            ContentBlock::ImageUrl {
+                image_url: ImageUrl { url: "ignored".into() },
+            },
+            ContentBlock::Text { text: "cde".into() },
+        ]);
+        assert_eq!(blocks.len(), 5); // "ab" + "cde", image dropped
+        assert_eq!(blocks.as_text().len(), 5);
+    }
+
+    #[test]
+    fn test_content_into_text_consumes() {
+        let c = Content::Text("hi".into());
+        assert_eq!(c.into_text(), "hi");
+
+        let c = Content::Blocks(vec![
+            ContentBlock::Text { text: "a".into() },
+            ContentBlock::ImageUrl {
+                image_url: ImageUrl { url: "x".into() },
+            },
+            ContentBlock::Text { text: "b".into() },
+        ]);
+        assert_eq!(c.into_text(), "ab");
     }
 }

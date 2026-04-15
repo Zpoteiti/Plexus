@@ -254,7 +254,7 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
         .map(|m| {
-            let content_len = m.content.as_ref().map(|c| c.as_text().len()).unwrap_or(0);
+            let content_len = m.content.as_ref().map(|c| c.len()).unwrap_or(0);
             let tool_calls_len = m
                 .tool_calls
                 .as_ref()
