@@ -91,6 +91,22 @@ async fn handle_event(
         content
     };
 
+    // If the inbound event carries media, build the canonical multimodal
+    // `Content::Blocks` now and persist it as JSON in `messages.content`.
+    // `reconstruct_history` will rehydrate it on each subsequent iteration,
+    // so images survive both mid-turn reloads and the 24 h file-store TTL.
+    // When there's no media, we store the plain text as today.
+    let content_to_store = if event.media.is_empty() {
+        content.clone()
+    } else {
+        let blocks = crate::context::build_user_content(user_id, &content, &event.media).await;
+        // Serialize Content::Blocks(blocks) → JSON array of blocks.
+        // On serde failure (should be impossible for owned data), fall back
+        // to plain text so the turn still proceeds.
+        serde_json::to_string(&crate::providers::openai::Content::Blocks(blocks))
+            .unwrap_or_else(|_| content.clone())
+    };
+
     // Save user message to DB (serves as crash recovery checkpoint per ADR-9)
     let msg_id = uuid::Uuid::new_v4().to_string();
     crate::db::messages::insert(
@@ -98,7 +114,7 @@ async fn handle_event(
         &msg_id,
         session_id,
         plexus_common::consts::ROLE_USER,
-        &content,
+        &content_to_store,
         None,
         None,
         None,
@@ -153,7 +169,6 @@ async fn handle_event(
             &identity,
             &cached_default_soul,
             event.chat_id.as_deref(),
-            &event.media,
             vision_stripped,
         ).await;
 

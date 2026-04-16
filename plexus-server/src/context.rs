@@ -3,7 +3,7 @@
 use crate::db::messages::Message;
 use crate::db::users::User;
 use crate::file_store;
-use crate::providers::openai::{ChatMessage, ContentBlock, FunctionCall, ImageUrl, ToolCall};
+use crate::providers::openai::{ChatMessage, Content, ContentBlock, FunctionCall, ImageUrl, ToolCall};
 use crate::state::AppState;
 
 /// Channel-agnostic sender identity for security boundaries.
@@ -72,15 +72,18 @@ use base64::Engine;
 
 /// Build the content blocks for a user message that may include media.
 /// Ordering: text → image blocks → trailing attachment-references text block.
-/// When `vision_stripped=true`, image media is replaced with text placeholders.
+///
+/// Images are always emitted as base64 data-URL `ImageUrl` blocks. Vision
+/// stripping is handled as a separate post-pass in the provider layer via
+/// `providers::openai::strip_images_in_place`, so the canonical form stored
+/// in the DB remains unstripped.
 pub async fn build_user_content(
     user_id: &str,
     content: &str,
     media: &[String],
-    vision_stripped: bool,
 ) -> Vec<ContentBlock> {
     let uid = user_id.to_string();
-    build_user_content_inner(content, media, vision_stripped, move |fid| {
+    build_user_content_inner(content, media, move |fid| {
         let uid = uid.clone();
         let fid = fid.to_string();
         async move { file_store::load_file(&uid, &fid).await.map_err(|e| e.message) }
@@ -92,7 +95,6 @@ pub async fn build_user_content(
 async fn build_user_content_inner<F, Fut>(
     content: &str,
     media: &[String],
-    vision_stripped: bool,
     load: F,
 ) -> Vec<ContentBlock>
 where
@@ -128,20 +130,12 @@ where
         let mime = mime_from_filename(&filename);
 
         if mime.starts_with("image/") {
-            if vision_stripped {
-                blocks.push(ContentBlock::Text {
-                    text: format!(
-                        "[Image: {filename} — not displayed, model does not support vision]"
-                    ),
-                });
-            } else {
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                blocks.push(ContentBlock::ImageUrl {
-                    image_url: ImageUrl {
-                        url: format!("data:{mime};base64,{b64}"),
-                    },
-                });
-            }
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            blocks.push(ContentBlock::ImageUrl {
+                image_url: ImageUrl {
+                    url: format!("data:{mime};base64,{b64}"),
+                },
+            });
         } else {
             non_image_refs.push(format!(
                 "[Attachment: {filename} → {url}]\n\
@@ -186,10 +180,14 @@ fn mime_from_filename(name: &str) -> String {
 
 /// Build the full context for an LLM call.
 ///
-/// `latest_user_media` / `vision_stripped` apply only to the last pending user
-/// message (assumed to be the tail of `history` when it is a user row). All
-/// earlier history rows are reconstructed as plain-text `ChatMessage`s — the
-/// DB still persists plain strings in this milestone.
+/// User-role rows may hold JSON-serialized `Content::Blocks` (written by
+/// `agent_loop` when the original message had media). `reconstruct_history`
+/// rehydrates those into `ChatMessage::content = Some(Content::Blocks(..))`
+/// in place; plain-text rows round-trip as `Content::Text`.
+///
+/// When `vision_stripped` is true, `strip_images_in_place` runs as a final
+/// post-pass, replacing every image block in every user message with a text
+/// placeholder. The canonical (unstripped) form stays in the DB.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_context(
     state: &AppState,
@@ -199,7 +197,6 @@ pub async fn build_context(
     identity: &ChannelIdentity,
     default_soul: &Option<String>,
     chat_id: Option<&str>,
-    latest_user_media: &[String],
     vision_stripped: bool,
 ) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
@@ -267,36 +264,21 @@ pub async fn build_context(
 
     messages.push(ChatMessage::system(system));
 
-    // Split off the trailing user row (the current pending user message) so we
-    // can rebuild it as multimodal content blocks via `build_user_content`.
-    // Earlier rows stay plain-text via `reconstruct_history`.
-    let (prior, latest_user_text) = split_trailing_user(history);
-    messages.extend(reconstruct_history(prior));
-
-    if let Some(text) = latest_user_text {
-        let blocks =
-            build_user_content(&user.user_id, text, latest_user_media, vision_stripped).await;
-        if !blocks.is_empty() {
-            messages.push(ChatMessage::user_with_blocks(blocks));
-        }
-    }
+    // Reconstruct the full history — user rows with multimodal content are
+    // rehydrated from their JSON form by `reconstruct_history`.
+    messages.extend(reconstruct_history(history));
 
     // Non-partner untrusted wrapper is applied when saving to DB in agent_loop.rs,
-    // so it is already present in `latest_user_text`.
+    // so it is already present in the stored user content.
+
+    // Post-pass: if a prior LLM call failed with images and succeeded without,
+    // replace every image block with a text placeholder. Touches only
+    // role=="user" messages, so it's safe to apply after the system prompt.
+    if vision_stripped {
+        let _ = crate::providers::openai::strip_images_in_place(&mut messages);
+    }
 
     messages
-}
-
-/// Returns `(prior_history, latest_user_text)` when the final row is a user
-/// message. If the tail is not a user row (e.g. mid-turn tool result),
-/// returns `(history, None)`.
-fn split_trailing_user(history: &[Message]) -> (&[Message], Option<&str>) {
-    if let Some(last) = history.last()
-        && last.role == plexus_common::consts::ROLE_USER
-    {
-        return (&history[..history.len() - 1], Some(last.content.as_str()));
-    }
-    (history, None)
 }
 
 /// Build device status section for system prompt.
@@ -345,6 +327,10 @@ async fn build_device_status(state: &AppState, user_id: &str) -> String {
 /// Reconstruct chat history from DB message rows.
 /// Consecutive assistant rows with tool_name → single assistant message with tool_calls array.
 /// Tool rows → tool message with tool_call_id.
+///
+/// User rows whose `content` is a JSON-serialized `Content::Blocks` array are
+/// rehydrated into multimodal `ChatMessage`s; plain-text rows fall back to
+/// `Content::Text`.
 fn reconstruct_history(messages: &[Message]) -> Vec<ChatMessage> {
     let mut result = Vec::new();
     let mut i = 0;
@@ -358,7 +344,17 @@ fn reconstruct_history(messages: &[Message]) -> Vec<ChatMessage> {
                 i += 1;
             }
             plexus_common::consts::ROLE_USER => {
-                result.push(ChatMessage::user(msg.content.clone()));
+                if let Some(content) = try_parse_user_content(&msg.content) {
+                    result.push(ChatMessage {
+                        role: "user".into(),
+                        content: Some(content),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    });
+                } else {
+                    result.push(ChatMessage::user(msg.content.clone()));
+                }
                 i += 1;
             }
             plexus_common::consts::ROLE_ASSISTANT => {
@@ -403,6 +399,19 @@ fn reconstruct_history(messages: &[Message]) -> Vec<ChatMessage> {
     }
 
     result
+}
+
+/// Try to interpret a raw stored user-content string as a JSON-serialized
+/// `Content::Blocks` array. Returns `Some(Content::Blocks(..))` on success,
+/// `None` if the string is plain text (or JSON but not a valid block array).
+fn try_parse_user_content(raw: &str) -> Option<Content> {
+    if !raw.starts_with('[') {
+        return None;
+    }
+    match serde_json::from_str::<Content>(raw) {
+        Ok(c @ Content::Blocks(_)) => Some(c),
+        _ => None,
+    }
 }
 
 /// Estimate token count from text. Simple chars/4 approximation.
@@ -529,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_user_content_text_only() {
-        let blocks = build_user_content_inner("hello", &[], false, |_| async {
+        let blocks = build_user_content_inner("hello", &[], |_| async {
             Err::<(Vec<u8>, String), String>("should not be called".into())
         })
         .await;
@@ -544,7 +553,6 @@ mod tests {
         let blocks = build_user_content_inner(
             "what is this",
             &["/api/files/abc123".to_string()],
-            false,
             |fid| {
                 let bytes = png_bytes.clone();
                 let fid = fid.to_string();
@@ -571,7 +579,6 @@ mod tests {
         let blocks = build_user_content_inner(
             "",
             &["/api/files/xyz".to_string()],
-            false,
             |_| async { Ok::<_, String>((b"hello".to_vec(), "notes.txt".to_string())) },
         )
         .await;
@@ -587,26 +594,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_user_content_vision_stripped() {
-        let blocks = build_user_content_inner(
-            "look",
-            &["/api/files/img".to_string()],
-            true, // vision_stripped
-            |_| async { Ok::<_, String>((vec![0x89], "photo.png".to_string())) },
-        )
-        .await;
-
-        assert_eq!(blocks.len(), 2);
-        assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "look"));
-        match &blocks[1] {
-            ContentBlock::Text { text } => {
-                assert!(text.contains("[Image: photo.png — not displayed, model does not support vision]"));
-            }
-            _ => panic!("expected Text placeholder"),
-        }
-    }
-
-    #[tokio::test]
     async fn test_build_user_content_order_text_images_attachments() {
         // text + 1 image + 1 doc → [text, image, trailing-text-with-attachment]
         let blocks = build_user_content_inner(
@@ -615,7 +602,6 @@ mod tests {
                 "/api/files/i1".to_string(),
                 "/api/files/d1".to_string(),
             ],
-            false,
             |fid| {
                 let fid = fid.to_string();
                 async move {
@@ -637,6 +623,54 @@ mod tests {
                 assert!(text.contains("[Attachment: doc.txt → /api/files/d1]"));
             }
             _ => panic!("expected trailing text"),
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_history_parses_user_json_blocks() {
+        // A user row saved by the new write path: JSON-serialized Content::Blocks.
+        let raw_blocks = r#"[{"type":"text","text":"hi"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]"#;
+        let msgs = vec![Message {
+            message_id: "m1".into(),
+            session_id: "s".into(),
+            role: "user".into(),
+            content: raw_blocks.to_string(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_arguments: None,
+            compressed: false,
+            created_at: chrono::Utc::now(),
+        }];
+        let result = reconstruct_history(&msgs);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+        match result[0].content.as_ref().unwrap() {
+            Content::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "hi"));
+                assert!(matches!(&blocks[1], ContentBlock::ImageUrl { .. }));
+            }
+            _ => panic!("expected Content::Blocks after JSON sniff"),
+        }
+    }
+
+    #[test]
+    fn test_reconstruct_history_falls_back_to_text_on_plain_string() {
+        let msgs = vec![Message {
+            message_id: "m1".into(),
+            session_id: "s".into(),
+            role: "user".into(),
+            content: "just plain text".into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_arguments: None,
+            compressed: false,
+            created_at: chrono::Utc::now(),
+        }];
+        let result = reconstruct_history(&msgs);
+        match result[0].content.as_ref().unwrap() {
+            Content::Text(t) => assert_eq!(t, "just plain text"),
+            _ => panic!("plain string should round-trip as Content::Text"),
         }
     }
 
