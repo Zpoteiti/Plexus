@@ -194,6 +194,28 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
         assert!(extract_media(&parsed).is_empty());
     }
+
+    #[test]
+    fn test_deliver_produces_session_update_frame() {
+        let event = crate::bus::OutboundEvent {
+            channel: "gateway".into(),
+            chat_id: Some("stale-chat-id".into()),
+            session_id: "session-123".into(),
+            user_id: "user-alice".into(),
+            content: "hello".into(),
+            media: vec![],
+            is_progress: false,
+            metadata: Default::default(),
+        };
+        let frame = build_deliver_frame(&event);
+        assert_eq!(frame["type"], "session_update");
+        assert_eq!(frame["user_id"], "user-alice");
+        assert_eq!(frame["session_id"], "session-123");
+        // Chat_id must NOT leak into the outbound frame — it's a stale per-connect UUID.
+        assert!(frame.get("chat_id").is_none());
+        assert!(frame.get("content").is_none());
+        assert!(frame.get("media").is_none());
+    }
 }
 
 /// Deliver an outbound event to the gateway.
@@ -203,28 +225,7 @@ pub async fn deliver(state: &AppState, event: &OutboundEvent) {
         warn!("Gateway: not connected, dropping outbound message");
         return;
     };
-
-    let mut msg = serde_json::json!({
-        "type": "send",
-        "chat_id": event.chat_id,
-        "session_id": event.session_id,
-        "content": event.content,
-    });
-
-    let mut metadata = serde_json::Map::new();
-    if event.is_progress {
-        metadata.insert("_progress".into(), serde_json::json!(true));
-    }
-    if !event.media.is_empty() {
-        metadata.insert("media".into(), serde_json::json!(event.media));
-    }
-    if let Some(sender_id) = event.metadata.get("sender_id") {
-        metadata.insert("sender_id".into(), serde_json::json!(sender_id));
-    }
-    if !metadata.is_empty() {
-        msg["metadata"] = serde_json::Value::Object(metadata);
-    }
-
+    let msg = build_deliver_frame(event);
     let json = serde_json::to_string(&msg).unwrap();
     let mut s = sink.lock().await;
     if let Err(e) = futures_util::SinkExt::send(
@@ -233,6 +234,16 @@ pub async fn deliver(state: &AppState, event: &OutboundEvent) {
     )
     .await
     {
-        warn!("Gateway send error: {e}");
+        warn!("Gateway: send failed: {e}");
     }
+}
+
+/// Build the WS frame sent to plexus-gateway. Always a session_update
+/// pointer — browsers fetch content via the existing REST history endpoint.
+fn build_deliver_frame(event: &crate::bus::OutboundEvent) -> serde_json::Value {
+    serde_json::json!({
+        "type": "session_update",
+        "user_id": event.user_id,
+        "session_id": event.session_id,
+    })
 }
