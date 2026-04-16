@@ -345,11 +345,8 @@ impl EventHandler for DiscordHandler {
                 sender_name: sender_name.clone(),
                 sender_id,
                 is_partner,
-                partner_name: self.partner_discord_id.clone(),
-                partner_id: self.partner_discord_id.clone(),
                 channel_type: CHANNEL_DISCORD.to_string(),
             }),
-            metadata: Default::default(),
         };
 
         if let Err(e) = bus::publish_inbound(&self.state, event).await {

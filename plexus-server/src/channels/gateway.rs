@@ -133,7 +133,6 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
             media,
             cron_job_id: None,
             identity: None, // Gateway = always partner, built from User in agent_loop
-            metadata: Default::default(),
         };
 
         if let Err(e) = bus::publish_inbound(state, event).await {

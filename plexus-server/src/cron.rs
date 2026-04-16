@@ -56,7 +56,6 @@ async fn poll_and_execute(state: &Arc<AppState>) -> Result<(), String> {
             media: vec![],
             cron_job_id: Some(job.job_id.clone()),
             identity: None,
-            metadata: Default::default(),
         };
 
         if let Err(e) = bus::publish_inbound(state, event).await {

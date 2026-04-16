@@ -13,10 +13,6 @@ pub struct ChannelIdentity {
     pub sender_name: String,
     pub sender_id: String,
     pub is_partner: bool,
-    #[allow(dead_code)]
-    pub partner_name: String,
-    #[allow(dead_code)]
-    pub partner_id: String,
     pub channel_type: String,
 }
 
@@ -50,11 +46,9 @@ impl ChannelIdentity {
             .clone()
             .unwrap_or_else(|| user.email.clone());
         Self {
-            sender_name: name.clone(),
+            sender_name: name,
             sender_id: user.user_id.clone(),
             is_partner: true,
-            partner_name: name,
-            partner_id: user.user_id.clone(),
             channel_type: plexus_common::consts::CHANNEL_GATEWAY.into(),
         }
     }
@@ -571,8 +565,6 @@ mod tests {
             sender_name: "Alice".into(),
             sender_id: "123".into(),
             is_partner: true,
-            partner_name: "Alice".into(),
-            partner_id: "123".into(),
             channel_type: plexus_common::consts::CHANNEL_GATEWAY.into(),
         };
         let section = id.build_session_section(Some("dm/12345"));
@@ -726,8 +718,6 @@ mod tests {
             sender_name: "Bob".into(),
             sender_id: "456".into(),
             is_partner: false,
-            partner_name: "Alice".into(),
-            partner_id: "123".into(),
             channel_type: plexus_common::consts::CHANNEL_DISCORD.into(),
         };
         let section = id.build_session_section(Some("guild/chan"));

@@ -3,7 +3,6 @@
 use crate::session::SessionHandle;
 use crate::state::AppState;
 use plexus_common::consts::RATE_LIMIT_CACHE_TTL_SEC;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -20,8 +19,6 @@ pub struct InboundEvent {
     pub media: Vec<String>,
     pub cron_job_id: Option<String>,
     pub identity: Option<crate::context::ChannelIdentity>,
-    #[allow(dead_code)]
-    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]

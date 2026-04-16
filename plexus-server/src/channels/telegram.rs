@@ -290,11 +290,8 @@ async fn handle_message(
             sender_name: sender_name.clone(),
             sender_id,
             is_partner,
-            partner_name: partner_telegram_id.to_string(),
-            partner_id: partner_telegram_id.to_string(),
             channel_type: crate::channels::CHANNEL_TELEGRAM.to_string(),
         }),
-        metadata: Default::default(),
     };
 
     if let Err(e) = bus::publish_inbound(state, event).await {
