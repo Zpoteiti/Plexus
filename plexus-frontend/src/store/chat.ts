@@ -14,6 +14,7 @@ interface ChatState {
   init: () => void
   loadSessions: () => Promise<void>
   loadMessages: (sessionId: string) => Promise<void>
+  refreshSession: (sessionId: string) => Promise<void>
   deleteSessions: (sessionIds: string[]) => Promise<void>
   setCurrentSession: (sessionId: string | null) => void
   sendMessage: (sessionId: string, content: string, media?: string[]) => void
@@ -55,6 +56,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         store.setProgressHint(sessionId, data['content'] as string)
       } else if (data['type'] === 'error') {
         store.handleError((data['reason'] as string | undefined) ?? 'Unknown error')
+      } else if (data['type'] === 'session_update') {
+        // Server tells us a session has new content. Re-fetch via REST so
+        // the UI picks up anything the browser doesn't have yet.
+        void store.refreshSession(sessionId)
       }
     })
 
@@ -111,6 +116,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         restLoadedSessions: { ...s.restLoadedSessions, [sessionId]: true as const },
       }
     })
+  },
+
+  refreshSession: async (sessionId) => {
+    // Bypass the restLoadedSessions guard so new messages get picked up.
+    set(s => ({
+      restLoadedSessions: Object.fromEntries(
+        Object.entries(s.restLoadedSessions).filter(([id]) => id !== sessionId),
+      ),
+    }))
+    await get().loadMessages(sessionId)
   },
 
   setCurrentSession: (sessionId) => {
