@@ -241,8 +241,6 @@ async fn handle_event(
                         user_id: user_id.to_string(),
                         content: content,
                         media: vec![],
-                        is_progress: false,
-                        metadata: Default::default(),
                     })
                     .await;
 
@@ -286,8 +284,6 @@ async fn handle_event(
                             user_id: user_id.to_string(),
                             content: progress_hint,
                             media: vec![],
-                            is_progress: true,
-                            metadata: Default::default(),
                         })
                         .await;
 
@@ -518,8 +514,6 @@ async fn send_error(
             user_id: user_id.to_string(),
             content: message.to_string(),
             media: vec![],
-            is_progress: false,
-            metadata: Default::default(),
         })
         .await;
 }

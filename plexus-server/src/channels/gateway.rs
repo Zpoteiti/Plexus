@@ -204,8 +204,6 @@ mod tests {
             user_id: "user-alice".into(),
             content: "hello".into(),
             media: vec![],
-            is_progress: false,
-            metadata: Default::default(),
         };
         let frame = build_deliver_frame(&event);
         assert_eq!(frame["type"], "session_update");

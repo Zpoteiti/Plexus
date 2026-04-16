@@ -110,8 +110,6 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
             user_id: ctx.user_id.clone(),
             content,
             media: media_urls,
-            is_progress: false,
-            metadata: Default::default(),
         })
         .await;
 

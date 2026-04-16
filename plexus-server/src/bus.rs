@@ -32,8 +32,6 @@ pub struct OutboundEvent {
     pub user_id: String,
     pub content: String,
     pub media: Vec<String>,
-    pub is_progress: bool,
-    pub metadata: HashMap<String, String>,
 }
 
 /// Publish an inbound event: rate limit check → find/create session → send to inbox.
