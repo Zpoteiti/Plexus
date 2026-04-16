@@ -178,6 +178,47 @@ fn mime_from_filename(name: &str) -> String {
     .to_string()
 }
 
+/// Per-user channel configuration summary used to render the `## Channels`
+/// section. `None` fields mean the channel is not configured or not enabled
+/// for this user.
+#[derive(Debug, Clone, Default)]
+pub struct ChannelSnapshot {
+    pub discord_partner_id: Option<String>,
+    pub telegram_partner_id: Option<String>,
+}
+
+fn render_channels_section(snap: &ChannelSnapshot) -> String {
+    let mut s = String::from("## Channels\n");
+    s += "Your partner is reachable via the `message` tool on these channels:\n";
+    if let Some(id) = &snap.discord_partner_id {
+        s += &format!("- discord: chat_id=\"dm/{id}\"\n");
+    }
+    if let Some(id) = &snap.telegram_partner_id {
+        s += &format!("- telegram: chat_id=\"{id}\"\n");
+    }
+    s += "- gateway: no chat_id needed — messages post to the current session\n";
+    s
+}
+
+async fn load_channel_snapshot(state: &AppState, user_id: &str) -> ChannelSnapshot {
+    let discord_partner_id = crate::db::discord::get_config(&state.db, user_id)
+        .await
+        .ok()
+        .flatten()
+        .filter(|c| c.enabled)
+        .and_then(|c| c.partner_discord_id);
+    let telegram_partner_id = crate::db::telegram::get_config(&state.db, user_id)
+        .await
+        .ok()
+        .flatten()
+        .filter(|c| c.enabled)
+        .and_then(|c| c.partner_telegram_id);
+    ChannelSnapshot {
+        discord_partner_id,
+        telegram_partner_id,
+    }
+}
+
 /// Build the full context for an LLM call.
 ///
 /// User-role rows may hold JSON-serialized `Content::Blocks` (written by
@@ -225,6 +266,11 @@ pub async fn build_context(
     // 2b — Current Session
     system += &identity.build_session_section(chat_id);
     system += "\n";
+
+    // 2c — Channels
+    let snap = load_channel_snapshot(state, &user.user_id).await;
+    system += &render_channels_section(&snap);
+    system += "Reply on the current channel unless the partner asks otherwise.\n\n";
 
     // ── Section 3: Attachments ─────────────────────────────────────────────────
     system += "## Attachments\n";
@@ -704,5 +750,44 @@ mod tests {
         assert!(body.contains("file_transfer"));
         assert!(body.contains("client device"));
         assert!(body.contains("filename and the user's intent"));
+    }
+
+    #[test]
+    fn test_channels_section_lists_discord_when_enabled() {
+        let snap = ChannelSnapshot {
+            discord_partner_id: Some("owner_dc".into()),
+            telegram_partner_id: None,
+        };
+        let section = render_channels_section(&snap);
+        assert!(section.contains("## Channels"));
+        assert!(section.contains(r#"chat_id="dm/owner_dc""#));
+        assert!(!section.contains("telegram"));
+        assert!(section.contains("gateway"));
+    }
+
+    #[test]
+    fn test_channels_section_lists_telegram_when_enabled() {
+        let snap = ChannelSnapshot {
+            discord_partner_id: None,
+            telegram_partner_id: Some("owner_tg".into()),
+        };
+        let section = render_channels_section(&snap);
+        assert!(section.contains("## Channels"));
+        assert!(!section.contains("discord"));
+        assert!(section.contains(r#"chat_id="owner_tg""#));
+        assert!(section.contains("gateway"));
+    }
+
+    #[test]
+    fn test_channels_section_only_gateway_when_none_configured() {
+        let snap = ChannelSnapshot {
+            discord_partner_id: None,
+            telegram_partner_id: None,
+        };
+        let section = render_channels_section(&snap);
+        assert!(section.contains("## Channels"));
+        assert!(!section.contains("discord"));
+        assert!(!section.contains("telegram"));
+        assert!(section.contains("gateway"));
     }
 }
