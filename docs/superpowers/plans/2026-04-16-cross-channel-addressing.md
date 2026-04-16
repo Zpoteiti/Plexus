@@ -1012,3 +1012,28 @@ Prerequisite: both Discord and Telegram bots configured for your user.
 - Push notifications for offline browsers (would require a PWA service worker).
 - Telegram group targeting beyond what inbound caching already provides.
 - Retry policy for `message` calls to unconfigured channels — currently log-and-drop.
+
+---
+
+## 8. Post-Plan Implementation Notes
+
+### CC-4 signature adaptation
+
+The plan's guard description assumed `ctx.identity.as_ref()` (a hypothetical field on `ToolContext`). Reality: `ToolContext` didn't carry identity — only `user_id`, `session_id`, `channel`, `chat_id`, `is_cron`. Implementation (commit `ea8018e`) added a new `pub is_partner: bool` field to `ToolContext` and populated it in agent_loop from `event.identity.as_ref().map_or(true, |i| i.is_partner)`. The `check_cross_channel` helper takes `is_partner: bool` directly — flatter and easier to test. Tests cover: partner unrestricted, non-partner same channel+chat_id allowed, non-partner cross-channel rejected, non-partner same-channel-different-chat_id rejected. Cron events (`event.identity = None`) default to `is_partner = true` and remain unrestricted.
+
+### OutboundEvent field cleanup (added after CC-6)
+
+CC-2 stopped reading `OutboundEvent.is_progress` and `OutboundEvent.metadata` in gateway's `deliver`. Post-branch audit showed no other `deliver` ever read them either — the fields were purely dead. Commit `052edb3` removed both fields from the struct and every construction site (agent_loop.rs × 3, message.rs × 1, gateway.rs test × 1). Clears the only remaining cargo warning on the branch.
+
+### Full commit sequence for this plan
+
+| SHA | Task |
+|---|---|
+| `ba56f34` | CC-1 gateway receiver-side routing + `OutboundFrame::SessionUpdate` variant |
+| `ed0f29a` | CC-1 polish — empty-id guard moved into `route_session_update` |
+| `1daa27c` | CC-2 server `gateway::deliver` emits `session_update` pointer |
+| `2417258` | CC-3 Discord DM-channel cache + `parse_chat_id` helper |
+| `ea8018e` | CC-4 non-partner cross-channel guard (via new `ToolContext.is_partner`) |
+| `8aa6f50` | CC-5 system prompt `## Channels` section |
+| `176961f` | CC-6 frontend `session_update` handler + `refreshSession` |
+| `052edb3` | cleanup — drop dead `OutboundEvent.is_progress` and `.metadata` |

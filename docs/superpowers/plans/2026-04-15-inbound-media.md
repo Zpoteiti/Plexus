@@ -2588,3 +2588,38 @@ Smoke test results go in the PR description if one is opened.
 - [ ] Frontend build clean: `cd plexus-frontend && npm run build`.
 - [ ] Manual smoke tests in Task 18 all pass.
 - [ ] Spec `docs/superpowers/specs/2026-04-15-inbound-media-design.md` matches implementation (or updated to match).
+
+---
+
+## Post-Plan Adjustments (as built)
+
+The plan above is preserved as a historical artifact. The implementation landed slightly differently in a few places; read these if you're reconciling the plan against what's on HEAD.
+
+### Task 19: Persist multimodal user messages as JSON in DB (added)
+
+Not in the original plan. Added after Task 18 surfaced two gaps with the "rebuild-from-file-store every iteration" approach:
+
+- Context rebuilds after the 24 h file-store TTL lost the image (file URL 404).
+- Mid-ReAct-turn iterations lost the image because only the tail user row was rebuilt as `Content::Blocks`.
+
+**What shipped:** agent_loop now calls `build_user_content` once at user-message save time (when `event.media` is non-empty), serializes the resulting `Content::Blocks` to JSON, and stores it in `messages.content`. `reconstruct_history` sniff-parses user rows on read. Commit `e848798`.
+
+**Simplifications folded into Task 19:**
+
+- `build_user_content`'s `vision_stripped: bool` parameter (added in Task 7) was **removed**. The function now always produces the canonical unstripped form.
+- `split_trailing_user` helper (added in Task 8) was **deleted**. The tail user row is already in its final JSON form in the DB, so no tail-specific path exists.
+- `build_context`'s `latest_user_media: &[String]` parameter (added in Task 8) was **removed**.
+- Vision stripping moved to a post-pass in `build_context` via `providers::openai::strip_images_in_place` (which already exists from Task 5). Placeholder wording is the generic `"[Image omitted: model does not support vision]"` (no filename) — consistent with the provider's own strip behavior.
+- `ChatMessage::user_with_blocks` is now `#[cfg(test)]` since production no longer needs the constructor — `reconstruct_history` builds the `ChatMessage` literal directly.
+
+### Task 7 polish (added mid-Task-7)
+
+`.heic` and `.heif` added to `mime_from_filename` so iPhone photos render inline. Commit `6394a03`.
+
+### Task 3 polish (added mid-Task-3)
+
+`Content::into_text(self)` (consuming variant, avoids a clone in `call_llm`) and `Content::len(&self)` (byte length without allocating) added alongside `as_text`. Commit `0539d6e`.
+
+### Where to read the current architecture
+
+The spec `docs/superpowers/specs/2026-04-15-inbound-media-design.md` has been updated to describe the post-Task-19 architecture (3-arg `build_user_content`, post-pass stripping, base64 in DB). Prefer it over Tasks 7/8 of this plan when reconciling against HEAD.

@@ -54,16 +54,18 @@ Behavior is identical across all three channels.
                                 bus::publish_inbound → session
                                               │
                                               ▼
-                  context::build_user_content(state, user, content,
-                                              media, vision_stripped)
+                  context::build_user_content(user_id, content, media)
                      - image mimetype → read bytes → base64 →
                          ContentBlock::ImageUrl { data-URL }
                      - non-image → append "[Attachment: name →
                          /api/files/{id}]\nUse file_transfer to move
                          it to a client device for further processing."
-                     - when vision_stripped=true → image blocks become
-                         "[Image: name — not displayed, model does not
-                          support vision]" text
+
+                     (Canonical unstripped form. At read time, build_context
+                      applies providers::openai::strip_images_in_place when
+                      the session's vision_stripped flag is set — image
+                      blocks become generic "[Image omitted: model does not
+                      support vision]" text.)
                                               │
                                               ▼
                               providers::openai::chat_completion
@@ -86,9 +88,9 @@ Behavior is identical across all three channels.
 **Invariants**
 
 - Channel adapters never call the LLM. They only download bytes, call `file_store::save_upload`, and populate `InboundEvent.media` with the returned URLs.
-- Base64 encoding happens once, at **context-build time**, reading from the file store.
-- The 24 h file-store TTL is a hot cache; the DB row is the durable record.
-- The agent loop owns the strip-retry decision via `SessionHandle.vision_stripped`.
+- Base64 encoding happens once, at **agent-loop save time**, and is persisted as JSON-serialized `Content::Blocks` in `messages.content`. `reconstruct_history` sniff-parses user rows on every context build.
+- The 24 h file-store TTL is a hot cache; the DB row (with base64 inline) is the durable record.
+- The agent loop owns the strip-retry decision via `SessionHandle.vision_stripped`; stripping itself runs as a post-pass on the assembled message list inside `build_context`, using the provider module's `strip_images_in_place`.
 
 ---
 
@@ -218,11 +220,9 @@ Add:
 
 ```rust
 pub async fn build_user_content(
-    state: &AppState,
     user_id: &str,
     content: &str,
     media: &[String],
-    vision_stripped: bool,
 ) -> Vec<ContentBlock>
 ```
 
@@ -233,12 +233,9 @@ Behavior:
    - Parse `/api/files/{id}` from the URL.
    - `file_store::load_file(user_id, file_id).await` → `(bytes, filename)`.
    - Detect mime from filename extension (and optionally content sniff).
-   - If mime is an image:
-     - If `vision_stripped`, push `ContentBlock::Text { text: "[Image: {filename} — not displayed, model does not support vision]" }`.
-     - Else, base64-encode bytes, push `ContentBlock::ImageUrl { image_url: ImageUrl { url: format!("data:{mime};base64,{b64}") } }`.
-   - Else (non-image):
-     - Defer to a trailing text block (see step 3).
-   - On `load_file` error: push `ContentBlock::Text { text: "[Attachment: {filename} — storage read failed]" }`.
+   - If mime is an image: base64-encode bytes, push `ContentBlock::ImageUrl { image_url: ImageUrl { url: format!("data:{mime};base64,{b64}") } }`.
+   - Else (non-image): defer to a trailing text block (see step 3).
+   - On `load_file` error: push `ContentBlock::Text { text: "[Attachment: {file_id} — storage read failed]" }`.
 3. Collect all non-image attachment references and append a single trailing `ContentBlock::Text`:
 
    ```
@@ -250,12 +247,15 @@ Behavior:
 
 4. Return the accumulated blocks.
 
-`build_context`'s existing signature is unchanged. Internally, when building the latest user message, it calls `build_user_content(...)` and constructs `ChatMessage::user_with_blocks(blocks)` instead of `ChatMessage::user(text)`.
+The function produces the **canonical unstripped form** — image blocks always carry the base64 data URL regardless of session state. Vision stripping (when the session's `vision_stripped` flag is set) happens later, as a post-pass in `build_context` via `providers::openai::strip_images_in_place`.
+
+`build_user_content` is called from the **write path** only: agent_loop serializes its output as `Content::Blocks` JSON and stores the string in `messages.content`. On the **read path**, `reconstruct_history` sniff-parses user rows: strings starting with `[` attempt `serde_json::from_str::<Content>` and, on success as `Content::Blocks`, rehydrate directly — no second call to `build_user_content` is needed.
 
 ### 4.5 `plexus-server/src/agent_loop.rs`
 
-- Pass `session.vision_stripped.load(Ordering::Relaxed)` into `build_user_content` / `build_context`.
-- After each LLM call, if `response.vision_stripped == true`, `session.vision_stripped.store(true, Ordering::Relaxed)`.
+- **At user-message save time:** when `event.media` is non-empty, call `build_user_content(user_id, &content, &event.media)`, wrap in `Content::Blocks(...)`, `serde_json::to_string`, and store that JSON string in `messages.content`. When `event.media` is empty, store plain text unchanged.
+- **Before each `build_context`:** read `session.vision_stripped.load(Ordering::Relaxed)` and pass into `build_context` as the `vision_stripped` bool. `build_context` applies `strip_images_in_place` as a post-pass when the flag is true.
+- **After each LLM call:** if `response.vision_stripped == true`, `session.vision_stripped.store(true, Ordering::Relaxed)`.
 
 ### 4.6 `plexus-server/src/channels/discord.rs`
 
