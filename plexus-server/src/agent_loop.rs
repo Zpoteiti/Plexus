@@ -129,6 +129,7 @@ async fn handle_event(
         channel: event.channel.clone(),
         chat_id: event.chat_id.clone(),
         is_cron: event.cron_job_id.is_some(),
+        is_partner: event.identity.as_ref().map_or(true, |i| i.is_partner),
     };
 
     // Load skills

@@ -168,6 +168,10 @@ pub struct ToolContext {
     pub channel: String,
     pub chat_id: Option<String>,
     pub is_cron: bool,
+    /// True if the sender is the owner/partner of this channel (or if this
+    /// is a cron/server-originated event with no identity). False for
+    /// allow-listed non-partner senders on Discord/Telegram.
+    pub is_partner: bool,
 }
 
 /// Dispatch a server tool call. Returns exit_code + output.

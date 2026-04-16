@@ -5,6 +5,29 @@ use crate::state::AppState;
 use serde_json::Value;
 use std::sync::Arc;
 
+/// Enforce the security rule that non-partner senders cannot relay
+/// to a different channel or chat_id than their inbound one. Returns
+/// an error message on violation, None otherwise. Partners (including
+/// cron / server-originated contexts where is_partner=true) are
+/// unrestricted.
+fn check_cross_channel(
+    is_partner: bool,
+    ctx_channel: &str,
+    ctx_chat_id: Option<&str>,
+    target_channel: &str,
+    target_chat_id: Option<&str>,
+) -> Option<String> {
+    if is_partner {
+        return None;
+    }
+    if ctx_channel != target_channel || ctx_chat_id != target_chat_id {
+        return Some(
+            "Non-partner senders cannot relay messages to a different channel or chat_id".into(),
+        );
+    }
+    None
+}
+
 pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value) -> (i32, String) {
     let content = match args.get("content").and_then(Value::as_str) {
         Some(c) => c.to_string(),
@@ -31,6 +54,17 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
         .unwrap_or_default();
 
     let from_device = args.get("from_device").and_then(Value::as_str);
+
+    // Check cross-channel guard
+    if let Some(err) = check_cross_channel(
+        ctx.is_partner,
+        &ctx.channel,
+        ctx.chat_id.as_deref(),
+        &channel,
+        chat_id.as_deref(),
+    ) {
+        return (1, err);
+    }
 
     // Pull media files from device, save to server, collect URLs
     let mut media_urls = Vec::new();
@@ -82,4 +116,49 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
         .await;
 
     (0, "Message sent.".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_guard_allows_partner_cross_channel() {
+        let err = check_cross_channel(
+            /*is_partner=*/ true,
+            "discord", Some("c1"),
+            "telegram", Some("c2"),
+        );
+        assert!(err.is_none(), "partner should be allowed cross-channel");
+    }
+
+    #[test]
+    fn test_guard_allows_non_partner_same_channel() {
+        let err = check_cross_channel(
+            /*is_partner=*/ false,
+            "discord", Some("c1"),
+            "discord", Some("c1"),
+        );
+        assert!(err.is_none(), "non-partner same-channel same-chat_id should be allowed");
+    }
+
+    #[test]
+    fn test_guard_blocks_non_partner_different_channel() {
+        let err = check_cross_channel(
+            /*is_partner=*/ false,
+            "discord", Some("c1"),
+            "telegram", Some("c2"),
+        );
+        assert!(err.is_some(), "non-partner cross-channel must be rejected");
+    }
+
+    #[test]
+    fn test_guard_blocks_non_partner_different_chat_id_same_channel() {
+        let err = check_cross_channel(
+            /*is_partner=*/ false,
+            "discord", Some("c1"),
+            "discord", Some("c2"),
+        );
+        assert!(err.is_some(), "non-partner different chat_id must be rejected even on same channel");
+    }
 }
