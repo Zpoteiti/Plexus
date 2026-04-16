@@ -379,3 +379,78 @@ Each channel (Discord, Telegram, Gateway) constructs a `ChannelIdentity` with se
 **Outcome:** Cron jobs are never double-fired. Next interval starts after execution finishes (nanobot parity). Crash recovery prevents permanent job loss. Two new DB columns: `claimed_at TIMESTAMPTZ`, `last_status TEXT`.
 
 ---
+
+## ADR-30: Inbound media persisted as JSON Content blocks in messages.content
+
+**Context:** Users need to send images, audio, documents, and other files through Discord, Telegram, and the browser. Images should flow to vision-capable LLMs as content blocks; non-images should surface as paths the agent can move to a client via file_transfer. The 24h file-store TTL and source-platform deletion (Discord CDN expiry, Telegram file URL expiry) mean any durable reference to the file bytes must live in our DB.
+
+**Options:**
+- **A.** Serialize `Content::Blocks` as JSON into the existing `messages.content` column. Text-only messages keep the plain-string shape; multimodal messages become a JSON array.
+- **B.** Persist only a text placeholder (`[Image: filename]`) in DB. Base64 rebuilt from file store at context-build time; context rebuilds after TTL lose the image.
+- **C.** New `message_media` table keyed by message_id with base64 bytes.
+
+**Decision:** A — JSON in `messages.content`. Read path sniff-parses: strings starting with `[` attempt `serde_json::from_str::<Content>`, falling back to plain text on parse failure.
+
+**Outcome:** Zero schema migration. Text-only messages unaffected. Multimodal messages survive file-store TTL and source-platform deletion. Base64 encoding happens once at agent-loop save time; every subsequent iteration re-reads the same bytes from DB. Mid-ReAct-turn iterations can now "look again" at images because each iteration rebuilds context from DB. `build_user_content`'s `vision_stripped` parameter retired — stripping is a post-pass on the assembled `Vec<ChatMessage>` via the provider's `strip_images_in_place` helper.
+
+---
+
+## ADR-31: Gateway outbound routes by user_id + session_id, not chat_id
+
+**Context:** Gateway chat_ids are UUIDs minted per browser WebSocket connection. When a browser reloads or reconnects, the old UUID is stale. This breaks cron delivery (the stored chat_id points at a connection that no longer exists — gateway's router logs "no browser" and drops the message). It also blocks cross-channel addressing: the agent has no way to target the owner's browser from a session that started on Discord.
+
+**Options:**
+- **A.** New `session_update` frame with `{user_id, session_id}`; gateway iterates `browsers` and fans out to all connections with matching `user_id`. Browser decides (in-view → refresh; not-in-view → show badge).
+- **B.** Sentinel `chat_id="user:<id>"` processed specially.
+- **C.** Always fan out on gateway channel based on a heuristic (`event.cron_job_id.is_some()`).
+
+**Decision:** A — explicit new frame type. Content is a pointer; the browser fetches via the existing REST history endpoint. `OutboundEvent.is_progress` and `.metadata` fields retired as no channel reads them anymore.
+
+**Outcome:** Cron delivery survives browser reconnects. Cross-channel addressing is uniform: every `message` tool call on channel=gateway uses `ctx.session_id`, works whether the browser is currently viewing that session (updates inline) or not (shows on session list). The `BrowserConnection.user_id` field (previously dead-scaffolded) becomes load-bearing.
+
+---
+
+## ADR-32: Cross-channel addressing via chat_id shapes and a `## Channels` system-prompt section
+
+**Context:** The agent can only reply to the owner on the channel the owner currently uses. "Remind me on Telegram" from a Discord session doesn't work — the agent has no knowledge of the owner's Telegram address. `ChannelIdentity.partner_id` was populated by adapters but never surfaced.
+
+**Options:**
+- **A.** Expose configured channels via a compact `## Channels` system-prompt section listing addressable chat_id shapes per channel. DB configs queried per context-build.
+- **B.** Enumerate all Discord guild channels the bot can see plus DM via `UserId::create_dm_channel`; expose each with a friendly name.
+- **C.** Defer — users can paste channel IDs manually.
+
+**Decision:** A (partner DM only per channel). `chat_id="dm/<partner_discord_id>"` for Discord (resolved via a per-bot DM channel cache on demand), raw `<partner_telegram_id>` for Telegram, and `gateway` needs no chat_id (session_id is the routing key — see ADR-31). Guild channel enumeration deliberately out of scope — prompt bloat for a rare case. Non-partner senders are blocked from cross-channel relay via a `check_cross_channel` guard in the `message` tool, gated by a new `ToolContext.is_partner` bool threaded from `event.identity.is_partner`.
+
+**Outcome:** Agent can DM the owner on any configured channel. Non-partner authorized users can only reply on their inbound channel. Prompt stays small (~5 lines per section).
+
+---
+
+## ADR-33: Account deletion via cascade-enabled DB + unified teardown service
+
+**Context:** No path exists to delete a user. Raw `DELETE FROM users` fails on every FK (no cascade declared). Even if the row were deleted, in-memory state (sessions, rate-limit entries, device maps), on-disk file store, running channel bots, and live browser connections would remain, each with a dangling user_id.
+
+**Options:**
+- **A.** `ON DELETE CASCADE` on every user-referencing FK + a single `delete_user_everywhere(state, user_id)` service function that orchestrates the teardown sequence (stop bots → kick browsers → evict in-memory → wipe files → DB delete).
+- **B.** Explicit per-table `DELETE` in a transaction, no schema change.
+- **C.** Soft-delete with a tombstone flag, filter everywhere.
+
+**Decision:** A. Password re-entry required for self-serve `DELETE /api/user`; admin `DELETE /api/admin/users/{id}` uses admin JWT. A new gateway `kick_user` frame cancels live browser WSs. Admin self-delete allowed with a loud warn log; last-admin invariant not enforced (rely on direct DB access to bootstrap).
+
+**Outcome:** Hard delete is complete, idempotent, and one-directional. Re-registering with the same email starts from scratch. Service function returns a `DeletionSummary` for observability. `SessionHandle.user_id` (previously dead-scaffolded) becomes load-bearing for session eviction.
+
+---
+
+## ADR-34: Graceful shutdown via cancellation-token fan-out
+
+**Context:** `AppState.shutdown: CancellationToken` existed but no signal handler called `.cancel()` and no background task awaited `.cancelled()`. SIGTERM killed everything mid-flight.
+
+**Options:**
+- **A.** Signal handler on SIGINT/SIGTERM cancels the token; axum uses `.with_graceful_shutdown(...)`; each background loop selects against `shutdown.cancelled()`.
+- **B.** Use axum's built-in `TerminationExt` / tower middleware for signal handling.
+- **C.** Defer graceful shutdown to a later milestone.
+
+**Decision:** A, minimal scope. Signal watcher → `state.shutdown.cancel()` → 5 background loops (file_store cleanup, cron poller, rate-limit refresh, heartbeat reaper, outbound dispatch, gateway client) all participate. Discord/Telegram bots and per-session agent loops drop at runtime teardown — acceptable for M2.
+
+**Outcome:** Clean Ctrl-C / SIGTERM shutdown. In-flight HTTP requests drain; new requests rejected; background loops exit cleanly instead of mid-iteration. `AppState.shutdown` is no longer dead-scaffolded.
+
+---
