@@ -5,6 +5,7 @@
 
 use crate::bus::{self, InboundEvent, OutboundEvent};
 use crate::state::AppState;
+use dashmap::DashMap;
 use plexus_common::consts::CHANNEL_DISCORD;
 use serenity::all::{
     ChannelId, Context, CreateAttachment, CreateMessage, EventHandler, GatewayIntents,
@@ -21,8 +22,10 @@ const DISCORD_MSG_LIMIT: usize = 2000;
 type BotRegistry = Arc<RwLock<HashMap<String, BotHandle>>>;
 
 struct BotHandle {
-    /// Map of chat_id → ChannelId for outbound delivery
+    /// Map of chat_id (guild/channel) → ChannelId for outbound delivery
     channels: Arc<RwLock<HashMap<String, ChannelId>>>,
+    /// Cache of partner DM channel IDs, keyed by discord user id (u64)
+    dm_cache: Arc<DashMap<u64, ChannelId>>,
     /// Serenity HTTP client for sending messages
     http: Arc<RwLock<Option<Arc<serenity::http::Http>>>>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -36,6 +39,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
     stop_bot(&user_id).await;
 
     let channels: Arc<RwLock<HashMap<String, ChannelId>>> = Arc::new(RwLock::new(HashMap::new()));
+    let dm_cache: Arc<DashMap<u64, ChannelId>> = Arc::new(DashMap::new());
     let http: Arc<RwLock<Option<Arc<serenity::http::Http>>>> = Arc::new(RwLock::new(None));
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
@@ -44,6 +48,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
         user_id.clone(),
         BotHandle {
             channels: Arc::clone(&channels),
+            dm_cache: Arc::clone(&dm_cache),
             http: Arc::clone(&http),
             shutdown_tx: Some(shutdown_tx),
         },
@@ -138,25 +143,36 @@ pub async fn deliver(_state: &AppState, event: &OutboundEvent) {
     };
     let http = Arc::clone(http);
 
-    // Parse chat_id to get ChannelId
+    // Parse chat_id and resolve to a ChannelId
     let channel_id = match event.chat_id.as_deref() {
-        Some(chat_id) => {
-            // chat_id format: "guild_id/channel_id" or "dm/user_id"
-            let parts: Vec<&str> = chat_id.split('/').collect();
-            if parts.len() == 2 {
-                if let Ok(id) = parts[1].parse::<u64>() {
-                    ChannelId::new(id)
-                } else {
-                    warn!("Discord: invalid channel_id in {chat_id}");
-                    return;
+        Some(chat_id) => match parse_chat_id(chat_id) {
+            Some(ChatIdKind::Guild { channel_id, .. }) => ChannelId::new(channel_id),
+            Some(ChatIdKind::Dm(user_id_raw)) => {
+                use serenity::all::UserId;
+                let uid = UserId::new(user_id_raw);
+                // Try cache first
+                let cached = handle.dm_cache.get(&uid.get()).map(|r| *r);
+                match cached {
+                    Some(cid) => cid,
+                    None => match uid.create_dm_channel(&http).await {
+                        Ok(dm) => {
+                            handle.dm_cache.insert(uid.get(), dm.id);
+                            dm.id
+                        }
+                        Err(e) => {
+                            warn!("Discord: create_dm_channel failed for {}: {}", uid.get(), e);
+                            return;
+                        }
+                    },
                 }
-            } else {
+            }
+            None => {
                 warn!("Discord: invalid chat_id format: {chat_id}");
                 return;
             }
-        }
+        },
         None => {
-            // Try to find a cached channel
+            // Existing fallback: pick any cached guild channel
             let channels = handle.channels.read().await;
             match channels.values().next() {
                 Some(id) => *id,
@@ -386,6 +402,26 @@ fn split_message(text: &str, limit: usize) -> Vec<String> {
     chunks
 }
 
+/// Parses a chat_id string into a typed variant.
+/// Supports two formats:
+/// - `dm/<user_id>` — Direct message to a Discord user
+/// - `<guild_id>/<channel_id>` — Message in a guild channel
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChatIdKind {
+    Dm(u64),
+    Guild { guild_id: u64, channel_id: u64 },
+}
+
+pub(crate) fn parse_chat_id(s: &str) -> Option<ChatIdKind> {
+    if let Some(rest) = s.strip_prefix("dm/") {
+        return rest.parse::<u64>().ok().map(ChatIdKind::Dm);
+    }
+    let mut parts = s.splitn(2, '/');
+    let guild_id: u64 = parts.next()?.parse().ok()?;
+    let channel_id: u64 = parts.next()?.parse().ok()?;
+    Some(ChatIdKind::Guild { guild_id, channel_id })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +441,23 @@ mod tests {
         let marker = failed_download_marker("doc.pdf");
         assert!(marker.contains("doc.pdf"));
         assert!(marker.contains("download failed"));
+    }
+
+    #[test]
+    fn test_parse_chat_id_dm_form() {
+        assert_eq!(parse_chat_id("dm/123456789"), Some(ChatIdKind::Dm(123456789)));
+        assert_eq!(parse_chat_id("dm/"), None);
+        assert_eq!(parse_chat_id("dm/abc"), None); // non-numeric
+    }
+
+    #[test]
+    fn test_parse_chat_id_guild_form() {
+        assert_eq!(
+            parse_chat_id("111/222"),
+            Some(ChatIdKind::Guild { guild_id: 111, channel_id: 222 }),
+        );
+        assert_eq!(parse_chat_id("111/abc"), None);
+        assert_eq!(parse_chat_id("bad-format"), None);
+        assert_eq!(parse_chat_id(""), None);
     }
 }
