@@ -45,19 +45,6 @@ pub async fn list_by_user(pool: &PgPool, user_id: &str) -> Result<Vec<Skill>, sq
         .await
 }
 
-#[allow(dead_code)]
-pub async fn find_by_name(
-    pool: &PgPool,
-    user_id: &str,
-    name: &str,
-) -> Result<Option<Skill>, sqlx::Error> {
-    sqlx::query_as::<_, Skill>("SELECT * FROM skills WHERE user_id = $1 AND name = $2")
-        .bind(user_id)
-        .bind(name)
-        .fetch_optional(pool)
-        .await
-}
-
 pub async fn delete_skill(pool: &PgPool, user_id: &str, name: &str) -> Result<bool, sqlx::Error> {
     let result = sqlx::query("DELETE FROM skills WHERE user_id = $1 AND name = $2")
         .bind(user_id)

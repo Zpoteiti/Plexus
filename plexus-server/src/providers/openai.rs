@@ -108,23 +108,8 @@ impl ChatMessage {
 
 impl Content {
     /// Returns the concatenated text from this content. For Blocks, image
-    /// blocks are dropped and text blocks joined in order.
-    #[allow(dead_code)]
-    pub fn as_text(&self) -> String {
-        match self {
-            Content::Text(s) => s.clone(),
-            Content::Blocks(blocks) => blocks
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    ContentBlock::ImageUrl { .. } => None,
-                })
-                .collect::<Vec<_>>()
-                .join(""),
-        }
-    }
-
-    /// Consuming variant that avoids cloning when the caller owns the Content.
+    /// blocks are dropped and text blocks joined in order. Consumes self to
+    /// avoid cloning when the caller owns the Content.
     pub fn into_text(self) -> String {
         match self {
             Content::Text(s) => s,
@@ -456,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn test_content_len_matches_as_text_len() {
+    fn test_content_len_counts_text_blocks_only() {
         let text = Content::Text("hello".into());
         assert_eq!(text.len(), 5);
 
@@ -468,7 +453,8 @@ mod tests {
             ContentBlock::Text { text: "cde".into() },
         ]);
         assert_eq!(blocks.len(), 5); // "ab" + "cde", image dropped
-        assert_eq!(blocks.as_text().len(), 5);
+        // Cross-check: consuming into_text joins the same text and matches len
+        assert_eq!(blocks.into_text().len(), 5);
     }
 
     #[test]

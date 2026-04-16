@@ -518,7 +518,7 @@ mod tests {
         assert_eq!(result[0].role, "user");
         assert_eq!(result[1].role, "assistant");
         assert_eq!(
-            result[1].content.as_ref().map(|c| c.as_text()),
+            result[1].content.clone().map(|c| c.into_text()),
             Some("hello".to_string())
         );
     }

@@ -92,22 +92,6 @@ impl ServerMcpManager {
         Err(format!("Server MCP not found for: {prefixed_name}"))
     }
 
-    /// Check if a prefixed tool name belongs to server MCP.
-    #[allow(dead_code)]
-    pub fn has_tool(&self, prefixed_name: &str) -> bool {
-        if let Some(rest) = prefixed_name.strip_prefix("mcp_") {
-            self.sessions
-                .keys()
-                .any(|name| rest.starts_with(&format!("{name}_")))
-        } else {
-            false
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn session_count(&self) -> usize {
-        self.sessions.len()
-    }
 }
 
 async fn start_session(entry: &McpServerEntry) -> Result<McpSession, String> {
