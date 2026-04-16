@@ -19,7 +19,6 @@ pub struct AppState {
 pub struct BrowserConnection {
     pub tx: mpsc::Sender<OutboundFrame>,
     pub user_id: String,
-    #[allow(dead_code)]
     pub cancel: CancellationToken,
 }
 

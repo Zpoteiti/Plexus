@@ -20,9 +20,16 @@ pub fn spawn_cron_poller(state: Arc<AppState>) {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(CRON_POLL_INTERVAL_SEC));
         loop {
-            interval.tick().await;
-            if let Err(e) = poll_and_execute(&state).await {
-                warn!("Cron poll error: {e}");
+            tokio::select! {
+                _ = state.shutdown.cancelled() => {
+                    info!("cron poller shutting down");
+                    break;
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = poll_and_execute(&state).await {
+                        warn!("Cron poll error: {e}");
+                    }
+                }
             }
         }
     });

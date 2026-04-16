@@ -15,18 +15,36 @@ pub fn spawn_gateway_client(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut backoff = 1u64;
         loop {
+            if state.shutdown.is_cancelled() {
+                info!("Gateway client shutting down");
+                break;
+            }
             info!("Gateway: connecting to {ws_url}...");
-            match connect_and_run(&state, &ws_url, &token).await {
-                Ok(()) => {
-                    info!("Gateway: connection closed cleanly");
-                    backoff = 1;
+            tokio::select! {
+                _ = state.shutdown.cancelled() => {
+                    info!("Gateway client shutting down mid-connection attempt");
+                    break;
                 }
-                Err(e) => {
-                    warn!("Gateway: connection error: {e}");
+                result = connect_and_run(&state, &ws_url, &token) => {
+                    match result {
+                        Ok(()) => {
+                            info!("Gateway: connection closed cleanly");
+                            backoff = 1;
+                        }
+                        Err(e) => {
+                            warn!("Gateway: connection error: {e}");
+                        }
+                    }
                 }
             }
             info!("Gateway: reconnecting in {backoff}s...");
-            tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+            tokio::select! {
+                _ = state.shutdown.cancelled() => {
+                    info!("Gateway client shutting down during reconnect wait");
+                    break;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => {}
+            }
             backoff = (backoff * 2).min(30);
         }
     });

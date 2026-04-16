@@ -75,7 +75,7 @@ async fn main() {
     });
 
     // Background tasks
-    file_store::spawn_cleanup_task();
+    file_store::spawn_cleanup_task(state.shutdown.clone());
     ws::spawn_heartbeat_reaper(Arc::clone(&state));
     bus::spawn_rate_limit_refresh(Arc::clone(&state));
     cron::spawn_cron_poller(Arc::clone(&state));
@@ -138,5 +138,48 @@ async fn main() {
     let addr = format!("0.0.0.0:{}", config.server_port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     info!("PLEXUS Server listening on {addr}");
-    axum::serve(listener, app).await.unwrap();
+
+    // Signal handler: SIGINT or SIGTERM → cancel shutdown token → all
+    // background tasks wind down gracefully via their tokio::select! branches.
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        info!("Shutdown signal received; cancelling background tasks");
+        shutdown.cancel();
+    });
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown({
+            let shutdown = state.shutdown.clone();
+            async move { shutdown.cancelled().await }
+        })
+        .await
+        .unwrap();
+    info!("HTTP server stopped; exiting");
+}
+
+/// Wait for either SIGINT (Ctrl-C) or SIGTERM. Resolves on the first one.
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut s) = signal(SignalKind::terminate()) {
+            s.recv().await;
+        } else {
+            // SIGTERM handler install failed; fall through to ctrl_c only
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }

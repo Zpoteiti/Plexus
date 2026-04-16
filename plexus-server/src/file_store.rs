@@ -106,13 +106,20 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-pub fn spawn_cleanup_task() {
-    tokio::spawn(async {
+pub fn spawn_cleanup_task(shutdown: tokio_util::sync::CancellationToken) {
+    tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         loop {
-            interval.tick().await;
-            if let Err(e) = cleanup_old_files().await {
-                warn!("File cleanup error: {e}");
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    info!("file_store cleanup task shutting down");
+                    break;
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = cleanup_old_files().await {
+                        warn!("File cleanup error: {e}");
+                    }
+                }
             }
         }
     });

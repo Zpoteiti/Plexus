@@ -159,8 +159,15 @@ pub fn spawn_rate_limit_refresh(state: Arc<AppState>) {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(RATE_LIMIT_CACHE_TTL_SEC));
         loop {
-            interval.tick().await;
-            refresh_rate_limit_config(&state).await;
+            tokio::select! {
+                _ = state.shutdown.cancelled() => {
+                    info!("rate limit refresh shutting down");
+                    break;
+                }
+                _ = interval.tick() => {
+                    refresh_rate_limit_config(&state).await;
+                }
+            }
         }
     });
 }

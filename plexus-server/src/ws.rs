@@ -227,28 +227,35 @@ pub fn spawn_heartbeat_reaper(state: Arc<AppState>) {
             HEARTBEAT_REAPER_INTERVAL_SEC,
         ));
         loop {
-            interval.tick().await;
-            let now = chrono::Utc::now().timestamp();
-            let timeout = plexus_common::consts::HEARTBEAT_INTERVAL_SEC as i64 * 4;
-            let mut stale = Vec::new();
-            for entry in state.devices.iter() {
-                let last = entry.value().last_seen.load(Ordering::SeqCst);
-                if now - last > timeout {
-                    stale.push(entry.key().clone());
+            tokio::select! {
+                _ = state.shutdown.cancelled() => {
+                    info!("heartbeat reaper shutting down");
+                    break;
                 }
-            }
-            for key in stale {
-                warn!("Reaping stale device: {key}");
-                if let Some((_, conn)) = state.devices.remove(&key) {
-                    if let Some(mut keys) = state.devices_by_user.get_mut(&conn.user_id) {
-                        keys.retain(|k| k != &key);
-                        if keys.is_empty() {
-                            drop(keys);
-                            state.devices_by_user.remove(&conn.user_id);
+                _ = interval.tick() => {
+                    let now = chrono::Utc::now().timestamp();
+                    let timeout = plexus_common::consts::HEARTBEAT_INTERVAL_SEC as i64 * 4;
+                    let mut stale = Vec::new();
+                    for entry in state.devices.iter() {
+                        let last = entry.value().last_seen.load(Ordering::SeqCst);
+                        if now - last > timeout {
+                            stale.push(entry.key().clone());
                         }
                     }
-                    state.pending.remove(&key);
-                    state.tool_schema_cache.remove(&conn.user_id);
+                    for key in stale {
+                        warn!("Reaping stale device: {key}");
+                        if let Some((_, conn)) = state.devices.remove(&key) {
+                            if let Some(mut keys) = state.devices_by_user.get_mut(&conn.user_id) {
+                                keys.retain(|k| k != &key);
+                                if keys.is_empty() {
+                                    drop(keys);
+                                    state.devices_by_user.remove(&conn.user_id);
+                                }
+                            }
+                            state.pending.remove(&key);
+                            state.tool_schema_cache.remove(&conn.user_id);
+                        }
+                    }
                 }
             }
         }

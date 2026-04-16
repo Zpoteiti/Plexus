@@ -84,8 +84,7 @@ pub struct AppState {
         >,
     >,
 
-    // Shutdown signal
-    #[allow(dead_code)]
+    // Shutdown signal — cancelled on SIGINT/SIGTERM; background tasks watch it.
     pub shutdown: CancellationToken,
 }
 
