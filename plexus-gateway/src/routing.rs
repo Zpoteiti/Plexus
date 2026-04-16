@@ -70,11 +70,31 @@ fn try_dispatch(
                 RouteResult::Evicted
             }
         },
-        OutboundFrame::Error(_) | OutboundFrame::Ping => {
+        OutboundFrame::Error(_) | OutboundFrame::Ping | OutboundFrame::SessionUpdate(_) => {
             let _ = conn.tx.try_send(frame);
             RouteResult::DirectHit
         }
     }
+}
+
+pub fn route_session_update(state: &Arc<AppState>, user_id: &str, session_id: &str) {
+    let frame_json = serde_json::json!({
+        "type": "session_update",
+        "session_id": session_id,
+    });
+    let mut fanout_count = 0;
+    for entry in state.browsers.iter() {
+        if entry.value().user_id != user_id {
+            continue;
+        }
+        let frame = OutboundFrame::SessionUpdate(frame_json.clone());
+        if entry.value().tx.try_send(frame).is_err() {
+            tracing::warn!("session_update: backpressure for chat_id={}", entry.key());
+        } else {
+            fanout_count += 1;
+        }
+    }
+    tracing::debug!("session_update user_id={user_id} session_id={session_id} fanout={fanout_count}");
 }
 
 pub async fn forward_to_plexus(
@@ -235,5 +255,48 @@ mod tests {
         let result = route_send(&state, &progress);
         assert!(matches!(result, RouteResult::DirectHit));
         assert!(state.browsers.get("chat-full").is_some()); // NOT evicted
+    }
+
+    #[test]
+    fn test_route_session_update_fans_out_by_user_id() {
+        let state = test_state();
+
+        // Browser A: user=alice
+        let (tx_a, mut rx_a) = mpsc::channel::<OutboundFrame>(8);
+        state.browsers.insert("chat-a".to_string(), BrowserConnection {
+            tx: tx_a,
+            user_id: "alice".into(),
+            cancel: CancellationToken::new(),
+        });
+
+        // Browser B: user=bob
+        let (tx_b, mut rx_b) = mpsc::channel::<OutboundFrame>(8);
+        state.browsers.insert("chat-b".to_string(), BrowserConnection {
+            tx: tx_b,
+            user_id: "bob".into(),
+            cancel: CancellationToken::new(),
+        });
+
+        // Browser C: user=alice, second device
+        let (tx_c, mut rx_c) = mpsc::channel::<OutboundFrame>(8);
+        state.browsers.insert("chat-c".to_string(), BrowserConnection {
+            tx: tx_c,
+            user_id: "alice".into(),
+            cancel: CancellationToken::new(),
+        });
+
+        // Route session_update to alice
+        route_session_update(&state, "alice", "session-42");
+
+        // A and C receive, B does not
+        match rx_a.try_recv() {
+            Ok(OutboundFrame::SessionUpdate(v)) => {
+                assert_eq!(v["type"], "session_update");
+                assert_eq!(v["session_id"], "session-42");
+            }
+            other => panic!("A expected SessionUpdate, got {other:?}"),
+        }
+        assert!(matches!(rx_c.try_recv(), Ok(OutboundFrame::SessionUpdate(_))));
+        assert!(rx_b.try_recv().is_err()); // bob got nothing
     }
 }

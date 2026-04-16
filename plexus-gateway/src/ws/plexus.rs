@@ -107,6 +107,15 @@ async fn handle_plexus(socket: WebSocket, state: Arc<AppState>) {
                             "send" => {
                                 crate::routing::route_send(&state, &parsed);
                             }
+                            "session_update" => {
+                                let user_id = parsed.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                                let session_id = parsed.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                                if user_id.is_empty() || session_id.is_empty() {
+                                    warn!("session_update frame missing user_id or session_id");
+                                } else {
+                                    crate::routing::route_session_update(&state, user_id, session_id);
+                                }
+                            }
                             _ => {
                                 warn!("ws_plexus: unknown message type: {msg_type}");
                             }

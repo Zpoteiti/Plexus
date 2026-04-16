@@ -16,16 +16,18 @@ pub struct AppState {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct BrowserConnection {
     pub tx: mpsc::Sender<OutboundFrame>,
     pub user_id: String,
+    #[allow(dead_code)]
     pub cancel: CancellationToken,
 }
 
+#[derive(Debug)]
 pub enum OutboundFrame {
     Message(serde_json::Value),
     Progress(serde_json::Value),
     Error(serde_json::Value),
     Ping,
+    SessionUpdate(serde_json::Value),
 }

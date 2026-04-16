@@ -77,7 +77,7 @@ async fn handle_chat(socket: WebSocket, state: Arc<AppState>, user_id: String) {
                 Some(frame) = rx.recv() => {
                     let text = match frame {
                         OutboundFrame::Ping => "{\"type\":\"ping\"}".to_string(),
-                        OutboundFrame::Message(v) | OutboundFrame::Progress(v) | OutboundFrame::Error(v) => {
+                        OutboundFrame::Message(v) | OutboundFrame::Progress(v) | OutboundFrame::Error(v) | OutboundFrame::SessionUpdate(v) => {
                             v.to_string()
                         }
                     };
