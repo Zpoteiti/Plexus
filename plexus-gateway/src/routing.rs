@@ -78,6 +78,11 @@ fn try_dispatch(
 }
 
 pub fn route_session_update(state: &Arc<AppState>, user_id: &str, session_id: &str) {
+    if user_id.is_empty() || session_id.is_empty() {
+        tracing::warn!("route_session_update: empty user_id or session_id, skipping");
+        return;
+    }
+
     let frame_json = serde_json::json!({
         "type": "session_update",
         "session_id": session_id,
@@ -298,5 +303,25 @@ mod tests {
         }
         assert!(matches!(rx_c.try_recv(), Ok(OutboundFrame::SessionUpdate(_))));
         assert!(rx_b.try_recv().is_err()); // bob got nothing
+    }
+
+    #[test]
+    fn test_route_session_update_ignores_empty_ids() {
+        let state = test_state();
+        // Insert a browser that would match if the function weren't guarding.
+        let (tx, mut rx) = mpsc::channel::<OutboundFrame>(8);
+        state.browsers.insert("chat-x".into(), BrowserConnection {
+            tx,
+            user_id: "".into(),
+            cancel: CancellationToken::new(),
+        });
+
+        // Empty user_id → no fanout.
+        route_session_update(&state, "", "session-42");
+        assert!(rx.try_recv().is_err(), "empty user_id should produce no fanout");
+
+        // Empty session_id → no fanout.
+        route_session_update(&state, "alice", "");
+        assert!(rx.try_recv().is_err(), "empty session_id should produce no fanout");
     }
 }
