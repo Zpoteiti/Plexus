@@ -55,7 +55,15 @@ pub async fn file_transfer(state: &Arc<AppState>, user_id: &str, args: &Value) -
                 .await
             {
                 Ok(p) => p,
-                Err(e) => return (1, format!("Target path: {e}")),
+                Err(crate::workspace::WorkspaceError::Traversal(_)) => {
+                    return (1, "Path escapes user workspace".into());
+                }
+                Err(crate::workspace::WorkspaceError::Io(e))
+                    if e.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return (1, format!("Parent path not found: uploads/{fname}"));
+                }
+                Err(e) => return (1, format!("Resolve error: {e}")),
             };
 
         // Net-delta quota accounting: stat existing file first to avoid double-counting.
@@ -331,5 +339,37 @@ mod tests {
         assert!(out.contains("uploads/x.txt"), "got: {out}");
         assert!(user_dir.join("uploads/x.txt").exists());
         assert_eq!(state.quota.current_usage("alice"), 8); // "contents" = 8 bytes
+    }
+
+    #[tokio::test]
+    async fn test_file_transfer_server_to_server_overwrite_tracks_net_size() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(user_dir.join("src")).await.unwrap();
+
+        let state = crate::state::AppState::test_minimal(tmp.path());
+
+        // First transfer: 5 bytes.
+        tokio::fs::write(user_dir.join("src/x.txt"), b"hello").await.unwrap();
+        let args = serde_json::json!({
+            "from_device": "server",
+            "to_device": "server",
+            "file_path": "src/x.txt",
+        });
+        let (code, _) = file_transfer(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert_eq!(state.quota.current_usage("alice"), 5);
+
+        // Second transfer: grow to 10 bytes.
+        tokio::fs::write(user_dir.join("src/x.txt"), b"helloworld").await.unwrap();
+        let (code, _) = file_transfer(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert_eq!(state.quota.current_usage("alice"), 10);
+
+        // Third transfer: shrink to 3 bytes.
+        tokio::fs::write(user_dir.join("src/x.txt"), b"hey").await.unwrap();
+        let (code, _) = file_transfer(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert_eq!(state.quota.current_usage("alice"), 3);
     }
 }

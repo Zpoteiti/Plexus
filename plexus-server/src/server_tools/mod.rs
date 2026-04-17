@@ -90,7 +90,7 @@ pub fn tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "file_transfer",
-                "description": "Transfer a file between devices. Server acts as relay.",
+                "description": "Transfer a file between devices. When a side is \"server\", file_path is relative to your server workspace (e.g. 'uploads/report.pdf', 'skills/git/SKILL.md'). When a side is a client device, file_path is that device's absolute or cwd-relative path. Server-landed files always go to 'uploads/{basename(file_path)}' — rename afterwards with write_file+delete_file if you want a different location.",
                 "parameters": {
                     "type": "object",
                     "properties": {
