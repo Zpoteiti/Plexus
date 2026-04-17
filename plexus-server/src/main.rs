@@ -15,6 +15,7 @@ mod server_tools;
 mod session;
 mod state;
 mod tools_registry;
+pub mod workspace;
 mod ws;
 
 use crate::state::AppState;
