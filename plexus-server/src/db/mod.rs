@@ -38,10 +38,13 @@ async fn create_tables(pool: &PgPool) {
             display_name   TEXT,
             soul           TEXT,
             memory_text    TEXT NOT NULL DEFAULT '',
+            timezone       TEXT NOT NULL DEFAULT 'UTC',
             created_at     TIMESTAMPTZ DEFAULT NOW()
         )",
         // Migration: add display_name to existing installs
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT",
+        // Migration: add timezone to existing installs
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC'",
         "CREATE TABLE IF NOT EXISTS device_tokens (
             token          TEXT PRIMARY KEY,
             user_id        TEXT NOT NULL REFERENCES users(user_id),
@@ -90,6 +93,7 @@ async fn create_tables(pool: &PgPool) {
             job_id          TEXT PRIMARY KEY,
             user_id         TEXT NOT NULL REFERENCES users(user_id),
             name            TEXT NOT NULL,
+            kind            TEXT NOT NULL DEFAULT 'user' CHECK (kind IN ('user', 'system')),
             enabled         BOOLEAN DEFAULT TRUE,
             cron_expr       TEXT,
             every_seconds   INTEGER,
@@ -108,6 +112,8 @@ async fn create_tables(pool: &PgPool) {
         "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ",
         // Migration: add last_status for execution result tracking
         "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS last_status TEXT",
+        // Migration: add kind to distinguish system-protected jobs from user jobs
+        "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'",
         "CREATE TABLE IF NOT EXISTS skills (
             skill_id       TEXT PRIMARY KEY,
             user_id        TEXT NOT NULL REFERENCES users(user_id),
