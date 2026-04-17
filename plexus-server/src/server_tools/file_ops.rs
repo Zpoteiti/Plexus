@@ -243,6 +243,72 @@ pub async fn edit_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i
     (0, format!("Edited {path} ({old_size} → {new_size} bytes)"))
 }
 
+pub async fn delete_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, String) {
+    let path = match args.get("path").and_then(Value::as_str) {
+        Some(p) => p,
+        None => return (1, "Missing required parameter: path".into()),
+    };
+    let recursive = args.get("recursive").and_then(Value::as_bool).unwrap_or(false);
+
+    let ws_root = std::path::Path::new(&state.config.workspace_root);
+    let resolved = match resolve_user_path(ws_root, user_id, path).await {
+        Ok(p) => p,
+        Err(WorkspaceError::Traversal(_)) => return (1, "Path escapes user workspace".into()),
+        Err(WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (1, format!("Path not found: {path}"));
+        }
+        Err(e) => return (1, format!("Resolve error: {e}")),
+    };
+
+    // Refuse to delete the user root itself — that's a bug, not a legitimate delete.
+    let user_root = match tokio::fs::canonicalize(ws_root.join(user_id)).await {
+        Ok(p) => p,
+        Err(_) => return (1, "User workspace not initialized".into()),
+    };
+    if resolved == user_root {
+        return (1, "Cannot delete the workspace root itself".into());
+    }
+
+    let meta = match tokio::fs::metadata(&resolved).await {
+        Ok(m) => m,
+        Err(e) => return (1, format!("Stat error: {e}")),
+    };
+
+    let is_skills_write = is_under_skills_dir(&resolved, ws_root, user_id);
+
+    if meta.is_dir() {
+        if !recursive {
+            return (
+                1,
+                format!(
+                    "Path is a directory: {path}. Pass recursive: true to delete it and its contents."
+                ),
+            );
+        }
+        // Sum bytes first so we can release exactly that amount on success.
+        let bytes = match crate::workspace::quota::walk_dir_bytes(&resolved).await {
+            Ok(b) => b,
+            Err(e) => return (1, format!("Walk error: {e}")),
+        };
+        if let Err(e) = tokio::fs::remove_dir_all(&resolved).await {
+            return (1, format!("Delete error: {e}"));
+        }
+        state.quota.record_delete(user_id, bytes);
+    } else {
+        let bytes = meta.len();
+        if let Err(e) = tokio::fs::remove_file(&resolved).await {
+            return (1, format!("Delete error: {e}"));
+        }
+        state.quota.record_delete(user_id, bytes);
+    }
+
+    if is_skills_write {
+        state.skills_cache.invalidate(user_id);
+    }
+
+    (0, format!("Deleted {path}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,6 +646,106 @@ mod tests {
         let (code, out) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
         assert!(out.contains("too large"), "got: {out}");
+    }
+
+    // --- delete_file tests ---
+
+    #[tokio::test]
+    async fn test_delete_file_removes_file_and_releases_quota() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("x.txt"), b"12345").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        state.quota.check_and_reserve_upload("alice", 5).unwrap();
+        assert_eq!(state.quota.current_usage("alice"), 5);
+
+        let args = serde_json::json!({"path": "x.txt"});
+        let (code, _) = delete_file(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(!user_dir.join("x.txt").exists());
+        assert_eq!(state.quota.current_usage("alice"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_dir_requires_recursive() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice").join("sub");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"path": "sub"});
+        let (code, out) = delete_file(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        assert!(out.to_lowercase().contains("recursive"));
+    }
+
+    #[tokio::test]
+    async fn test_delete_dir_recursive_removes_tree_and_releases_quota() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(user_dir.join("sub/nested")).await.unwrap();
+        tokio::fs::write(user_dir.join("sub/a.txt"), b"aaa").await.unwrap();  // 3
+        tokio::fs::write(user_dir.join("sub/nested/b.txt"), b"bbbbbb").await.unwrap();  // 6
+
+        let state = AppState::test_minimal(tmp.path());
+        state.quota.check_and_reserve_upload("alice", 9).unwrap();
+        assert_eq!(state.quota.current_usage("alice"), 9);
+
+        let args = serde_json::json!({"path": "sub", "recursive": true});
+        let (code, out) = delete_file(&state, "alice", &args).await;
+        assert_eq!(code, 0, "got: {out}");
+        assert!(!user_dir.join("sub").exists());
+        assert_eq!(state.quota.current_usage("alice"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_file_traversal_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        let other = tmp.path().join("bob");
+        tokio::fs::create_dir_all(&other).await.unwrap();
+        tokio::fs::write(other.join("secret"), b"s").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"path": "../bob/secret"});
+        let (code, out) = delete_file(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        assert!(out.contains("escapes"), "got: {out}");
+        // Other user's file still intact.
+        assert!(other.join("secret").exists());
+    }
+
+    #[tokio::test]
+    async fn test_delete_file_missing_path_errors() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"path": "ghost.txt"});
+        let (code, out) = delete_file(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        assert!(out.contains("not found"), "got: {out}");
+        assert!(out.contains("ghost.txt"), "expected path echo, got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_delete_refuses_workspace_root() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        // "." resolves to the user root. Must reject even with recursive=true.
+        let args = serde_json::json!({"path": ".", "recursive": true});
+        let (code, out) = delete_file(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        assert!(out.contains("workspace root") || out.contains("Cannot delete"), "got: {out}");
+        // User dir still intact.
+        assert!(user_dir.exists());
     }
 
     #[cfg(unix)]

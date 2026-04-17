@@ -27,6 +27,7 @@ pub const SERVER_TOOL_NAMES: &[&str] = &[
     "read_file",
     "write_file",
     "edit_file",
+    "delete_file",
 ];
 
 /// Check if a tool name is a server-native tool.
@@ -205,6 +206,21 @@ pub fn tool_schemas() -> Vec<Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "delete_file",
+                "description": "Delete a file or directory from your server workspace (relative path). Directories require recursive: true. Frees the reclaimed bytes against your quota. Refuses to delete the workspace root itself.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "recursive": { "type": "boolean" }
+                    },
+                    "required": ["path"]
+                }
+            }
+        }),
     ]
 }
 
@@ -241,6 +257,7 @@ pub async fn execute(
         "read_file" => file_ops::read_file(state, &ctx.user_id, &arguments).await,
         "write_file" => file_ops::write_file(state, &ctx.user_id, &arguments).await,
         "edit_file" => file_ops::edit_file(state, &ctx.user_id, &arguments).await,
+        "delete_file" => file_ops::delete_file(state, &ctx.user_id, &arguments).await,
         _ => (1, format!("Unknown server tool: {tool_name}")),
     };
     ToolExecutionResult {
