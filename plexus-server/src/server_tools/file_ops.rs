@@ -243,6 +243,56 @@ pub async fn edit_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i
     (0, format!("Edited {path} ({old_size} → {new_size} bytes)"))
 }
 
+pub async fn list_dir(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, String) {
+    let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+    let ws_root = std::path::Path::new(&state.config.workspace_root);
+
+    let resolved = match resolve_user_path(ws_root, user_id, path).await {
+        Ok(p) => p,
+        Err(WorkspaceError::Traversal(_)) => return (1, "Path escapes user workspace".into()),
+        Err(WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (1, format!("Path not found: {path}"));
+        }
+        Err(e) => return (1, format!("Resolve error: {e}")),
+    };
+
+    let mut entries = match tokio::fs::read_dir(&resolved).await {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => {
+            return (1, format!("Path is not a directory: {path}"));
+        }
+        Err(e) => return (1, format!("List error: {e}")),
+    };
+
+    let mut rows = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let ft = entry.file_type().await.ok();
+        let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
+        let size_bytes = entry
+            .metadata()
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        rows.push(serde_json::json!({
+            "name": name,
+            "is_dir": is_dir,
+            "size_bytes": size_bytes,
+        }));
+    }
+
+    // Sort: directories first, then alphabetically within each group.
+    rows.sort_by(|a, b| {
+        let a_dir = a.get("is_dir").and_then(Value::as_bool).unwrap_or(false);
+        let b_dir = b.get("is_dir").and_then(Value::as_bool).unwrap_or(false);
+        let a_name = a.get("name").and_then(Value::as_str).unwrap_or("");
+        let b_name = b.get("name").and_then(Value::as_str).unwrap_or("");
+        b_dir.cmp(&a_dir).then(a_name.cmp(b_name))
+    });
+
+    (0, serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into()))
+}
+
 pub async fn delete_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, String) {
     let path = match args.get("path").and_then(Value::as_str) {
         Some(p) => p,
@@ -746,6 +796,75 @@ mod tests {
         assert!(out.contains("workspace root") || out.contains("Cannot delete"), "got: {out}");
         // User dir still intact.
         assert!(user_dir.exists());
+    }
+
+    // --- list_dir tests ---
+
+    #[tokio::test]
+    async fn test_list_dir_shows_children() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(user_dir.join("skills/git")).await.unwrap();
+        tokio::fs::write(user_dir.join("x.txt"), b"hi").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"path": "."});
+        let (code, out) = list_dir(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.contains("x.txt"));
+        assert!(out.contains("skills"));
+        assert!(out.contains("\"is_dir\""));
+        assert!(out.contains("\"size_bytes\""));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_defaults_to_user_root() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("SOUL.md"), b"s").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        // No `path` arg — should default to "."
+        let args = serde_json::json!({});
+        let (code, out) = list_dir(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.contains("SOUL.md"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_traversal_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::create_dir_all(tmp.path().join("bob")).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"path": "../bob"});
+        let (code, out) = list_dir(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        assert!(out.contains("escapes"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_on_file_errors() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("a.txt"), b"hi").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"path": "a.txt"});
+        let (code, out) = list_dir(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        // Message should mention that the target is not a directory (either
+        // "not a directory" or the underlying OS error variant is acceptable).
+        assert!(
+            out.to_lowercase().contains("not a directory")
+                || out.to_lowercase().contains("directory")
+                || out.to_lowercase().contains("list error"),
+            "got: {out}"
+        );
     }
 
     #[cfg(unix)]

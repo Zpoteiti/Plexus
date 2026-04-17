@@ -28,6 +28,7 @@ pub const SERVER_TOOL_NAMES: &[&str] = &[
     "write_file",
     "edit_file",
     "delete_file",
+    "list_dir",
 ];
 
 /// Check if a tool name is a server-native tool.
@@ -221,6 +222,17 @@ pub fn tool_schemas() -> Vec<Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "list_dir",
+                "description": "List the entries (files and subdirectories) in a directory within your server workspace. Returns JSON rows with name, is_dir, and size_bytes. Path defaults to '.' (workspace root). Directories are listed first, then files, alphabetically within each group.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } }
+                }
+            }
+        }),
     ]
 }
 
@@ -258,6 +270,7 @@ pub async fn execute(
         "write_file" => file_ops::write_file(state, &ctx.user_id, &arguments).await,
         "edit_file" => file_ops::edit_file(state, &ctx.user_id, &arguments).await,
         "delete_file" => file_ops::delete_file(state, &ctx.user_id, &arguments).await,
+        "list_dir" => file_ops::list_dir(state, &ctx.user_id, &arguments).await,
         _ => (1, format!("Unknown server tool: {tool_name}")),
     };
     ToolExecutionResult {
