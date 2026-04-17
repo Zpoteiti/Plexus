@@ -29,6 +29,7 @@ pub const SERVER_TOOL_NAMES: &[&str] = &[
     "edit_file",
     "delete_file",
     "list_dir",
+    "glob",
 ];
 
 /// Check if a tool name is a server-native tool.
@@ -233,6 +234,18 @@ pub fn tool_schemas() -> Vec<Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "glob",
+                "description": "Match files in your server workspace against a glob pattern (relative to workspace root). Supports * (any chars except /), ** (any depth), ?, and character classes. Returns up to 500 matching relative paths, one per line. Example patterns: 'skills/*/SKILL.md', '**/*.md', 'uploads/2026-*.png'.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "pattern": { "type": "string" } },
+                    "required": ["pattern"]
+                }
+            }
+        }),
     ]
 }
 
@@ -271,6 +284,7 @@ pub async fn execute(
         "edit_file" => file_ops::edit_file(state, &ctx.user_id, &arguments).await,
         "delete_file" => file_ops::delete_file(state, &ctx.user_id, &arguments).await,
         "list_dir" => file_ops::list_dir(state, &ctx.user_id, &arguments).await,
+        "glob" => file_ops::glob(state, &ctx.user_id, &arguments).await,
         _ => (1, format!("Unknown server tool: {tool_name}")),
     };
     ToolExecutionResult {

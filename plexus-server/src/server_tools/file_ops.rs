@@ -359,6 +359,58 @@ pub async fn delete_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> 
     (0, format!("Deleted {path}"))
 }
 
+pub async fn glob(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, String) {
+    let pattern = match args.get("pattern").and_then(Value::as_str) {
+        Some(p) => p,
+        None => return (1, "Missing required parameter: pattern".into()),
+    };
+
+    let ws_root = std::path::Path::new(&state.config.workspace_root);
+    let user_root = ws_root.join(user_id);
+    let user_root = match tokio::fs::canonicalize(&user_root).await {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (1, "User workspace not initialized".into());
+        }
+        Err(e) => return (1, format!("User root: {e}")),
+    };
+
+    let matcher = match globset::Glob::new(pattern) {
+        Ok(g) => g.compile_matcher(),
+        Err(e) => return (1, format!("Bad pattern: {e}")),
+    };
+
+    let user_root_clone = user_root.clone();
+    let matches = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for entry in walkdir::WalkDir::new(&user_root_clone)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            // Skip the user root itself.
+            if entry.path() == user_root_clone {
+                continue;
+            }
+            let rel = entry.path().strip_prefix(&user_root_clone).unwrap_or(entry.path());
+            if matcher.is_match(rel) {
+                out.push(rel.display().to_string());
+            }
+            if out.len() >= 500 {
+                break;
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default();
+
+    if matches.is_empty() {
+        (0, format!("No matches for pattern '{pattern}'"))
+    } else {
+        (0, matches.join("\n"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -865,6 +917,67 @@ mod tests {
                 || out.to_lowercase().contains("list error"),
             "got: {out}"
         );
+    }
+
+    // --- glob tests ---
+
+    #[tokio::test]
+    async fn test_glob_matches_skills() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(user_dir.join("skills/git")).await.unwrap();
+        tokio::fs::write(user_dir.join("skills/git/SKILL.md"), b"x").await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("skills/memory")).await.unwrap();
+        tokio::fs::write(user_dir.join("skills/memory/SKILL.md"), b"y").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": "skills/*/SKILL.md"});
+        let (code, out) = glob(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.contains("git/SKILL.md"), "got: {out}");
+        assert!(out.contains("memory/SKILL.md"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_glob_double_star_recursive() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(user_dir.join("a/b/c")).await.unwrap();
+        tokio::fs::write(user_dir.join("a/b/c/deep.txt"), b"x").await.unwrap();
+        tokio::fs::write(user_dir.join("top.txt"), b"y").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": "**/*.txt"});
+        let (code, out) = glob(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.contains("top.txt"), "got: {out}");
+        assert!(out.contains("a/b/c/deep.txt"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_glob_no_matches_returns_helpful_message() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": "*.xyz"});
+        let (code, out) = glob(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.to_lowercase().contains("no matches"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_glob_bad_pattern_errors() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": "[invalid"});
+        let (code, out) = glob(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        assert!(out.to_lowercase().contains("pattern") || out.to_lowercase().contains("bad"), "got: {out}");
     }
 
     #[cfg(unix)]
