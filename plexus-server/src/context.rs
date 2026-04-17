@@ -55,6 +55,7 @@ impl ChannelIdentity {
 }
 
 /// Skill info for context building.
+#[derive(Clone)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,

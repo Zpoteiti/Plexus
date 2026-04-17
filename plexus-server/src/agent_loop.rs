@@ -464,23 +464,13 @@ async fn execute_tool_call(
 }
 
 async fn load_skills(state: &AppState, user_id: &str) -> Vec<SkillInfo> {
-    let db_skills = crate::db::skills::list_by_user(&state.db, user_id)
-        .await
-        .unwrap_or_default();
-
-    let mut skills = Vec::new();
-    for skill in db_skills {
-        let content = tokio::fs::read_to_string(format!("{}/SKILL.md", skill.skill_path))
-            .await
-            .unwrap_or_default();
-        skills.push(SkillInfo {
-            name: skill.name,
-            description: skill.description,
-            always_on: skill.always_on,
-            content,
-        });
-    }
-    skills
+    let ws_root = std::path::Path::new(&state.config.workspace_root);
+    let cached = state.skills_cache.get_or_load(user_id, ws_root).await;
+    // The cache returns Arc<Vec<SkillInfo>>. The caller expects Vec<SkillInfo>
+    // (takes ownership to pass by slice). Clone once — SkillInfo is shallow
+    // enough (Strings), and this matches the existing contract. If this
+    // becomes a hot path, migrate the caller to accept &[SkillInfo] directly.
+    cached.as_ref().clone()
 }
 
 async fn send_error(
