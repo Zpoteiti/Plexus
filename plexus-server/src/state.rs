@@ -127,6 +127,27 @@ impl AppState {
         Self::build_test_state(config, outbound_tx, 1024 * 1024)
     }
 
+    /// Same as `test_minimal` but returns the outbound receiver so tests can
+    /// observe `OutboundEvent`s published by the tool under test.
+    pub fn test_minimal_with_outbound(
+        workspace_root: &std::path::Path,
+    ) -> (std::sync::Arc<Self>, tokio::sync::mpsc::Receiver<crate::bus::OutboundEvent>) {
+        use tokio::sync::mpsc;
+
+        let config = crate::config::ServerConfig {
+            database_url: "postgres://invalid".into(),
+            admin_token: "test".into(),
+            jwt_secret: "test".into(),
+            server_port: 0,
+            gateway_ws_url: "ws://invalid".into(),
+            gateway_token: "test".into(),
+            workspace_root: workspace_root.to_string_lossy().into_owned(),
+        };
+
+        let (outbound_tx, outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(16);
+        (Self::build_test_state(config, outbound_tx, 1024 * 1024), outbound_rx)
+    }
+
     /// Same as `test_minimal` but with an explicit quota size.
     /// Use when tests need to exercise quota boundaries without GBs of memory.
     pub fn test_minimal_with_quota(

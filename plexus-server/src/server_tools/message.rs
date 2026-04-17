@@ -88,10 +88,10 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
                 let resolved = match crate::workspace::resolve_user_path(ws_root, &ctx.user_id, path).await {
                     Ok(p) => p,
                     Err(crate::workspace::WorkspaceError::Traversal(_)) => {
-                        return (1, format!("Media path escapes user workspace: {path}"));
+                        return (1, "Path escapes user workspace".into());
                     }
                     Err(crate::workspace::WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                        return (1, format!("Media file not found: {path}"));
+                        return (1, format!("File not found: {path}"));
                     }
                     Err(e) => return (1, format!("Resolve error on {path}: {e}")),
                 };
@@ -156,7 +156,7 @@ mod tests {
         tokio::fs::create_dir_all(user_dir.join("uploads")).await.unwrap();
         tokio::fs::write(user_dir.join("uploads/report.pdf"), b"fake-pdf-bytes").await.unwrap();
 
-        let state = AppState::test_minimal(tmp.path());
+        let (state, mut outbound_rx) = AppState::test_minimal_with_outbound(tmp.path());
 
         let ctx = ToolContext {
             user_id: "alice".into(),
@@ -176,19 +176,14 @@ mod tests {
         let (code, out) = message_tool(&state, &ctx, &args).await;
         assert_eq!(code, 0, "expected success, got: {out}");
 
-        // Verify side effect: file_store wrote a file to /tmp/plexus-uploads/alice/
-        let upload_dir = std::path::Path::new("/tmp/plexus-uploads/alice");
-        let mut found = false;
-        if let Ok(mut entries) = tokio::fs::read_dir(upload_dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.ends_with("report.pdf") {
-                    found = true;
-                    break;
-                }
-            }
-        }
-        assert!(found, "expected a report.pdf file in the upload dir");
+        let event = outbound_rx.recv().await.expect("outbound event published");
+        assert_eq!(event.content, "Here's the report");
+        assert_eq!(event.media.len(), 1, "expected 1 media URL");
+        assert!(
+            event.media[0].starts_with("/api/files/"),
+            "expected /api/files URL, got: {}",
+            event.media[0]
+        );
     }
 
     #[tokio::test]
@@ -254,6 +249,51 @@ mod tests {
         assert!(out.contains("not found"), "got: {out}");
         assert!(out.contains("uploads/ghost.pdf"), "expected path echo, got: {out}");
     }
+
+    #[tokio::test]
+    async fn test_message_tool_server_media_multiple_files() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(user_dir.join("uploads")).await.unwrap();
+        tokio::fs::write(user_dir.join("uploads/a.txt"), b"one").await.unwrap();
+        tokio::fs::write(user_dir.join("uploads/b.txt"), b"two").await.unwrap();
+
+        let (state, mut outbound_rx) = AppState::test_minimal_with_outbound(tmp.path());
+
+        let ctx = ToolContext {
+            user_id: "alice".into(),
+            session_id: "sess-1".into(),
+            channel: "gateway".into(),
+            chat_id: Some("chat-1".into()),
+            is_cron: false,
+            is_partner: true,
+        };
+        let args = serde_json::json!({
+            "content": "two files",
+            "channel": "gateway",
+            "chat_id": "chat-1",
+            "media": ["uploads/a.txt", "uploads/b.txt"],
+            "from_device": "server",
+        });
+        let (code, out) = message_tool(&state, &ctx, &args).await;
+        assert_eq!(code, 0, "expected success, got: {out}");
+
+        let event = outbound_rx.recv().await.expect("outbound event published");
+        assert_eq!(event.content, "two files");
+        assert_eq!(event.media.len(), 2, "expected 2 media URLs");
+        for url in &event.media {
+            assert!(
+                url.starts_with("/api/files/"),
+                "expected /api/files URL, got: {url}"
+            );
+        }
+    }
+
+    // Note: "mixed media" (one server file + one client device file in a single call) is not
+    // representable because the tool schema has a single `from_device` field. There is no
+    // per-item device selector, so per-device mixing cannot occur at the protocol level.
 
     #[test]
     fn test_guard_allows_partner_cross_channel() {
