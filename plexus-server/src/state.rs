@@ -99,6 +99,10 @@ impl AppState {
     /// Build a minimal AppState with a specified workspace root.
     /// Does NOT connect to a real DB or start any background tasks.
     /// Used by server-tool unit tests that only need file I/O paths.
+    ///
+    /// WARNING: `db` is `PgPool::connect_lazy` with an invalid URL — any code path
+    /// that actually queries the DB will fail at runtime (not compile-time). Tests
+    /// that need DB access should use `#[sqlx::test]` and build AppState explicitly.
     pub fn test_minimal(workspace_root: &std::path::Path) -> std::sync::Arc<Self> {
         use tokio::sync::{RwLock, Semaphore, mpsc};
         use tokio_util::sync::CancellationToken;

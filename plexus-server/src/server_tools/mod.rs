@@ -164,7 +164,7 @@ pub fn tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Read a file from your server workspace (relative path).",
+                "description": "Read a text file from your server workspace (relative path). Returns UTF-8 content for text files; for binary/non-UTF-8 files or files larger than 256 KiB, returns a size hint prompting you to use file_transfer instead.",
                 "parameters": {
                     "type": "object",
                     "properties": { "path": { "type": "string" } },

@@ -5,6 +5,11 @@ use crate::workspace::{resolve_user_path, WorkspaceError};
 use serde_json::Value;
 use std::sync::Arc;
 
+/// Maximum bytes returned by `read_file` for text content.
+/// Files larger than this return a size hint pointing to file_transfer.
+/// Sized to comfortably fit within any reasonable LLM context budget.
+pub(crate) const MAX_READ_BYTES: u64 = 256 * 1024;
+
 pub async fn read_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, String) {
     let path = match args.get("path").and_then(Value::as_str) {
         Some(p) => p,
@@ -15,8 +20,25 @@ pub async fn read_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i
     let resolved = match resolve_user_path(ws_root, user_id, path).await {
         Ok(p) => p,
         Err(WorkspaceError::Traversal(_)) => return (1, "Path escapes user workspace".into()),
+        Err(WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (1, format!("File not found: {path}"));
+        }
         Err(e) => return (1, format!("Resolve error: {e}")),
     };
+
+    // Size cap check before reading
+    let size = match tokio::fs::metadata(&resolved).await {
+        Ok(m) => m.len(),
+        Err(e) => return (1, format!("Stat error: {e}")),
+    };
+    if size > MAX_READ_BYTES {
+        return (
+            0,
+            format!(
+                "[File too large: {size} bytes, max {MAX_READ_BYTES}. Use file_transfer to move it to a client device.]"
+            ),
+        );
+    }
 
     match tokio::fs::read_to_string(&resolved).await {
         Ok(content) => (0, content),
@@ -81,7 +103,25 @@ mod tests {
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"path": "nonexistent.txt"});
-        let (code, _) = read_file(&state, "alice", &args).await;
+        let (code, out) = read_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
+        assert!(out.contains("not found"), "expected 'not found' in output, got: {out}");
+        assert!(out.contains("nonexistent.txt"), "expected path echo in output, got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_read_file_oversize_returns_stub() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        let large = vec![b'x'; (MAX_READ_BYTES + 1) as usize];
+        tokio::fs::write(user_dir.join("big.txt"), &large).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"path": "big.txt"});
+        let (code, out) = read_file(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.contains("too large"), "expected 'too large' in output, got: {out}");
+        assert!(out.contains("file_transfer"), "expected remediation hint, got: {out}");
     }
 }
