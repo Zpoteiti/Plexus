@@ -139,7 +139,6 @@ pub async fn write_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (
     (0, format!("Wrote {new_size} bytes to {path}"))
 }
 
-
 pub async fn edit_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, String) {
     let path = match args.get("path").and_then(Value::as_str) {
         Some(p) => p,
@@ -581,5 +580,49 @@ mod tests {
         let (code, out) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
         assert!(out.contains("too large"), "got: {out}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_edit_file_rollback_on_write_failure_restores_quota() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("f.txt"), "hi").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        state.quota.check_and_reserve_upload("alice", 2).unwrap();
+
+        // Make the file read-only so tokio::fs::write fails.
+        tokio::fs::set_permissions(
+            user_dir.join("f.txt"),
+            std::fs::Permissions::from_mode(0o400),
+        ).await.unwrap();
+
+        // Attempt an edit that would grow the file by 9 bytes.
+        let args = serde_json::json!({
+            "path": "f.txt",
+            "old_string": "hi",
+            "new_string": "hello world"
+        });
+        let (code, out) = edit_file(&state, "alice", &args).await;
+        assert_eq!(code, 1, "expected failure, got: {out}");
+
+        // Growth of 9 was reserved, then rolled back via record_delete on write failure.
+        // Counter should still be at the original 2 bytes.
+        assert_eq!(
+            state.quota.current_usage("alice"),
+            2,
+            "quota should be unchanged after failed edit; got {}",
+            state.quota.current_usage("alice")
+        );
+
+        // Restore write perms so TempDir cleanup doesn't hang.
+        tokio::fs::set_permissions(
+            user_dir.join("f.txt"),
+            std::fs::Permissions::from_mode(0o600),
+        ).await.ok();
     }
 }

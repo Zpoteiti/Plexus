@@ -34,7 +34,7 @@ pub fn is_server_tool(name: &str) -> bool {
     SERVER_TOOL_NAMES.contains(&name)
 }
 
-/// Return JSON schemas for all 8 server tools.
+/// Return JSON schemas for every registered server tool.
 pub fn tool_schemas() -> Vec<Value> {
     vec![
         serde_json::json!({
@@ -193,7 +193,7 @@ pub fn tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "edit_file",
-                "description": "Surgical edit of a text file in your server workspace (relative path). Replaces exactly one occurrence of old_string with new_string. Errors if old_string is missing or appears more than once — include surrounding context to disambiguate. Files must be ≤ 256 KiB and valid UTF-8.",
+                "description": "Surgical edit of a text file in your server workspace (relative path). Replaces exactly one occurrence of old_string with new_string. Matches are non-overlapping (e.g., 'aaa' matches once in 'aaaa'). Errors if old_string is missing or appears more than once — include surrounding context to disambiguate. Files must be ≤ 256 KiB and valid UTF-8.",
                 "parameters": {
                     "type": "object",
                     "properties": {

@@ -95,7 +95,7 @@ pub async fn resolve_user_path_for_create(
 /// deepest existing ancestor.
 ///
 /// Returns `false` if the skills directory does not yet exist for the user.
-pub fn is_under_skills_dir(
+pub(crate) fn is_under_skills_dir(
     resolved: &std::path::Path,
     workspace_root: &std::path::Path,
     user_id: &str,
