@@ -6,8 +6,12 @@ use std::path::Path;
 /// (or shipped template files as fallback).
 ///
 /// Idempotent: re-creates missing files, but does not overwrite existing ones.
+///
+/// Pass `pool: None` to skip the system_config lookup entirely and use the
+/// shipped templates directly. This is useful for FS-only tests that should
+/// not block on a Postgres connect timeout.
 pub async fn initialize_user_workspace(
-    pool: &PgPool,
+    pool: Option<&PgPool>,
     workspace_root: &Path,
     user_id: &str,
 ) -> std::io::Result<()> {
@@ -43,9 +47,16 @@ pub async fn initialize_user_workspace(
         if target.exists() {
             continue; // idempotent
         }
-        let content = match system_config::get(pool, key).await {
-            Ok(Some(v)) => v,
-            _ => fallback.to_string(),
+        let content = match pool {
+            Some(pool) => match system_config::get(pool, key).await {
+                Ok(Some(v)) => v,
+                Ok(None) => fallback.to_string(),
+                Err(e) => {
+                    tracing::warn!(error = %e, key, user_id, "system_config lookup failed, using shipped template");
+                    fallback.to_string()
+                }
+            },
+            None => fallback.to_string(),
         };
         tokio::fs::write(&target, content.as_bytes()).await?;
         #[cfg(unix)]
@@ -68,6 +79,11 @@ pub async fn initialize_user_workspace(
 
 async fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     tokio::fs::create_dir_all(dst).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o700)).await?;
+    }
     let mut entries = tokio::fs::read_dir(src).await?;
     while let Some(entry) = entries.next_entry().await? {
         let file_type = entry.file_type().await?;
@@ -79,6 +95,11 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
             // Skip if target exists (idempotent — don't clobber user edits).
             if !to.exists() {
                 tokio::fs::copy(&from, &to).await?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    tokio::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o600)).await?;
+                }
             }
         }
     }
@@ -90,18 +111,10 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Build a pool that will never actually connect.  Any DB call against it
-    /// returns an error, which causes `initialize_user_workspace` to fall back
-    /// to the shipped template files — exactly what we want for FS-only tests.
-    fn offline_pool() -> PgPool {
-        PgPool::connect_lazy("postgres://localhost/nonexistent_test_db")
-            .expect("connect_lazy must not fail synchronously")
-    }
-
     #[tokio::test]
     async fn test_initialize_creates_tree() {
         let root = TempDir::new().unwrap();
-        initialize_user_workspace(&offline_pool(), root.path(), "alice")
+        initialize_user_workspace(None, root.path(), "alice")
             .await
             .unwrap();
 
@@ -122,7 +135,7 @@ mod tests {
     #[tokio::test]
     async fn test_initialize_is_idempotent() {
         let root = TempDir::new().unwrap();
-        initialize_user_workspace(&offline_pool(), root.path(), "bob")
+        initialize_user_workspace(None, root.path(), "bob")
             .await
             .unwrap();
 
@@ -132,12 +145,26 @@ mod tests {
             .await
             .unwrap();
 
-        initialize_user_workspace(&offline_pool(), root.path(), "bob")
+        initialize_user_workspace(None, root.path(), "bob")
             .await
             .unwrap();
 
         let after = tokio::fs::read_to_string(&memory).await.unwrap();
         assert_eq!(after, "user-edited content");
+    }
+
+    #[tokio::test]
+    async fn test_initialize_without_pool_uses_templates() {
+        let root = TempDir::new().unwrap();
+        initialize_user_workspace(None, root.path(), "nopool")
+            .await
+            .unwrap();
+
+        // Without a pool, fallback templates must be used — verify shipped content appears.
+        let soul = tokio::fs::read_to_string(root.path().join("nopool/SOUL.md"))
+            .await
+            .unwrap();
+        assert!(soul.contains("baseline soul"));
     }
 
     /// Requires a running Postgres with DATABASE_URL set and the system_config
@@ -157,7 +184,7 @@ mod tests {
             .unwrap();
 
         let root = TempDir::new().unwrap();
-        initialize_user_workspace(&pool, root.path(), "carol")
+        initialize_user_workspace(Some(&pool), root.path(), "carol")
             .await
             .unwrap();
 

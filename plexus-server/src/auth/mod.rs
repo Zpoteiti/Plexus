@@ -103,7 +103,7 @@ pub async fn register(
         })?;
 
     if let Err(e) = crate::workspace::initialize_user_workspace(
-        &state.db,
+        Some(&state.db),
         std::path::Path::new(&state.config.workspace_root),
         &user_id,
     )
