@@ -93,3 +93,49 @@ impl AppState {
         format!("{user_id}:{device_name}")
     }
 }
+
+#[cfg(test)]
+impl AppState {
+    /// Build a minimal AppState with a specified workspace root.
+    /// Does NOT connect to a real DB or start any background tasks.
+    /// Used by server-tool unit tests that only need file I/O paths.
+    pub fn test_minimal(workspace_root: &std::path::Path) -> std::sync::Arc<Self> {
+        use tokio::sync::{RwLock, Semaphore, mpsc};
+        use tokio_util::sync::CancellationToken;
+
+        let config = crate::config::ServerConfig {
+            database_url: "postgres://invalid".into(),
+            admin_token: "test".into(),
+            jwt_secret: "test".into(),
+            server_port: 0,
+            gateway_ws_url: "ws://invalid".into(),
+            gateway_token: "test".into(),
+            workspace_root: workspace_root.to_string_lossy().into_owned(),
+        };
+
+        let (outbound_tx, _outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(1);
+
+        std::sync::Arc::new(AppState {
+            db: sqlx::PgPool::connect_lazy("postgres://invalid").unwrap(),
+            config,
+            llm_config: std::sync::Arc::new(RwLock::new(None)),
+            devices: Default::default(),
+            devices_by_user: Default::default(),
+            pending: Default::default(),
+            tool_schema_cache: Default::default(),
+            rate_limiter: Default::default(),
+            rate_limit_config: std::sync::Arc::new(RwLock::new(0)),
+            default_soul: std::sync::Arc::new(RwLock::new(None)),
+            sessions: Default::default(),
+            web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
+            http_client: reqwest::Client::new(),
+            web_fetch_client: reqwest::Client::new(),
+            server_mcp: std::sync::Arc::new(RwLock::new(
+                crate::server_mcp::ServerMcpManager::new(),
+            )),
+            gateway_sink: RwLock::new(None),
+            outbound_tx,
+            shutdown: CancellationToken::new(),
+        })
+    }
+}

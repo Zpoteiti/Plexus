@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 pub mod cron_tool;
+pub mod file_ops;
 pub mod file_transfer;
 pub mod memory;
 pub mod message;
@@ -23,6 +24,7 @@ pub const SERVER_TOOL_NAMES: &[&str] = &[
     "read_skill",
     "install_skill",
     "web_fetch",
+    "read_file",
 ];
 
 /// Check if a tool name is a server-native tool.
@@ -158,6 +160,18 @@ pub fn tool_schemas() -> Vec<Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file from your server workspace (relative path).",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }
+            }
+        }),
     ]
 }
 
@@ -191,6 +205,7 @@ pub async fn execute(
         "cron" => cron_tool::cron(state, ctx, &arguments).await,
         "read_skill" => skills::read_skill(state, &ctx.user_id, &arguments).await,
         "install_skill" => skills::install_skill(state, &ctx.user_id, &arguments).await,
+        "read_file" => file_ops::read_file(state, &ctx.user_id, &arguments).await,
         _ => (1, format!("Unknown server tool: {tool_name}")),
     };
     ToolExecutionResult {
