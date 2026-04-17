@@ -71,75 +71,87 @@ pub async fn write_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (
     let new_size = bytes.len() as u64;
 
     let ws_root = std::path::Path::new(&state.config.workspace_root);
-
-    // Resolve the target path (allowing creation of non-existent files).
     let resolved = match crate::workspace::resolve_user_path_for_create(ws_root, user_id, path).await {
         Ok(p) => p,
-        Err(WorkspaceError::Traversal(_)) => {
+        Err(crate::workspace::WorkspaceError::Traversal(_)) => {
             return (1, "Path escapes user workspace".into());
         }
-        Err(WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(crate::workspace::WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             return (1, format!("Parent path not found: {path}"));
         }
         Err(e) => return (1, format!("Resolve error: {e}")),
     };
 
-    // Quota accounting: if overwriting, first release the old size so the
-    // quota check reflects the net growth. This correctly handles shrinking
-    // overwrites (old 100 KiB -> new 50 KiB) as well as growths.
     let old_size = tokio::fs::metadata(&resolved)
         .await
         .map(|m| m.len())
         .unwrap_or(0);
-    if old_size > 0 {
-        state.quota.record_delete(user_id, old_size);
-    }
 
-    // Reserve the new size. This may fail with UploadTooLarge or SoftLocked.
-    if let Err(e) = state.quota.check_and_reserve_upload(user_id, new_size) {
-        // Restore the pre-write accounting — we released the old size but never
-        // actually wrote, so the file still exists at old_size bytes.
-        if old_size > 0 {
-            // Un-release: treat as a phantom upload of the old size.
-            let _ = state.quota.check_and_reserve_upload(user_id, old_size);
+    // If the new write grows the file, reserve the growth up-front.
+    // (This is the only point where the quota check can reject us.)
+    let growth = new_size.saturating_sub(old_size);
+    if growth > 0 {
+        if let Err(e) = state.quota.check_and_reserve_upload(user_id, growth) {
+            return (1, format!("Quota: {e}"));
         }
-        return (1, format!("Quota: {e}"));
     }
 
-    // Create parent directories if needed.
+    // Make parent dirs if needed.
     if let Some(parent) = resolved.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            // Roll back the reservation.
-            state.quota.record_delete(user_id, new_size);
-            if old_size > 0 {
-                let _ = state.quota.check_and_reserve_upload(user_id, old_size);
+            if growth > 0 {
+                // Infallible rollback: release what we reserved.
+                state.quota.record_delete(user_id, growth);
             }
             return (1, format!("Create dir: {e}"));
         }
     }
 
-    // Actually write the file.
+    // Write.
     if let Err(e) = tokio::fs::write(&resolved, bytes).await {
-        state.quota.record_delete(user_id, new_size);
-        if old_size > 0 {
-            let _ = state.quota.check_and_reserve_upload(user_id, old_size);
+        if growth > 0 {
+            state.quota.record_delete(user_id, growth);
         }
         return (1, format!("Write error: {e}"));
     }
 
-    // Set 0600 permissions on Unix.
+    // Write succeeded. If the new file is smaller than the old, release the excess.
+    let shrink = old_size.saturating_sub(new_size);
+    if shrink > 0 {
+        state.quota.record_delete(user_id, shrink);
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = tokio::fs::set_permissions(&resolved, std::fs::Permissions::from_mode(0o600)).await;
     }
 
-    // If this was a skills/ write, invalidate the skills cache.
-    if path.starts_with("skills/") {
+    // Invalidate the skills cache if this write landed under `skills/`.
+    // Check against the RESOLVED path (not raw input) so `./skills/foo`,
+    // `skills//foo`, etc. all invalidate correctly.
+    if is_under_skills_dir(&resolved, ws_root, user_id) {
         state.skills_cache.invalidate(user_id);
     }
 
     (0, format!("Wrote {new_size} bytes to {path}"))
+}
+
+/// True if `resolved` is under `{ws_root}/{user_id}/skills/`.
+/// Both paths are expected to already be canonicalized.
+fn is_under_skills_dir(
+    resolved: &std::path::Path,
+    ws_root: &std::path::Path,
+    user_id: &str,
+) -> bool {
+    let skills_dir = ws_root.join(user_id).join("skills");
+    // Try to canonicalize; if the skills dir doesn't exist yet (fresh user),
+    // fall back to a best-effort prefix check against the non-canonical path.
+    let skills_dir_canonical = match std::fs::canonicalize(&skills_dir) {
+        Ok(p) => p,
+        Err(_) => return false, // skills/ dir doesn't exist, can't be writing under it
+    };
+    resolved.starts_with(&skills_dir_canonical)
 }
 
 #[cfg(test)]
@@ -290,5 +302,59 @@ mod tests {
         let args = serde_json::json!({"path": "f.txt", "content": small});
         write_file(&state, "alice", &args).await;
         assert_eq!(state.quota.current_usage("alice"), 10);
+    }
+
+    #[tokio::test]
+    async fn test_write_file_rollback_on_failure_restores_quota() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+
+        // Write a file successfully (100 bytes).
+        let args1 = serde_json::json!({"path": "f.txt", "content": "x".repeat(100)});
+        let (code, _) = write_file(&state, "alice", &args1).await;
+        assert_eq!(code, 0);
+        assert_eq!(state.quota.current_usage("alice"), 100);
+
+        // Attempt a grow-overwrite into a read-only directory — will fail at mkdir.
+        // Create a file named "readonly_dir" (so mkdir will fail because it exists
+        // but is a file, not a directory).
+        tokio::fs::write(user_dir.join("readonly_dir"), b"block").await.unwrap();
+        let args2 = serde_json::json!({
+            "path": "readonly_dir/child.txt",
+            "content": "y".repeat(200),  // growth
+        });
+        let (code, out) = write_file(&state, "alice", &args2).await;
+        assert_eq!(code, 1, "expected failure, got code {code} out {out}");
+
+        // Quota should be unchanged — the attempted 200-byte reservation was rolled back.
+        // Correct usage is still 100 (from the first write).
+        assert_eq!(
+            state.quota.current_usage("alice"),
+            100,
+            "quota should be unchanged after failed grow; got {}",
+            state.quota.current_usage("alice")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_file_grow_within_quota() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+
+        // 50 bytes
+        let args1 = serde_json::json!({"path": "f.txt", "content": "x".repeat(50)});
+        write_file(&state, "alice", &args1).await;
+        assert_eq!(state.quota.current_usage("alice"), 50);
+
+        // Grow to 90 bytes.
+        let args2 = serde_json::json!({"path": "f.txt", "content": "x".repeat(90)});
+        write_file(&state, "alice", &args2).await;
+        assert_eq!(state.quota.current_usage("alice"), 90);
     }
 }
