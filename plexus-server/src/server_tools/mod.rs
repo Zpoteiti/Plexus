@@ -30,6 +30,7 @@ pub const SERVER_TOOL_NAMES: &[&str] = &[
     "delete_file",
     "list_dir",
     "glob",
+    "grep",
 ];
 
 /// Check if a tool name is a server-native tool.
@@ -246,6 +247,22 @@ pub fn tool_schemas() -> Vec<Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": "Search file content in your server workspace. Matches either a literal substring (default) or a regular expression (regex: true). Optional path_prefix narrows the search to a subdirectory. Returns at most 200 matching lines in `{path}:{line}: {content}` format.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string" },
+                        "path_prefix": { "type": "string" },
+                        "regex": { "type": "boolean" }
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        }),
     ]
 }
 
@@ -285,6 +302,7 @@ pub async fn execute(
         "delete_file" => file_ops::delete_file(state, &ctx.user_id, &arguments).await,
         "list_dir" => file_ops::list_dir(state, &ctx.user_id, &arguments).await,
         "glob" => file_ops::glob(state, &ctx.user_id, &arguments).await,
+        "grep" => file_ops::grep(state, &ctx.user_id, &arguments).await,
         _ => (1, format!("Unknown server tool: {tool_name}")),
     };
     ToolExecutionResult {

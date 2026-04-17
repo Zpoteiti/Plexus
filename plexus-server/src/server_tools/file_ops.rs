@@ -359,6 +359,92 @@ pub async fn delete_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> 
     (0, format!("Deleted {path}"))
 }
 
+pub async fn grep(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, String) {
+    let pattern = match args.get("pattern").and_then(Value::as_str) {
+        Some(p) => p,
+        None => return (1, "Missing required parameter: pattern".into()),
+    };
+    let path_prefix = args.get("path_prefix").and_then(Value::as_str).unwrap_or("");
+    let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+
+    let ws_root = std::path::Path::new(&state.config.workspace_root);
+    let user_root = ws_root.join(user_id);
+    let user_root = match tokio::fs::canonicalize(&user_root).await {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (1, "User workspace not initialized".into());
+        }
+        Err(e) => return (1, format!("User root: {e}")),
+    };
+
+    // Resolve the search root — either user_root itself, or a subdirectory.
+    let search_root = if path_prefix.is_empty() {
+        user_root.clone()
+    } else {
+        match resolve_user_path(ws_root, user_id, path_prefix).await {
+            Ok(p) => p,
+            Err(WorkspaceError::Traversal(_)) => {
+                return (1, "path_prefix escapes user workspace".into());
+            }
+            Err(WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return (1, format!("path_prefix not found: {path_prefix}"));
+            }
+            Err(e) => return (1, format!("Resolve error: {e}")),
+        }
+    };
+
+    // Build the matcher closure.
+    type Matcher = Box<dyn Fn(&str) -> bool + Send>;
+    let matcher: Matcher = if use_regex {
+        match regex::Regex::new(pattern) {
+            Ok(r) => Box::new(move |line: &str| r.is_match(line)),
+            Err(e) => return (1, format!("Bad regex: {e}")),
+        }
+    } else {
+        let needle = pattern.to_string();
+        Box::new(move |line: &str| line.contains(&needle))
+    };
+
+    let user_root_clone = user_root.clone();
+    let results = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        for entry in walkdir::WalkDir::new(&search_root)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            // Read as text; skip files that aren't UTF-8.
+            let content = match std::fs::read_to_string(entry.path()) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let rel = entry
+                .path()
+                .strip_prefix(&user_root_clone)
+                .unwrap_or(entry.path());
+            for (i, line) in content.lines().enumerate() {
+                if matcher(line) {
+                    out.push(format!("{}:{}: {}", rel.display(), i + 1, line));
+                    if out.len() >= 200 {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default();
+
+    if results.is_empty() {
+        (0, format!("No matches for pattern '{pattern}'"))
+    } else {
+        (0, results.join("\n"))
+    }
+}
+
 pub async fn glob(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, String) {
     let pattern = match args.get("pattern").and_then(Value::as_str) {
         Some(p) => p,
@@ -978,6 +1064,98 @@ mod tests {
         let (code, out) = glob(&state, "alice", &args).await;
         assert_eq!(code, 1);
         assert!(out.to_lowercase().contains("pattern") || out.to_lowercase().contains("bad"), "got: {out}");
+    }
+
+    // --- grep tests ---
+
+    #[tokio::test]
+    async fn test_grep_finds_substring() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("a.md"), "hello\nworld\n").await.unwrap();
+        tokio::fs::write(user_dir.join("b.md"), "foo\nbar\n").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": "world"});
+        let (code, out) = grep(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.contains("a.md:2"), "got: {out}");
+        assert!(!out.contains("b.md"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_grep_regex_mode() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("t.md"), "foo123\nbar456\nnothing\n").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": r"\d{3}", "regex": true});
+        let (code, out) = grep(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.contains("foo123"), "got: {out}");
+        assert!(out.contains("bar456"), "got: {out}");
+        assert!(!out.contains("nothing"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_grep_path_prefix_scopes_search() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(user_dir.join("skills")).await.unwrap();
+        tokio::fs::write(user_dir.join("skills/x.md"), "target\n").await.unwrap();
+        tokio::fs::write(user_dir.join("root.md"), "target\n").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": "target", "path_prefix": "skills"});
+        let (code, out) = grep(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.contains("skills/x.md"), "got: {out}");
+        assert!(!out.contains("root.md"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_grep_path_prefix_traversal_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::create_dir_all(tmp.path().join("bob")).await.unwrap();
+        tokio::fs::write(tmp.path().join("bob/secret.txt"), "target\n").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": "target", "path_prefix": "../bob"});
+        let (code, out) = grep(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        assert!(out.contains("escapes"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_grep_bad_regex_errors() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": "[invalid", "regex": true});
+        let (code, out) = grep(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        assert!(out.to_lowercase().contains("regex"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_grep_no_matches_returns_message() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("a.md"), "hello\n").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({"pattern": "missing"});
+        let (code, out) = grep(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        assert!(out.to_lowercase().contains("no matches"), "got: {out}");
     }
 
     #[cfg(unix)]
