@@ -25,6 +25,7 @@ pub const SERVER_TOOL_NAMES: &[&str] = &[
     "install_skill",
     "web_fetch",
     "read_file",
+    "write_file",
 ];
 
 /// Check if a tool name is a server-native tool.
@@ -172,6 +173,21 @@ pub fn tool_schemas() -> Vec<Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write or overwrite a text file in your server workspace (relative path). Creates parent directories as needed. Counted against your per-user quota; rejected if the upload exceeds the per-upload cap or the workspace is soft-locked.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "content": { "type": "string" }
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        }),
     ]
 }
 
@@ -206,6 +222,7 @@ pub async fn execute(
         "read_skill" => skills::read_skill(state, &ctx.user_id, &arguments).await,
         "install_skill" => skills::install_skill(state, &ctx.user_id, &arguments).await,
         "read_file" => file_ops::read_file(state, &ctx.user_id, &arguments).await,
+        "write_file" => file_ops::write_file(state, &ctx.user_id, &arguments).await,
         _ => (1, format!("Unknown server tool: {tool_name}")),
     };
     ToolExecutionResult {

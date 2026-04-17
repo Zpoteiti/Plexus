@@ -86,6 +86,12 @@ pub struct AppState {
 
     // Shutdown signal — cancelled on SIGINT/SIGTERM; background tasks watch it.
     pub shutdown: CancellationToken,
+
+    // Per-user disk quota tracking.
+    pub quota: std::sync::Arc<crate::workspace::QuotaCache>,
+
+    // Per-user in-memory skills cache (placeholder until A-16).
+    pub skills_cache: crate::skills_cache::SkillsCache,
 }
 
 impl AppState {
@@ -104,8 +110,7 @@ impl AppState {
     /// that actually queries the DB will fail at runtime (not compile-time). Tests
     /// that need DB access should use `#[sqlx::test]` and build AppState explicitly.
     pub fn test_minimal(workspace_root: &std::path::Path) -> std::sync::Arc<Self> {
-        use tokio::sync::{RwLock, Semaphore, mpsc};
-        use tokio_util::sync::CancellationToken;
+        use tokio::sync::mpsc;
 
         let config = crate::config::ServerConfig {
             database_url: "postgres://invalid".into(),
@@ -118,6 +123,40 @@ impl AppState {
         };
 
         let (outbound_tx, _outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(1);
+
+        Self::build_test_state(config, outbound_tx, 1024 * 1024)
+    }
+
+    /// Same as `test_minimal` but with an explicit quota size.
+    /// Use when tests need to exercise quota boundaries without GBs of memory.
+    pub fn test_minimal_with_quota(
+        workspace_root: &std::path::Path,
+        quota_bytes: u64,
+    ) -> std::sync::Arc<Self> {
+        use tokio::sync::mpsc;
+
+        let config = crate::config::ServerConfig {
+            database_url: "postgres://invalid".into(),
+            admin_token: "test".into(),
+            jwt_secret: "test".into(),
+            server_port: 0,
+            gateway_ws_url: "ws://invalid".into(),
+            gateway_token: "test".into(),
+            workspace_root: workspace_root.to_string_lossy().into_owned(),
+        };
+
+        let (outbound_tx, _outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(1);
+
+        Self::build_test_state(config, outbound_tx, quota_bytes)
+    }
+
+    fn build_test_state(
+        config: crate::config::ServerConfig,
+        outbound_tx: tokio::sync::mpsc::Sender<crate::bus::OutboundEvent>,
+        quota_bytes: u64,
+    ) -> std::sync::Arc<Self> {
+        use tokio::sync::{RwLock, Semaphore};
+        use tokio_util::sync::CancellationToken;
 
         std::sync::Arc::new(AppState {
             db: sqlx::PgPool::connect_lazy("postgres://invalid").unwrap(),
@@ -140,6 +179,8 @@ impl AppState {
             gateway_sink: RwLock::new(None),
             outbound_tx,
             shutdown: CancellationToken::new(),
+            quota: std::sync::Arc::new(crate::workspace::QuotaCache::new(quota_bytes)),
+            skills_cache: crate::skills_cache::SkillsCache::new(),
         })
     }
 }

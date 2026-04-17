@@ -13,6 +13,7 @@ mod providers;
 mod server_mcp;
 mod server_tools;
 mod session;
+pub mod skills_cache;
 mod state;
 mod tools_registry;
 pub mod workspace;
@@ -40,6 +41,8 @@ async fn main() {
     let pool = db::init_db(&config.database_url).await;
 
     let (outbound_tx, outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(1000);
+
+    let quota = Arc::new(crate::workspace::QuotaCache::new(5 * 1024 * 1024 * 1024));
 
     let state = Arc::new(AppState {
         db: pool,
@@ -73,6 +76,8 @@ async fn main() {
             .expect("Failed to create web_fetch client"),
         outbound_tx,
         shutdown: CancellationToken::new(),
+        quota,
+        skills_cache: crate::skills_cache::SkillsCache::new(),
     });
 
     // Background tasks
