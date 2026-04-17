@@ -2407,3 +2407,19 @@ Also forgets the user's quota cache entry."
 - Tasks A-1 through A-16 are independent enough to batch in small groups during subagent review. A-17 is the big cutover — do this one on its own with an in-depth diff review.
 - A-17 will surface dead-reference errors all across the codebase (anything that called `db::skills::*` or `save_memory`). Expect to touch `api.rs`, `ws.rs`, and admin endpoints. All changes are mechanical but high-volume.
 - Tests for each file tool exercise the sandbox boundary — make sure you actually run them against a fresh `TempDir` per test, not a shared one.
+
+---
+
+## Post-Plan Adjustments
+
+Execution revealed a few places where the plan's prescribed code didn't quite match what landed. Captured here for traceability:
+
+| # | Task | Adjustment | SHA |
+|---|---|---|---|
+| 1 | A-3 | Only `pub mod paths;` declared in `workspace/mod.rs`; `quota` and `registration` added by A-4 / A-6 when those files landed (plan's version declared all three up front, which would have broken the build). | ec480db |
+| 2 | A-6 | `initialize_user_workspace` takes `pool: Option<&PgPool>` so FS-only tests skip a 30s connect timeout. Explicit `Err(_)` branch on `system_config::get` logs the error before falling back. `copy_dir_recursive` sets 0700/0600 on copied entries. | e350990 |
+| 3 | A-7 | Added `MAX_READ_BYTES = 256 KiB` constant + oversize-stub return path (not in plan; matches file_ops pattern for A-8/A-9). `test_minimal` docstring warns the DB pool fails at runtime. | 82332ff |
+| 4 | A-8 | Rollback pattern restructured around net delta: `growth = new.saturating_sub(old)` reserved before write, `shrink = old.saturating_sub(new)` released after success. Plan's `release(old)+reserve(new)` had a non-infallible rollback under soft-lock; net-delta pattern's rollbacks are always pure releases. `is_under_skills_dir` extracted to `workspace/paths.rs` for reuse across writers. | e1dd985 |
+| 5 | A-14 | Quota accounting on `to_device=server` uses net-delta (same pattern as A-8). Tool schema description now documents dual path semantics (server = workspace-relative; client = device-relative). | 3ff5b11 |
+| 6 | A-15 | Error wording aligned with read_file/write_file (no "Media" prefix). `test_minimal_with_outbound` added to `state.rs` so tests can observe the published OutboundEvent. | 7ee0a7a |
+| 7 | A-16 | `SkillsCache` file lives at `plexus-server/src/skills_cache.rs`, not `context/skills_cache.rs` (no `context/` dir exists). Cache returns `Arc<Vec<SkillInfo>>`, and on-demand skills carry empty `content` (context.rs only reads content for always-on skills, so the body cache is pure waste for on-demand). `agent_loop::load_skills` returns the Arc directly rather than cloning — saves a per-iteration Vec clone in the 200-iter loop. | <this commit> |

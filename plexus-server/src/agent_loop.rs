@@ -162,11 +162,12 @@ async fn handle_event(
 
         // Build context
         // Pass vision_stripped flag to determine if images should be replaced with text placeholders
+        // skills is Arc<Vec<SkillInfo>>; use as_slice() to get &[SkillInfo] for build_context.
         let messages = context::build_context(
             state,
             &user,
             &history,
-            &skills,
+            skills.as_slice(),
             &identity,
             &cached_default_soul,
             event.chat_id.as_deref(),
@@ -463,14 +464,9 @@ async fn execute_tool_call(
     crate::tools_registry::route_to_device(state, user_id, &device_name, tool_name, args).await
 }
 
-async fn load_skills(state: &AppState, user_id: &str) -> Vec<SkillInfo> {
+async fn load_skills(state: &AppState, user_id: &str) -> Arc<Vec<SkillInfo>> {
     let ws_root = std::path::Path::new(&state.config.workspace_root);
-    let cached = state.skills_cache.get_or_load(user_id, ws_root).await;
-    // The cache returns Arc<Vec<SkillInfo>>. The caller expects Vec<SkillInfo>
-    // (takes ownership to pass by slice). Clone once — SkillInfo is shallow
-    // enough (Strings), and this matches the existing contract. If this
-    // becomes a hot path, migrate the caller to accept &[SkillInfo] directly.
-    cached.as_ref().clone()
+    state.skills_cache.get_or_load(user_id, ws_root).await
 }
 
 async fn send_error(

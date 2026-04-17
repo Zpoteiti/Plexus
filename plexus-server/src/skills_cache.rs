@@ -87,11 +87,17 @@ async fn load_skills_from_disk(workspace_root: &Path, user_id: &str) -> Vec<Skil
         // Prefer frontmatter name; fall back to directory name if missing.
         let final_name = if name.is_empty() { skill_dir_name } else { name };
 
+        // Optimization: on-demand skills don't need their body cached. context.rs
+        // only reads SkillInfo.content for always-on skills; on-demand shows up in
+        // the index as name + description only, and the agent loads the body via
+        // read_file when needed.
+        let cached_content = if always_on { content } else { String::new() };
+
         out.push(SkillInfo {
             name: final_name,
             description,
             always_on,
-            content,
+            content: cached_content,
         });
     }
 
@@ -135,7 +141,7 @@ fn parse_frontmatter(content: &str) -> Result<(String, String, bool), &'static s
         } else if let Some(v) = line.strip_prefix("description:") {
             description = v.trim().to_string();
         } else if let Some(v) = line.strip_prefix("always_on:") {
-            always_on = matches!(v.trim(), "true" | "True" | "yes" | "Yes");
+            always_on = v.trim() == "true";
         }
     }
 
@@ -185,9 +191,10 @@ mod tests {
         assert_eq!(skills[0].name, "always1");
         assert!(skills[0].always_on);
         assert_eq!(skills[0].description, "always loaded");
-        assert_eq!(skills[0].content.trim_end(), "---\nname: always1\ndescription: always loaded\nalways_on: true\n---\nalways body");
+        assert!(skills[0].content.contains("always body"));
         assert_eq!(skills[1].name, "ondemand1");
         assert!(!skills[1].always_on);
+        assert_eq!(skills[1].content, "", "on-demand content should be empty in cache");
     }
 
     #[tokio::test]
@@ -329,5 +336,38 @@ mod tests {
         cache.invalidate("alice");
         assert!(cache.entries.get("alice").is_none());
         assert!(cache.entries.get("bob").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_load_skills_sort_order_with_mixed_groups() {
+        let tmp = TempDir::new().unwrap();
+        // Create in random order; assert output has always-on first then alpha within each group.
+        for (name, ao) in [
+            ("zz_always", true),
+            ("aa_always", true),
+            ("mm_ondemand", false),
+            ("bb_ondemand", false),
+        ] {
+            write_skill(
+                tmp.path(),
+                "alice",
+                name,
+                &format!("name: {name}\ndescription: d\nalways_on: {ao}\n"),
+                "body",
+            )
+            .await;
+        }
+
+        let skills = load_skills_from_disk(tmp.path(), "alice").await;
+        assert_eq!(skills.len(), 4);
+        // Expected order: aa_always, zz_always, bb_ondemand, mm_ondemand.
+        assert_eq!(skills[0].name, "aa_always");
+        assert!(skills[0].always_on);
+        assert_eq!(skills[1].name, "zz_always");
+        assert!(skills[1].always_on);
+        assert_eq!(skills[2].name, "bb_ondemand");
+        assert!(!skills[2].always_on);
+        assert_eq!(skills[3].name, "mm_ondemand");
+        assert!(!skills[3].always_on);
     }
 }
