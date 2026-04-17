@@ -47,7 +47,7 @@ async fn create_skill(
     let skill_name = if req.name.is_empty() { name } else { req.name };
 
     // Write to disk
-    let skill_dir = format!("{}/{}/{skill_name}", state.config.skills_dir, c.sub);
+    let skill_dir = format!("{}/{skill_name}", state.config.legacy_skills_dir_for_user(&c.sub));
     tokio::fs::create_dir_all(&skill_dir)
         .await
         .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("mkdir: {e}")))?;
@@ -113,7 +113,7 @@ async fn delete_skill_handler(
         return Err(ApiError::new(ErrorCode::NotFound, "Skill not found"));
     }
     // Remove from disk
-    let skill_dir = format!("{}/{}/{name}", state.config.skills_dir, c.sub);
+    let skill_dir = format!("{}/{name}", state.config.legacy_skills_dir_for_user(&c.sub));
     let _ = tokio::fs::remove_dir_all(&skill_dir).await;
     Ok(Json(serde_json::json!({ "message": "Skill deleted" })))
 }

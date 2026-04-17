@@ -10,7 +10,7 @@ pub async fn read_skill(state: &Arc<AppState>, user_id: &str, args: &Value) -> (
         None => return (1, "Missing required parameter: skill_name".into()),
     };
 
-    let skill_path = format!("{}/{user_id}/{skill_name}", state.config.skills_dir);
+    let skill_path = format!("{}/{skill_name}", state.config.legacy_skills_dir_for_user(user_id));
     let md_path = format!("{skill_path}/SKILL.md");
 
     let content = match tokio::fs::read_to_string(&md_path).await {
@@ -74,7 +74,7 @@ pub async fn install_skill(state: &Arc<AppState>, user_id: &str, args: &Value) -
     };
 
     // Write to disk
-    let skill_dir = format!("{}/{user_id}/{name}", state.config.skills_dir);
+    let skill_dir = format!("{}/{name}", state.config.legacy_skills_dir_for_user(user_id));
     if let Err(e) = tokio::fs::create_dir_all(&skill_dir).await {
         return (1, format!("Create skill dir: {e}"));
     }

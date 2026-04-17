@@ -12,7 +12,7 @@ pub struct ServerConfig {
     pub server_port: u16,
     pub gateway_ws_url: String,
     pub gateway_token: String,
-    pub skills_dir: String,
+    pub workspace_root: String,
 }
 
 impl ServerConfig {
@@ -26,11 +26,17 @@ impl ServerConfig {
                 .expect("SERVER_PORT must be a number"),
             gateway_ws_url: env_required("PLEXUS_GATEWAY_WS_URL"),
             gateway_token: env_required("PLEXUS_GATEWAY_TOKEN"),
-            skills_dir: std::env::var("PLEXUS_SKILLS_DIR").unwrap_or_else(|_| {
+            workspace_root: std::env::var("PLEXUS_WORKSPACE_ROOT").unwrap_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                format!("{home}/.plexus/skills")
+                format!("{home}/.plexus/workspace")
             }),
         }
+    }
+
+    /// TEMPORARY: returns `{workspace_root}/{user_id}/skills`.
+    /// Removed in Task A-17 once all callers have migrated.
+    pub fn legacy_skills_dir_for_user(&self, user_id: &str) -> String {
+        format!("{}/{user_id}/skills", self.workspace_root)
     }
 }
 

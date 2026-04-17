@@ -69,7 +69,7 @@ async fn read_server_file(
 
     let upload_dir = crate::file_store::user_upload_dir(user_id);
     let upload_prefix = upload_dir.to_string_lossy().to_string();
-    let skills_prefix = format!("{}/{user_id}/", state.config.skills_dir);
+    let skills_prefix = format!("{}/", state.config.legacy_skills_dir_for_user(user_id));
 
     if !canonical_str.starts_with(&upload_prefix) && !canonical_str.starts_with(&skills_prefix) {
         return Err(format!(
