@@ -189,14 +189,16 @@ workspace-scoped path."
 
 ---
 
-### Task A-2: Schema updates — drop memory/soul/skills, add timezone + cron_jobs.kind
+### Task A-2: Schema updates — additive only (timezone, cron_jobs.kind)
+
+**Plan revision note (2026-04-17):** Originally this task also dropped `users.memory_text`, `users.soul`, and the `skills` table. Those destructive changes have been moved into Task A-17 so the build stays green between every pair of commits through Tasks A-3 … A-16. This task is purely additive.
 
 **Files:**
 - Modify: `plexus-server/src/db/mod.rs`
 
-- [ ] **Step 1: Update `users` CREATE TABLE**
+- [ ] **Step 1: Add `timezone` to `users` CREATE TABLE**
 
-Find the `users` CREATE TABLE block in `db/mod.rs`. Remove `soul TEXT,` and `memory_text TEXT NOT NULL DEFAULT '',` rows. Add `timezone TEXT NOT NULL DEFAULT 'UTC',`:
+Find the `users` CREATE TABLE block in `db/mod.rs`. Leave `soul TEXT` and `memory_text TEXT NOT NULL DEFAULT ''` in place (Task A-17 drops them). Add `timezone TEXT NOT NULL DEFAULT 'UTC',` before `created_at`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS users (
@@ -205,25 +207,22 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash  TEXT NOT NULL DEFAULT '',
     is_admin       BOOLEAN DEFAULT FALSE,
     display_name   TEXT,
+    soul           TEXT,
+    memory_text    TEXT NOT NULL DEFAULT '',
     timezone       TEXT NOT NULL DEFAULT 'UTC',
     created_at     TIMESTAMPTZ DEFAULT NOW()
 )
 ```
 
-Also remove the migration line:
-```
-"ALTER TABLE users ADD COLUMN IF NOT EXISTS memory_text TEXT NOT NULL DEFAULT ''",
-```
-(if present — it may be implicit)
-
-Add a migration line:
+Add a migration line below the existing migrations:
 ```
 "ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC'",
 ```
 
-- [ ] **Step 2: Update `cron_jobs` CREATE TABLE**
+- [ ] **Step 2: Add `kind` column to `cron_jobs`**
 
-Add a `kind` column:
+Update the `cron_jobs` CREATE TABLE to include a `kind` column with a CHECK constraint:
+
 ```sql
 CREATE TABLE IF NOT EXISTS cron_jobs (
     job_id          TEXT PRIMARY KEY,
@@ -246,38 +245,29 @@ CREATE TABLE IF NOT EXISTS cron_jobs (
 )
 ```
 
-Add the migration line just below:
+Add the migration line below the existing `cron_jobs` migrations:
 ```
 "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'",
 ```
 
-- [ ] **Step 3: Remove `CREATE TABLE skills` and its migrations**
+- [ ] **Step 3: Verify build + schema**
 
-Find and delete the full `CREATE TABLE IF NOT EXISTS skills (...)` block. There's no `ALTER TABLE skills ADD COLUMN` in the existing code that I've seen; if any turn up, delete them too.
+Run: `cargo build --package plexus-server`
+Expected: PASS with zero new warnings.
 
-Add a `DROP TABLE IF EXISTS skills` so fresh starts from a previous schema version clean up:
+Start the server briefly to confirm `db::init_db` runs the new `ALTER TABLE` migrations without error (optional — only if you have a local Postgres configured).
 
-```rust
-// After all CREATE TABLE statements, at the end of the statements array:
-"DROP TABLE IF EXISTS skills",
-```
-
-- [ ] **Step 4: Delete `plexus-server/src/db/skills.rs`**
+- [ ] **Step 4: Commit**
 
 ```bash
-git rm plexus-server/src/db/skills.rs
+git add plexus-server/src/db/mod.rs
+git commit -m "feat(schema): add users.timezone and cron_jobs.kind columns
+
+Additive schema prep for the workspace-and-autonomy design.
+timezone drives heartbeat's local-time evaluator (Plan E).
+cron_jobs.kind distinguishes system-protected jobs (dream) from
+user jobs (Plan D). Destructive drops land with Task A-17."
 ```
-
-- [ ] **Step 5: Remove `pub mod skills;` from `db/mod.rs`**
-
-Find `pub mod skills;` at the top of `plexus-server/src/db/mod.rs` and delete it. This will cause compile errors at every call site — note them, but don't fix yet (Task A-17 handles them).
-
-- [ ] **Step 6: Build — expect compile errors**
-
-Run: `cargo build --package plexus-server 2>&1 | head -30`
-Expected: compile errors on every `db::skills::*` call site. Good — we'll fix them in Task A-17.
-
-**Skip commit for this task** — leave the build broken until Task A-17 lands the context-builder and tool-registry changes that need the removal. If you want intermediate work: proceed to Task A-3 which is independent.
 
 ---
 
@@ -1983,14 +1973,18 @@ an in-memory cache keyed by user_id."
 
 ---
 
-### Task A-17: Remove old tools + context builder reads memory/soul from workspace
+### Task A-17: Remove old tools + context builder reads memory/soul from workspace + destructive schema drops
+
+**Plan revision note (2026-04-17):** This task absorbs the destructive schema drops originally scoped to A-2 (dropping `users.memory_text`, `users.soul`, and the `skills` table, plus deleting `plexus-server/src/db/skills.rs` and removing `pub mod skills;` from `db/mod.rs`). They land here so the build stays green end-to-end.
 
 **Files:**
 - Delete: `plexus-server/src/server_tools/memory.rs`
 - Delete: `plexus-server/src/server_tools/skills.rs`
+- Delete: `plexus-server/src/db/skills.rs`
 - Modify: `plexus-server/src/server_tools/mod.rs`
 - Modify: `plexus-server/src/context.rs`
 - Modify: `plexus-server/src/db/users.rs`
+- Modify: `plexus-server/src/db/mod.rs`
 
 - [ ] **Step 1: Remove `save_memory`, `edit_memory`, `read_skill`, `install_skill`**
 
@@ -2078,7 +2072,26 @@ pub async fn update_memory(_: ..., _: ...) -> impl IntoResponse {
 }
 ```
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 5: Drop schema — `users.memory_text`, `users.soul`, and `skills` table**
+
+Now that no code references these columns or the `skills` table, it's safe to drop them. In `plexus-server/src/db/mod.rs`:
+
+1. Remove `soul TEXT,` and `memory_text TEXT NOT NULL DEFAULT '',` rows from the `users` CREATE TABLE block.
+2. Remove the `"ALTER TABLE users ADD COLUMN IF NOT EXISTS memory_text ..."` migration line if present.
+3. Add two new migration lines (idempotent — safe on fresh installs too):
+   ```
+   "ALTER TABLE users DROP COLUMN IF EXISTS memory_text",
+   "ALTER TABLE users DROP COLUMN IF EXISTS soul",
+   ```
+4. Delete the full `CREATE TABLE IF NOT EXISTS skills (...)` block.
+5. Add a new migration line at the end of the statements array:
+   ```
+   "DROP TABLE IF EXISTS skills",
+   ```
+6. Delete the `pub mod skills;` declaration at the top of `db/mod.rs`.
+7. Delete the file: `git rm plexus-server/src/db/skills.rs`.
+
+- [ ] **Step 6: Run tests**
 
 ```bash
 cargo build --package plexus-server && cargo test --package plexus-server
@@ -2086,24 +2099,25 @@ cargo build --package plexus-server && cargo test --package plexus-server
 
 Some existing tests may reference `save_memory` or `db::skills`. Delete those tests (the functionality is gone; any replacements come in later plans).
 
-- [ ] **Step 6: Drop the `legacy_skills_dir_for_user` shim**
+- [ ] **Step 7: Drop the `legacy_skills_dir_for_user` shim**
 
 The shim added in Task A-1 is now unused. Remove it from `config.rs` and any remaining call sites (grep `legacy_skills_dir_for_user`).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add -u
-git rm plexus-server/src/server_tools/memory.rs plexus-server/src/server_tools/skills.rs
+git rm plexus-server/src/server_tools/memory.rs plexus-server/src/server_tools/skills.rs plexus-server/src/db/skills.rs
 git commit -m "refactor: remove memory/skills tools and DB surfaces
 
 save_memory, edit_memory, read_skill, install_skill all removed.
 Agents now edit MEMORY.md / SOUL.md directly via edit_file.
 Skills authored via write_file on skills/{name}/SKILL.md.
-Skills DB table dropped; disk frontmatter is the source of truth.
-users.memory_text and users.soul references replaced with
-workspace-file reads. Old admin endpoints return 410 Gone; Plan B
-ships the /api/workspace/file endpoint as the replacement."
+Skills DB table and users.memory_text + users.soul columns all
+dropped; disk is the source of truth for memory, soul, and
+skills. Old admin endpoints return 410 Gone; Plan B ships the
+/api/workspace/file endpoint as the replacement. The
+legacy_skills_dir_for_user shim from Task A-1 is also removed."
 ```
 
 ---
