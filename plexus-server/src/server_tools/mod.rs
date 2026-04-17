@@ -72,7 +72,7 @@ pub fn tool_schemas() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "message",
-                "description": "Send a message to a channel (gateway or discord), optionally with media files from a device.",
+                "description": "Send a message to a channel (gateway or discord), optionally with media files. When `from_device` is \"server\", media paths are relative to your server workspace (e.g. 'uploads/report.pdf'). When `from_device` is a client device name, media paths are that device's paths.",
                 "parameters": {
                     "type": "object",
                     "properties": {

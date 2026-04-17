@@ -66,7 +66,7 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
         return (1, err);
     }
 
-    // Pull media files from device, save to server, collect URLs
+    // Pull media files from device or server workspace, save to file store, collect URLs
     let mut media_urls = Vec::new();
     if !media_paths.is_empty() {
         let Some(device_name) = from_device else {
@@ -74,28 +74,55 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
                 1,
                 format!(
                     "Media not sent: `from_device` is required when sending files. \
-                     Call this tool again with `from_device` set to the device that holds the files (e.g. \"local\"). \
-                     Files: {}",
+                     Call this tool again with `from_device` set to \"server\" (for workspace files) \
+                     or the name of a client device that holds the files. Files: {}",
                     media_paths.join(", ")
                 ),
             );
         };
+
         for path in &media_paths {
-            match super::file_transfer::request_file_from_device(
-                state,
-                &ctx.user_id,
-                device_name,
-                path,
-            )
-            .await
-            {
-                Ok((bytes, filename)) => {
-                    match crate::file_store::save_upload(&ctx.user_id, &filename, &bytes).await {
-                        Ok(file_id) => media_urls.push(format!("/api/files/{file_id}")),
-                        Err(e) => return (1, format!("Save media failed: {}", e.message)),
+            let (bytes, filename) = if device_name == "server" {
+                // Read from the user's server workspace.
+                let ws_root = std::path::Path::new(&state.config.workspace_root);
+                let resolved = match crate::workspace::resolve_user_path(ws_root, &ctx.user_id, path).await {
+                    Ok(p) => p,
+                    Err(crate::workspace::WorkspaceError::Traversal(_)) => {
+                        return (1, format!("Media path escapes user workspace: {path}"));
                     }
+                    Err(crate::workspace::WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return (1, format!("Media file not found: {path}"));
+                    }
+                    Err(e) => return (1, format!("Resolve error on {path}: {e}")),
+                };
+                let bytes = match tokio::fs::read(&resolved).await {
+                    Ok(b) => b,
+                    Err(e) => return (1, format!("Read error on {path}: {e}")),
+                };
+                let filename = resolved
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                (bytes, filename)
+            } else {
+                // Request from a client device.
+                match super::file_transfer::request_file_from_device(
+                    state,
+                    &ctx.user_id,
+                    device_name,
+                    path,
+                )
+                .await
+                {
+                    Ok(pair) => pair,
+                    Err(e) => return (1, e),
                 }
-                Err(e) => return (1, e),
+            };
+
+            match crate::file_store::save_upload(&ctx.user_id, &filename, &bytes).await {
+                Ok(file_id) => media_urls.push(format!("/api/files/{file_id}")),
+                Err(e) => return (1, format!("Save media failed: {}", e.message)),
             }
         }
     }
@@ -119,6 +146,114 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_message_tool_server_media_reads_workspace_file() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(user_dir.join("uploads")).await.unwrap();
+        tokio::fs::write(user_dir.join("uploads/report.pdf"), b"fake-pdf-bytes").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+
+        let ctx = ToolContext {
+            user_id: "alice".into(),
+            session_id: "sess-1".into(),
+            channel: "gateway".into(),
+            chat_id: Some("chat-1".into()),
+            is_cron: false,
+            is_partner: true,
+        };
+        let args = serde_json::json!({
+            "content": "Here's the report",
+            "channel": "gateway",
+            "chat_id": "chat-1",
+            "media": ["uploads/report.pdf"],
+            "from_device": "server",
+        });
+        let (code, out) = message_tool(&state, &ctx, &args).await;
+        assert_eq!(code, 0, "expected success, got: {out}");
+
+        // Verify side effect: file_store wrote a file to /tmp/plexus-uploads/alice/
+        let upload_dir = std::path::Path::new("/tmp/plexus-uploads/alice");
+        let mut found = false;
+        if let Ok(mut entries) = tokio::fs::read_dir(upload_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.ends_with("report.pdf") {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "expected a report.pdf file in the upload dir");
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_server_media_traversal_rejected() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        let other = tmp.path().join("bob");
+        tokio::fs::create_dir_all(&other).await.unwrap();
+        tokio::fs::write(other.join("secret.pdf"), b"x").await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+
+        let ctx = ToolContext {
+            user_id: "alice".into(),
+            session_id: "sess-1".into(),
+            channel: "gateway".into(),
+            chat_id: Some("chat-1".into()),
+            is_cron: false,
+            is_partner: true,
+        };
+        let args = serde_json::json!({
+            "content": "Try to leak",
+            "channel": "gateway",
+            "chat_id": "chat-1",
+            "media": ["../bob/secret.pdf"],
+            "from_device": "server",
+        });
+        let (code, out) = message_tool(&state, &ctx, &args).await;
+        assert_eq!(code, 1);
+        assert!(out.contains("escapes"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn test_message_tool_server_media_missing_errors() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+
+        let ctx = ToolContext {
+            user_id: "alice".into(),
+            session_id: "sess-1".into(),
+            channel: "gateway".into(),
+            chat_id: Some("chat-1".into()),
+            is_cron: false,
+            is_partner: true,
+        };
+        let args = serde_json::json!({
+            "content": "Ghost file",
+            "channel": "gateway",
+            "chat_id": "chat-1",
+            "media": ["uploads/ghost.pdf"],
+            "from_device": "server",
+        });
+        let (code, out) = message_tool(&state, &ctx, &args).await;
+        assert_eq!(code, 1);
+        assert!(out.contains("not found"), "got: {out}");
+        assert!(out.contains("uploads/ghost.pdf"), "expected path echo, got: {out}");
+    }
 
     #[test]
     fn test_guard_allows_partner_cross_channel() {
