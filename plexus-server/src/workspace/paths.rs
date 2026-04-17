@@ -89,6 +89,25 @@ pub async fn resolve_user_path_for_create(
     Ok(result)
 }
 
+/// Returns true if `resolved` is under `{workspace_root}/{user_id}/skills/`.
+/// `resolved` is assumed to be the output of `resolve_user_path` or
+/// `resolve_user_path_for_create` — i.e., canonicalized at least up to the
+/// deepest existing ancestor.
+///
+/// Returns `false` if the skills directory does not yet exist for the user.
+pub fn is_under_skills_dir(
+    resolved: &std::path::Path,
+    workspace_root: &std::path::Path,
+    user_id: &str,
+) -> bool {
+    let skills_dir = workspace_root.join(user_id).join("skills");
+    let skills_dir_canonical = match std::fs::canonicalize(&skills_dir) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    resolved.starts_with(&skills_dir_canonical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

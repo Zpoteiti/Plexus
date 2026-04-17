@@ -26,6 +26,7 @@ pub const SERVER_TOOL_NAMES: &[&str] = &[
     "web_fetch",
     "read_file",
     "write_file",
+    "edit_file",
 ];
 
 /// Check if a tool name is a server-native tool.
@@ -188,6 +189,22 @@ pub fn tool_schemas() -> Vec<Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "description": "Surgical edit of a text file in your server workspace (relative path). Replaces exactly one occurrence of old_string with new_string. Errors if old_string is missing or appears more than once — include surrounding context to disambiguate. Files must be ≤ 256 KiB and valid UTF-8.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "old_string": { "type": "string" },
+                        "new_string": { "type": "string" }
+                    },
+                    "required": ["path", "old_string", "new_string"]
+                }
+            }
+        }),
     ]
 }
 
@@ -223,6 +240,7 @@ pub async fn execute(
         "install_skill" => skills::install_skill(state, &ctx.user_id, &arguments).await,
         "read_file" => file_ops::read_file(state, &ctx.user_id, &arguments).await,
         "write_file" => file_ops::write_file(state, &ctx.user_id, &arguments).await,
+        "edit_file" => file_ops::edit_file(state, &ctx.user_id, &arguments).await,
         _ => (1, format!("Unknown server tool: {tool_name}")),
     };
     ToolExecutionResult {
