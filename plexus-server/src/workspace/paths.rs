@@ -10,13 +10,22 @@ pub enum WorkspaceError {
 }
 
 /// Resolve a relative user-workspace path against `{workspace_root}/{user_id}/`.
+///
 /// Canonicalizes (resolves symlinks) and rejects paths escaping the user root.
 /// The target must exist; use `resolve_user_path_for_create` for paths that don't yet exist.
+///
+/// `user_id` MUST be a validated identifier (e.g. a UUID from a JWT claim). Do not
+/// pass user-controlled strings — though the prefix check still holds, a bad
+/// `user_id` (containing `..` or slashes) would point the function at an unexpected
+/// directory.
 pub async fn resolve_user_path(
     workspace_root: &Path,
     user_id: &str,
     relative: &str,
 ) -> Result<PathBuf, WorkspaceError> {
+    if Path::new(relative).is_absolute() {
+        return Err(WorkspaceError::Traversal(relative.into()));
+    }
     let user_root = workspace_root.join(user_id);
     let joined = user_root.join(relative);
     let canonical = tokio::fs::canonicalize(&joined).await?;
@@ -30,18 +39,32 @@ pub async fn resolve_user_path(
 /// Same as `resolve_user_path`, but the final component(s) are permitted to not exist.
 /// Canonicalizes the deepest existing ancestor and joins the remainder, validating that
 /// no component uses `..` to escape after canonicalization.
+///
+/// `user_id` MUST be a validated identifier (e.g. a UUID from a JWT claim). Do not
+/// pass user-controlled strings — though the prefix check still holds, a bad
+/// `user_id` (containing `..` or slashes) would point the function at an unexpected
+/// directory.
 pub async fn resolve_user_path_for_create(
     workspace_root: &Path,
     user_id: &str,
     relative: &str,
 ) -> Result<PathBuf, WorkspaceError> {
+    if Path::new(relative).is_absolute() {
+        return Err(WorkspaceError::Traversal(relative.into()));
+    }
     let user_root = workspace_root.join(user_id);
     let user_root_canonical = tokio::fs::canonicalize(&user_root).await?;
 
     let joined = user_root.join(relative);
     let mut ancestor = joined.as_path();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    while !ancestor.exists() {
+    // Use symlink_metadata instead of exists(): exists() returns false for broken
+    // symlinks, which would cause the loop to treat a malicious symlink as a
+    // not-yet-created tail component and walk past it. symlink_metadata returns Ok
+    // for broken symlinks (they exist as filesystem entries), so the loop stops at
+    // the symlink itself; the subsequent canonicalize + starts_with check catches
+    // any escape attempt.
+    while tokio::fs::symlink_metadata(ancestor).await.is_err() {
         tail.push(
             ancestor
                 .file_name()
@@ -116,6 +139,26 @@ mod tests {
             .unwrap();
         assert_eq!(result, user_dir.canonicalize().unwrap().join("MEMORY.md"));
     }
+
+    #[tokio::test]
+    async fn test_absolute_path_rejected() {
+        let root = TempDir::new().unwrap();
+        let user_dir = root.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        // Absolute path as relative should be rejected by both helpers
+        let result = resolve_user_path(root.path(), "alice", "/etc/passwd").await;
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::Traversal(_)) | Err(WorkspaceError::Io(_))
+        ));
+        let result2 =
+            resolve_user_path_for_create(root.path(), "alice", "/etc/new_attacker_file").await;
+        assert!(matches!(
+            result2,
+            Err(WorkspaceError::Traversal(_)) | Err(WorkspaceError::Io(_))
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -151,5 +194,23 @@ mod create_tests {
         let result =
             resolve_user_path_for_create(root.path(), "alice", "../etc/passwd").await;
         assert!(matches!(result, Err(WorkspaceError::Traversal(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_create_broken_symlink_rejected() {
+        let root = TempDir::new().unwrap();
+        let user_dir = root.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        let outside_nonexistent = root.path().join("attacker_target_doesnt_exist_yet");
+        tokio::fs::symlink(&outside_nonexistent, user_dir.join("escape"))
+            .await
+            .unwrap();
+
+        let result = resolve_user_path_for_create(root.path(), "alice", "escape").await;
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::Traversal(_)) | Err(WorkspaceError::Io(_))
+        ));
     }
 }
