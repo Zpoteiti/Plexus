@@ -15,8 +15,8 @@ pub enum QuotaError {
     UploadTooLarge(u64, u64),
     #[error("workspace is soft-locked (usage {0} > quota {1}); delete files to continue")]
     SoftLocked(u64, u64),
-    #[error("upload would exceed hard ceiling ({0} + {1} > {2})")]
-    HardCeiling(u64, u64, u64),
+    // HardCeiling removed — dead code. See 2026-04-17 code review.
+    // Can be re-added in ~4 lines if a consumer appears.
 }
 
 impl QuotaCache {
@@ -41,27 +41,30 @@ impl QuotaCache {
     /// Check an incoming upload. Returns Ok if allowed; reserves the bytes by
     /// incrementing the usage counter atomically.
     pub fn check_and_reserve_upload(&self, user_id: &str, bytes: u64) -> Result<(), QuotaError> {
-        if bytes > self.per_upload_cap() {
-            return Err(QuotaError::UploadTooLarge(bytes, self.per_upload_cap()));
+        let cap = self.per_upload_cap();
+        if bytes > cap {
+            return Err(QuotaError::UploadTooLarge(bytes, cap));
         }
         let counter = self.usage_for(user_id);
-        let current = counter.load(Ordering::SeqCst);
-        if current > self.quota_bytes {
-            return Err(QuotaError::SoftLocked(current, self.quota_bytes));
+        let quota = self.quota_bytes;
+        let update_result = counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            if current > quota {
+                None                                    // soft-locked — refuse
+            } else {
+                Some(current.saturating_add(bytes))     // reserve (grace window allows exceed)
+            }
+        });
+        match update_result {
+            Ok(_) => Ok(()),
+            Err(current) => Err(QuotaError::SoftLocked(current, quota)),
         }
-        let new_usage = current + bytes;
-        // Allow the upload even if it pushes over 100% (grace window);
-        // soft-lock activates on the *next* write attempt.
-        counter.store(new_usage, Ordering::SeqCst);
-        Ok(())
     }
 
     pub fn record_delete(&self, user_id: &str, bytes_freed: u64) {
         let counter = self.usage_for(user_id);
-        counter.fetch_sub(
-            bytes_freed.min(counter.load(Ordering::SeqCst)),
-            Ordering::SeqCst,
-        );
+        let _ = counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            Some(current.saturating_sub(bytes_freed))
+        });
     }
 
     pub fn current_usage(&self, user_id: &str) -> u64 {
@@ -163,5 +166,27 @@ mod tests {
         q.record_delete("alice", 4_000_000_000); // drop to 4 GB
         let result = q.check_and_reserve_upload("alice", 100);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_concurrent_reservations_no_lost_update() {
+        use std::sync::Arc as StdArc;
+        use std::thread;
+
+        let q = StdArc::new(QuotaCache::new(10_000));   // 10 KB quota
+        // per-upload cap = 8000
+        let mut handles = Vec::new();
+        for _ in 0..100 {
+            let q = q.clone();
+            handles.push(thread::spawn(move || {
+                // Each reserves 50 bytes. 100 threads × 50 = 5000 bytes total.
+                let _ = q.check_and_reserve_upload("alice", 50);
+            }));
+        }
+        for h in handles { h.join().unwrap(); }
+        // With the old load+store, concurrent writers lose updates and the
+        // counter sits well below 5000. With fetch_update, every increment
+        // is preserved.
+        assert_eq!(q.current_usage("alice"), 5000);
     }
 }
