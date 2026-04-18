@@ -532,6 +532,36 @@ async fn workspace_file_delete(
         })
 }
 
+// -- Workspace Skills --
+
+#[derive(serde::Serialize)]
+pub struct WorkspaceSkillSummary {
+    pub name: String,
+    pub description: String,
+    pub always_on: bool,
+}
+
+pub async fn workspace_skills_list(state: &AppState, user_id: &str) -> Vec<WorkspaceSkillSummary> {
+    let root = std::path::Path::new(&state.config.workspace_root);
+    let bundle = state.skills_cache.get_or_load(user_id, root).await;
+    bundle
+        .iter()
+        .map(|s| WorkspaceSkillSummary {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            always_on: s.always_on,
+        })
+        .collect()
+}
+
+async fn workspace_skills(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WorkspaceSkillSummary>>, ApiError> {
+    let claims = claims(&headers, &state)?;
+    Ok(Json(workspace_skills_list(&state, &claims.sub).await))
+}
+
 fn mime_from_path(p: &str) -> &'static str {
     let ext = p.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
@@ -568,6 +598,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                 .delete(workspace_file_delete),
         )
         .route("/api/workspace/upload", post(workspace_upload))
+        .route("/api/workspace/skills", get(workspace_skills))
 }
 
 #[cfg(test)]
@@ -731,5 +762,25 @@ mod tests {
                 || msg.contains("cap"),
             "expected quota-related error; got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_skills_returns_parsed_frontmatter() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let skills_root = tmp.path().join("alice/skills/demo");
+        tokio::fs::create_dir_all(&skills_root).await.unwrap();
+        tokio::fs::write(
+            skills_root.join("SKILL.md"),
+            b"---\nname: demo\ndescription: A demo skill\nalways_on: true\n---\n\n# Demo",
+        )
+        .await
+        .unwrap();
+
+        let state = crate::state::AppState::test_minimal(tmp.path());
+        let skills = workspace_skills_list(&state, "alice").await;
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "demo");
+        assert_eq!(skills[0].description, "A demo skill");
+        assert!(skills[0].always_on);
     }
 }
