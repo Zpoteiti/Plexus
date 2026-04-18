@@ -56,17 +56,35 @@ export default function Workspace() {
 
       <main className="flex-1 flex overflow-hidden">
         <aside
-          className="w-1/4 overflow-y-auto border-r p-2"
+          className="w-1/4 overflow-y-auto border-r p-2 flex flex-col gap-2"
           style={{ borderColor: 'var(--border)', background: 'var(--sidebar)' }}
         >
-          {tree && (
-            <TreeView
-              entries={tree}
-              selected={selectedPath}
-              onSelect={(path) => setParams({ path })}
-            />
-          )}
-          {!tree && (
+          <div className="flex flex-col gap-1">
+            <div className="text-xs uppercase font-semibold" style={{ color: 'var(--muted)' }}>
+              Quick access
+            </div>
+            {[
+              { name: 'Soul', path: 'SOUL.md' },
+              { name: 'Memory', path: 'MEMORY.md' },
+              { name: 'Heartbeat Tasks', path: 'HEARTBEAT.md' },
+            ].map((q) => (
+              <button
+                key={q.path}
+                onClick={() => setParams({ path: q.path })}
+                className="text-left text-sm px-1 py-0.5 rounded hover:opacity-70"
+                style={{
+                  background: selectedPath === q.path ? 'var(--accent)' : 'transparent',
+                  color: selectedPath === q.path ? 'var(--bg)' : 'var(--text)',
+                }}
+              >
+                📄 {q.name}
+              </button>
+            ))}
+          </div>
+          <hr style={{ borderColor: 'var(--border)' }} />
+          {tree ? (
+            <TreeView entries={tree} selected={selectedPath} onSelect={(path) => setParams({ path })} />
+          ) : (
             <div style={{ color: 'var(--muted)' }}>Loading…</div>
           )}
         </aside>

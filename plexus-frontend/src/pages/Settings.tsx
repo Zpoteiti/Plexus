@@ -11,8 +11,8 @@ import type {
   McpServerEntry,
   DiscordConfig,
   TelegramConfig,
-  Skill,
   CronJob,
+  WorkspaceSkill,
 } from '../lib/types'
 
 type Tab = 'profile' | 'devices' | 'channels' | 'skills' | 'cron'
@@ -74,8 +74,6 @@ export default function Settings() {
 function ProfileTab() {
   const [profile, setProfile] = useState<User | null>(null)
   const [displayName, setDisplayName] = useState('')
-  const [soul, setSoul] = useState('')
-  const [memory, setMemory] = useState('')
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
   const logout = useAuthStore(s => s.logout)
@@ -84,15 +82,9 @@ function ProfileTab() {
 
   useEffect(() => {
     void (async () => {
-      const [p, s, m] = await Promise.all([
-        api.get<User>('/api/user/profile'),
-        api.get<{ soul: string }>('/api/user/soul'),
-        api.get<{ memory: string }>('/api/user/memory'),
-      ])
+      const p = await api.get<User>('/api/user/profile')
       setProfile(p)
       setDisplayName(p.display_name ?? '')
-      setSoul(s.soul ?? '')
-      setMemory(m.memory ?? '')
     })()
   }, [])
 
@@ -109,32 +101,23 @@ function ProfileTab() {
     }
   }
 
-  async function saveSoul() {
-    setSaving(true)
-    try {
-      await api.patch('/api/user/soul', { soul })
-      setMsg('Soul saved.')
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : 'Error')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function saveMemory() {
-    setSaving(true)
-    try {
-      await api.patch('/api/user/memory', { memory })
-      setMsg('Memory saved.')
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : 'Error')
-    } finally {
-      setSaving(false)
-    }
-  }
-
   return (
     <div className="flex flex-col gap-6">
+      <Section title="Soul & Memory">
+        <p className="text-sm" style={{ color: 'var(--muted)' }}>
+          Your soul (personality) and memory now live as editable Markdown files in your workspace.
+          Edit them from the{' '}
+          <a
+            href="/settings/workspace?path=SOUL.md"
+            className="underline"
+            style={{ color: 'var(--accent)' }}
+          >
+            Workspace
+          </a>{' '}
+          page.
+        </p>
+      </Section>
+
       {profile && (
         <Section title="Account">
           <Field label="Email" value={profile.email} />
@@ -158,32 +141,6 @@ function ProfileTab() {
           </div>
         </Section>
       )}
-
-      <Section title="Soul (system prompt personality)">
-        <textarea
-          value={soul}
-          onChange={e => setSoul(e.target.value)}
-          rows={6}
-          className="w-full rounded-lg p-3 text-sm font-mono resize-y outline-none border"
-          style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
-        />
-        <SaveButton onClick={saveSoul} loading={saving} />
-      </Section>
-
-      <Section title="Memory (persisted agent context)">
-        <div className="text-xs mb-1" style={{ color: 'var(--muted)' }}>
-          {memory.length} / 4000 characters
-        </div>
-        <textarea
-          value={memory}
-          onChange={e => setMemory(e.target.value)}
-          rows={6}
-          maxLength={4000}
-          className="w-full rounded-lg p-3 text-sm font-mono resize-y outline-none border"
-          style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
-        />
-        <SaveButton onClick={saveMemory} loading={saving} />
-      </Section>
 
       {msg && <p className="text-xs" style={{ color: 'var(--accent)' }}>{msg}</p>}
 
@@ -477,82 +434,62 @@ function ChannelsTab() {
 // ── Skills Tab ────────────────────────────────────────────────────────────────
 
 function SkillsTab() {
-  const [skills, setSkills] = useState<Skill[]>([])
-  const [installRepo, setInstallRepo] = useState('')
-  const [pasteContent, setPasteContent] = useState('')
-  const [msg, setMsg] = useState('')
+  const [skills, setSkills] = useState<WorkspaceSkill[]>([])
+  const [msg, setMsg] = useState<string | null>(null)
 
-  useEffect(() => { void loadSkills() }, [])
+  useEffect(() => {
+    void load()
+  }, [])
 
-  async function loadSkills() {
-    const s = await api.get<{ skills: Skill[] }>('/api/skills')
-    setSkills(s.skills)
-  }
-
-  async function installFromGithub() {
+  async function load() {
     try {
-      await api.post('/api/skills/install', { repo: installRepo.trim() })
-      setInstallRepo('')
-      setMsg('Skill installed.')
-      void loadSkills()
-    } catch (e) { setMsg(e instanceof Error ? e.message : 'Error') }
-  }
-
-  async function pasteSkill() {
-    try {
-      await api.post('/api/skills', { content: pasteContent })
-      setPasteContent('')
-      setMsg('Skill created.')
-      void loadSkills()
-    } catch (e) { setMsg(e instanceof Error ? e.message : 'Error') }
-  }
-
-  async function deleteSkill(name: string) {
-    await api.delete(`/api/skills/${name}`)
-    void loadSkills()
+      const data = await api.get<WorkspaceSkill[]>('/api/workspace/skills')
+      setSkills(data)
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'load failed')
+    }
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <Section title="Installed Skills">
-        {skills.length === 0 && (
-          <p className="text-xs" style={{ color: 'var(--muted)' }}>No skills installed.</p>
-        )}
-        {skills.map(s => (
-          <div key={s.name} className="flex items-center justify-between py-2 border-b text-sm" style={{ borderColor: 'var(--border)' }}>
-            <div>
-              <span style={{ color: 'var(--text)' }}>{s.name}</span>
-              {s.always_on && (
-                <span className="ml-2 text-xs px-1 rounded" style={{ background: 'rgba(57,255,20,0.1)', color: 'var(--accent)' }}>
-                  always-on
-                </span>
-              )}
-              <p className="text-xs mt-0.5" style={{ color: 'var(--muted)' }}>{s.description}</p>
-            </div>
-            <button onClick={() => deleteSkill(s.name)} className="text-red-400 hover:text-red-300 text-xs ml-4">delete</button>
-          </div>
+    <Section title="Skills">
+      <p className="text-sm mb-4" style={{ color: 'var(--muted)' }}>
+        Skills are Markdown files at <code>skills/{'{name}'}/SKILL.md</code> in your workspace.
+        Create, edit, or delete them from the{' '}
+        <a
+          href="/settings/workspace?path=skills"
+          className="underline"
+          style={{ color: 'var(--accent)' }}
+        >
+          Workspace
+        </a>{' '}
+        page.
+      </p>
+      {msg && (
+        <div className="text-sm" style={{ color: '#ef4444' }}>
+          {msg}
+        </div>
+      )}
+      <ul className="list-none p-0">
+        {skills.map((s) => (
+          <li
+            key={s.name}
+            className="flex items-center gap-2 py-1 border-b"
+            style={{ borderColor: 'var(--border)' }}
+          >
+            <strong>{s.name}</strong>
+            {s.always_on && <span className="text-xs" style={{ color: 'var(--accent)' }}>always-on</span>}
+            <span className="text-sm flex-1" style={{ color: 'var(--muted)' }}>{s.description}</span>
+            <a
+              href={`/settings/workspace?path=skills/${s.name}/SKILL.md`}
+              className="text-xs underline"
+              style={{ color: 'var(--accent)' }}
+            >
+              Edit
+            </a>
+          </li>
         ))}
-      </Section>
-
-      <Section title="Install from GitHub">
-        <FormField label="Repository (owner/repo or full URL)" value={installRepo} onChange={setInstallRepo} />
-        <SaveButton onClick={installFromGithub} label="Install" loading={false} />
-      </Section>
-
-      <Section title="Paste SKILL.md content">
-        <textarea
-          value={pasteContent}
-          onChange={e => setPasteContent(e.target.value)}
-          rows={8}
-          placeholder={'---\nname: my-skill\ndescription: Does something\n---\n\n# My Skill\n...'}
-          className="w-full rounded-lg p-3 text-xs font-mono resize-y outline-none border"
-          style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
-        />
-        <SaveButton onClick={pasteSkill} label="Create Skill" loading={false} />
-      </Section>
-
-      {msg && <p className="text-xs" style={{ color: 'var(--accent)' }}>{msg}</p>}
-    </div>
+      </ul>
+    </Section>
   )
 }
 
