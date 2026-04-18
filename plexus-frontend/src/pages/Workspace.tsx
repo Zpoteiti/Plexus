@@ -235,6 +235,9 @@ function TreeItem({
 
 function ContentPane({ path, onChanged }: { path: string; onChanged: () => void }) {
   const [text, setText] = useState<string | null>(null);
+  const [bytes, setBytes] = useState<ArrayBuffer | null>(null);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [mime, setMime] = useState<string>('');
   const [editBuf, setEditBuf] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -243,12 +246,24 @@ function ContentPane({ path, onChanged }: { path: string; onChanged: () => void 
   useEffect(() => {
     if (!path) {
       setText(null);
+      setBytes(null);
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      setBlobUrl(null);
+      setMime('');
       setEditBuf(null);
       return;
     }
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
+
+  // Revoke blob URL on unmount.
+  useEffect(() => {
+    return () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function load() {
     setLoading(true);
@@ -259,11 +274,23 @@ function ContentPane({ path, onChanged }: { path: string; onChanged: () => void 
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       const buf = await res.arrayBuffer();
-      const mime = res.headers.get('Content-Type') ?? '';
-      if (mime.startsWith('text/') || mime === 'application/json') {
+      const mimeType = res.headers.get('Content-Type') ?? '';
+      setBytes(buf);
+      setMime(mimeType);
+
+      if (mimeType.startsWith('text/') || mimeType === 'application/json') {
         setText(new TextDecoder().decode(buf));
       } else {
         setText(null);
+      }
+
+      // Revoke any prior blob URL before creating a new one.
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      if (mimeType.startsWith('image/')) {
+        const url = URL.createObjectURL(new Blob([buf], { type: mimeType }));
+        setBlobUrl(url);
+      } else {
+        setBlobUrl(null);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'load failed');
@@ -300,6 +327,7 @@ function ContentPane({ path, onChanged }: { path: string; onChanged: () => void 
   const isEditable = text !== null;
   const inEditMode = editBuf !== null;
   const isMarkdown = path.toLowerCase().endsWith('.md');
+  const filename = path.split('/').pop() ?? path;
 
   return (
     <div className="flex flex-col gap-4 h-full">
@@ -362,8 +390,45 @@ function ContentPane({ path, onChanged }: { path: string; onChanged: () => void 
           >
             {text}
           </pre>
+        ) : mime.startsWith('image/') && blobUrl ? (
+          <div className="flex flex-col gap-2 items-start">
+            <img
+              src={blobUrl}
+              alt={filename}
+              className="max-w-full max-h-full object-contain"
+            />
+            <a
+              href={blobUrl}
+              download={filename}
+              className="text-xs px-2 py-1 rounded"
+              style={{ border: '1px solid var(--border)' }}
+            >
+              Download
+            </a>
+          </div>
         ) : (
-          <div style={{ color: 'var(--muted)' }}>Non-text file (renderer B-12 will handle images/binaries).</div>
+          <div className="flex flex-col gap-2 items-start">
+            <div style={{ color: 'var(--muted)' }}>
+              Binary file — {bytes ? formatBytes(bytes.byteLength) : '?'} · {mime || 'application/octet-stream'}
+            </div>
+            <button
+              onClick={() => {
+                if (!bytes) return;
+                const url = URL.createObjectURL(new Blob([bytes], { type: mime || 'application/octet-stream' }));
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+              }}
+              className="text-xs px-2 py-1 rounded"
+              style={{ border: '1px solid var(--border)' }}
+            >
+              Download
+            </button>
+          </div>
         )}
       </div>
     </div>
