@@ -70,7 +70,9 @@ pub async fn handle_dream_fire(
     let now = chrono::Utc::now();
     if let Err(e) = crate::db::users::update_last_dream_at(&state.db, &job.user_id, now).await {
         warn!(error = %e, user_id = %job.user_id, "dream: failed to advance last_dream_at; skipping");
-        reschedule(state, &job.job_id, false).await;
+        // Rescheduling is intentionally omitted here — the D-7 wrapper in
+        // cron.rs reschedules on every Err path returned from this function,
+        // keeping rescheduling responsibility in a single place.
         return Err(format!("update_last_dream_at: {e}"));
     }
 

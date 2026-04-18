@@ -52,7 +52,28 @@ async fn poll_and_execute(state: &Arc<AppState>) -> Result<(), String> {
     // Step 3: Dispatch each claimed job to the message bus.
     // DO NOT reschedule here — that happens after the agent loop completes.
     for job in claimed {
-        info!("Cron firing: {} [{}]", job.name, job.job_id);
+        info!("Cron firing: {} [{}] kind={}", job.name, job.job_id, job.kind);
+
+        // Dream system-cron: dispatch to the dream handler on a new task.
+        // handle_dream_fire owns the decision to skip (idle check, NO-OP
+        // directives) vs. publish. It also owns rescheduling for the skip
+        // paths; the publish path defers to agent_loop's post-turn hook.
+        // Spawned so the poller doesn't block its own tick loop during
+        // Phase 1's LLM call.
+        if job.kind == crate::db::cron::SYSTEM_KIND && job.name == "dream" {
+            let state = Arc::clone(state);
+            let job = job.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::dream::handle_dream_fire(&state, &job).await {
+                    warn!(job_id = %job.job_id, "dream handler error: {e}");
+                    // handle_dream_fire does NOT reschedule on all Err paths
+                    // (e.g. publish_inbound failure, idle-check DB errors).
+                    // The wrapper is the sole rescheduler for those cases.
+                    crate::cron::reschedule_after_completion(&state, &job.job_id, false).await;
+                }
+            });
+            continue;
+        }
 
         let event = InboundEvent {
             session_id: format!("cron:{}", job.job_id),
