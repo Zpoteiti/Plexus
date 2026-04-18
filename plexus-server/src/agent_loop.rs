@@ -260,6 +260,7 @@ async fn handle_event(
             &cached_default_soul,
             event.chat_id.as_deref(),
             vision_stripped,
+            context::PromptMode::UserTurn,
         ).await;
 
         // Check compression

@@ -16,6 +16,18 @@ pub struct ChannelIdentity {
     pub channel_type: String,
 }
 
+/// Discriminant that controls which context shape build_context assembles.
+///
+/// D-8 will implement the real Dream branch (phase 2 prompt + memory + soul +
+/// skills, omitting channel identity + devices + current time).
+/// Plan E will implement the Heartbeat branch.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PromptMode {
+    UserTurn,
+    Dream,
+    Heartbeat,
+}
+
 impl ChannelIdentity {
     /// Build the Current Session subsection of ## Identity.
     pub fn build_session_section(&self, chat_id: Option<&str>) -> String {
@@ -237,6 +249,8 @@ pub async fn build_context(
     default_soul: &Option<String>,
     chat_id: Option<&str>,
     vision_stripped: bool,
+    // D-8 will branch on `mode` for Dream; Plan E will add the Heartbeat branch.
+    mode: PromptMode,
 ) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
 
