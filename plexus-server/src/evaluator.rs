@@ -51,6 +51,30 @@ struct ToolArgs {
     reason: String,
 }
 
+/// Evaluate whether an autonomous agent's `final_message` should be
+/// delivered to the user right now.
+///
+/// # Arguments
+/// - `state`: shared AppState (for DB + LLM config + HTTP client).
+/// - `user_id`: the owning user (timezone lookup + log context).
+/// - `final_message`: **untrusted** — the agent's last response. May
+///   contain user content, tool output, or anything else that flowed
+///   through the ReAct loop. This is the primary thing being judged.
+/// - `purpose`: **trusted** — a short, server-constructed label like
+///   `"cron job 'daily-standup'"` or `"heartbeat wake-up"`. Callers
+///   must NOT pass user-influenced strings here. Plan D and E callers
+///   construct `purpose` from job names or fixed literals.
+///
+/// # Safety
+/// `final_message` could contain adversarial content trying to talk the
+/// evaluator into `should_notify: true`. The worst case is a spurious
+/// notification, not a privilege issue. Future hardening: wrap both
+/// strings in explicit delimiters when building the user message.
+///
+/// # Errors / default-silence
+/// Returns `should_notify: false` on any failure — LLM unreachable,
+/// missing config, parse error, unexpected tool name. Silence is the
+/// safe failure mode for notification decisions.
 pub async fn evaluate_notification(
     state: &Arc<AppState>,
     user_id: &str,
@@ -64,7 +88,10 @@ pub async fn evaluate_notification(
             warn!(error = %e, user_id, "evaluator: timezone lookup failed, using UTC");
             "UTC".into()
         });
-    let tz: chrono_tz::Tz = tz_string.parse().unwrap_or(chrono_tz::UTC);
+    let tz: chrono_tz::Tz = tz_string.parse().unwrap_or_else(|_| {
+        warn!(user_id, tz = %tz_string, "evaluator: malformed timezone string, using UTC");
+        chrono_tz::UTC
+    });
     let local_now = chrono::Utc::now().with_timezone(&tz);
 
     // 2. Build the messages for the evaluator call.
