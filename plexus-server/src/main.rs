@@ -40,6 +40,10 @@ async fn main() {
     let config = ServerConfig::from_env();
     let pool = db::init_db(&config.database_url).await;
 
+    db::system_config::seed_defaults_if_missing(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to seed system_config defaults: {e}"));
+
     let (outbound_tx, outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(1000);
 
     let quota = Arc::new(crate::workspace::QuotaCache::new(5 * 1024 * 1024 * 1024));
