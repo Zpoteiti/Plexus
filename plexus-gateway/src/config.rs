@@ -8,6 +8,9 @@ pub struct Config {
     pub server_api_url: String,
     pub frontend_dir: String,
     pub allowed_origins: AllowedOrigins,
+    /// Maximum size for browser uploads. Configurable via PLEXUS_GATEWAY_UPLOAD_MAX_BYTES.
+    /// Defaults to 1 GiB. The per-user workspace quota (A-4) is the real size bound.
+    pub upload_max_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +43,10 @@ impl Config {
                     list.split(',').map(|s| s.trim().to_string()).collect(),
                 ),
             },
+            upload_max_bytes: std::env::var("PLEXUS_GATEWAY_UPLOAD_MAX_BYTES")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1024 * 1024 * 1024), // 1 GiB default
         }
     }
 

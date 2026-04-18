@@ -18,6 +18,10 @@ use tracing::{error, info, warn};
 
 const DISCORD_MSG_LIMIT: usize = 2000;
 
+/// Discord's native attachment size cap (non-Nitro). Files above this are
+/// rejected before we even try to download or upload.
+const DISCORD_ATTACHMENT_MAX_BYTES: usize = 25 * 1024 * 1024;
+
 /// Active Discord bots, keyed by user_id.
 type BotRegistry = Arc<RwLock<HashMap<String, BotHandle>>>;
 
@@ -282,7 +286,7 @@ impl EventHandler for DiscordHandler {
         let mut media_urls: Vec<String> = Vec::new();
 
         for att in &msg.attachments {
-            if (att.size as usize) > plexus_common::consts::FILE_UPLOAD_MAX_BYTES {
+            if (att.size as usize) > DISCORD_ATTACHMENT_MAX_BYTES {
                 let marker = oversize_attachment_marker(&att.filename, att.size as u64);
                 content.push('\n');
                 content.push_str(&marker);
@@ -370,7 +374,7 @@ fn oversize_attachment_marker(name: &str, size: u64) -> String {
     format!(
         "[Attachment: {name} ({:.1} MB) — exceeds {} MB limit, not downloaded]",
         size as f64 / 1024.0 / 1024.0,
-        plexus_common::consts::FILE_UPLOAD_MAX_BYTES / 1024 / 1024
+        DISCORD_ATTACHMENT_MAX_BYTES / 1024 / 1024
     )
 }
 
@@ -425,12 +429,11 @@ mod tests {
 
     #[test]
     fn test_oversize_attachment_marker() {
-        use plexus_common::consts::FILE_UPLOAD_MAX_BYTES;
         let marker =
-            oversize_attachment_marker("big.zip", (FILE_UPLOAD_MAX_BYTES + 1) as u64);
+            oversize_attachment_marker("big.zip", (DISCORD_ATTACHMENT_MAX_BYTES + 1) as u64);
         assert!(marker.contains("big.zip"));
         assert!(marker.contains("exceeds"));
-        assert!(marker.contains("20 MB"));
+        assert!(marker.contains("25 MB"));
     }
 
     #[test]

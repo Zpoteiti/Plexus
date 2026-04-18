@@ -12,6 +12,10 @@ use tracing::{error, info, warn};
 
 const TELEGRAM_MSG_LIMIT: usize = 4096;
 
+/// Telegram's native attachment size cap. Files above this are rejected
+/// before we even try to download or upload.
+const TELEGRAM_ATTACHMENT_MAX_BYTES: usize = 20 * 1024 * 1024;
+
 type BotRegistry = Arc<RwLock<HashMap<String, BotHandle>>>;
 
 struct BotHandle {
@@ -231,7 +235,7 @@ async fn handle_message(
             }
         };
 
-        if (file.size as usize) > plexus_common::consts::FILE_UPLOAD_MAX_BYTES {
+        if (file.size as usize) > TELEGRAM_ATTACHMENT_MAX_BYTES {
             content.push('\n');
             content.push_str(&oversize_attachment_marker(&filename, file.size as u64));
             continue;
@@ -415,7 +419,7 @@ fn oversize_attachment_marker(name: &str, size: u64) -> String {
     format!(
         "[Attachment: {name} ({:.1} MB) — exceeds {} MB limit, not downloaded]",
         size as f64 / 1024.0 / 1024.0,
-        plexus_common::consts::FILE_UPLOAD_MAX_BYTES / 1024 / 1024
+        TELEGRAM_ATTACHMENT_MAX_BYTES / 1024 / 1024
     )
 }
 
@@ -438,8 +442,7 @@ mod tests {
 
     #[test]
     fn test_oversize_attachment_marker() {
-        use plexus_common::consts::FILE_UPLOAD_MAX_BYTES;
-        let marker = oversize_attachment_marker("big.zip", (FILE_UPLOAD_MAX_BYTES + 1) as u64);
+        let marker = oversize_attachment_marker("big.zip", (TELEGRAM_ATTACHMENT_MAX_BYTES + 1) as u64);
         assert!(marker.contains("big.zip"));
         assert!(marker.contains("exceeds"));
         assert!(marker.contains("20 MB"));

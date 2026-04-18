@@ -14,7 +14,6 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use plexus_common::consts::FILE_UPLOAD_MAX_BYTES;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -37,6 +36,7 @@ async fn main() {
 
     let config = Config::from_env();
     let port = config.port;
+    let upload_max_bytes = config.upload_max_bytes;
     #[cfg(not(feature = "embed-frontend"))]
     let frontend_dir = config.frontend_dir.clone();
 
@@ -63,7 +63,7 @@ async fn main() {
     let app = app.fallback_service(static_files::static_file_service(&frontend_dir));
 
     let app = app
-        .layer(RequestBodyLimitLayer::new(FILE_UPLOAD_MAX_BYTES))
+        .layer(RequestBodyLimitLayer::new(upload_max_bytes))
         .with_state(state.clone());
 
     let addr = format!("0.0.0.0:{port}");

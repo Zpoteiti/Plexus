@@ -5,7 +5,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use plexus_common::consts::FILE_UPLOAD_MAX_BYTES;
 use std::sync::Arc;
 use tracing::warn;
 
@@ -61,7 +60,7 @@ pub async fn proxy_handler(
         }
     }
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), FILE_UPLOAD_MAX_BYTES).await {
+    let body_bytes = match axum::body::to_bytes(req.into_body(), state.config.upload_max_bytes).await {
         Ok(b) => b,
         Err(_) => {
             return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
@@ -90,10 +89,10 @@ pub async fn proxy_handler(
 
     let resp_bytes = match upstream_resp.bytes().await {
         Ok(b) => {
-            if b.len() > FILE_UPLOAD_MAX_BYTES {
+            if b.len() > state.config.upload_max_bytes {
                 return (
                     StatusCode::BAD_GATEWAY,
-                    serde_json::json!({"error":{"code":"upstream_too_large","message":"response body exceeded 25 MB limit"}}).to_string(),
+                    serde_json::json!({"error":{"code":"upstream_too_large","message":"upstream response body exceeded size limit"}}).to_string(),
                 ).into_response();
             }
             b
