@@ -75,6 +75,14 @@ impl QuotaCache {
         self.quota_bytes
     }
 
+    /// Remove all quota tracking for a user. Called when the user's account is
+    /// deleted. After this, subsequent `check_and_reserve_upload` for the same
+    /// user_id starts fresh from zero (though the account itself should be
+    /// gone by that point).
+    pub fn forget_user(&self, user_id: &str) {
+        self.usage.remove(user_id);
+    }
+
     /// Walks the workspace root and primes the usage cache for every existing user dir.
     /// Call once at server startup.
     pub async fn initialize_from_disk(
@@ -166,6 +174,16 @@ mod tests {
         q.record_delete("alice", 4_000_000_000); // drop to 4 GB
         let result = q.check_and_reserve_upload("alice", 100);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_forget_user_clears_counter() {
+        let q = QuotaCache::new(5_000_000_000);
+        q.check_and_reserve_upload("alice", 1_000).unwrap();
+        assert_eq!(q.current_usage("alice"), 1_000);
+        q.forget_user("alice");
+        // Subsequent calls start from zero.
+        assert_eq!(q.current_usage("alice"), 0);
     }
 
     #[test]

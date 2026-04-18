@@ -32,7 +32,7 @@ This spec closes the gap with minimal new surface:
 - Dependent DB rows (sessions, messages, device_tokens, discord_configs, telegram_configs, cron_jobs, skills) are removed via `ON DELETE CASCADE`.
 - Live in-memory state for the deleted user is evicted: sessions, rate-limit entry, devices, tool-schema cache.
 - Running Discord / Telegram bots for the deleted user are stopped.
-- On-disk file store directory `/tmp/plexus-uploads/{user_id}/` is recursively wiped.
+- On-disk workspace directory `{PLEXUS_WORKSPACE_ROOT}/{user_id}/` is recursively wiped (includes SOUL.md, MEMORY.md, HEARTBEAT.md, skills/, uploads/, and anything else the user has created).
 - Any live browser WebSocket connections for the deleted user are kicked via a new gateway `kick_user` frame.
 - Minimal frontend: a "Delete Account" button in Settings, password-confirmation modal, redirect to login on success.
 - Admin deleting their own account is allowed; emits a loud `warn!` log if the caller is `is_admin=true`.
@@ -65,9 +65,10 @@ delete_user_everywhere(state, user_id):
        - state.rate_limiter.remove(user_id)
        - state.tool_schema_cache.remove(user_id)
        - state.pending: remove entries keyed by device_tokens of this user
-  5. wipe_file_store(user_id):
-       - fs::remove_dir_all("/tmp/plexus-uploads/{user_id}")
-       - ignore NotFound (user may never have uploaded anything)
+  5. wipe_workspace(state, user_id):
+       - fs::remove_dir_all("{state.config.workspace_root}/{user_id}")
+       - ignore NotFound (user may never have been initialized)
+       - state.quota.forget_user(user_id)  // drop in-memory quota cache entry
   6. db::users::delete_user(&state.db, user_id)        // CASCADE handles children
 ```
 
@@ -718,17 +719,9 @@ pub async fn delete_user_everywhere(
     state.tool_schema_cache.remove(user_id);
     summary.in_memory_evicted = true;
 
-    // 4. Wipe file store.
-    let dir = crate::file_store::user_upload_dir(user_id);
-    match tokio::fs::remove_dir_all(&dir).await {
-        Ok(()) => summary.files_wiped = true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            summary.files_wiped = true; // nothing to wipe
-        }
-        Err(e) => {
-            warn!("File store wipe failed for {user_id}: {e}");
-        }
-    }
+    // 4. Wipe workspace.
+    wipe_workspace(state, user_id).await;
+    summary.files_wiped = true;
 
     // 5. DB delete — cascades through every dependent table.
     match crate::db::users::delete_user(&state.db, user_id).await {
@@ -746,13 +739,25 @@ pub async fn delete_user_everywhere(
 
     summary
 }
+
+async fn wipe_workspace(state: &Arc<AppState>, user_id: &str) {
+    let path = std::path::Path::new(&state.config.workspace_root).join(user_id);
+    match tokio::fs::remove_dir_all(&path).await {
+        Ok(()) => tracing::info!(user_id, "workspace wiped"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // User may never have been initialized.
+        }
+        Err(e) => tracing::warn!(user_id, error = %e, "failed to wipe workspace"),
+    }
+    state.quota.forget_user(user_id);
+}
 ```
 
 - [ ] **Step 4: Wire into main.rs**
 
 Add `mod account;` at the top of `plexus-server/src/main.rs` alongside the other module declarations.
 
-Verify `crate::file_store::user_upload_dir(user_id)` is public (if not, make it `pub`). Verify `state.devices_by_user` and `state.tool_schema_cache` field names match actual state — grep if unsure.
+Verify `state.devices_by_user` and `state.tool_schema_cache` field names match actual state — grep if unsure.
 
 - [ ] **Step 5: Build + test**
 
@@ -768,8 +773,8 @@ account: add delete_user_everywhere service orchestration
 
 Single entry point that stops channel bots, kicks browsers via the
 gateway kick_user frame, evicts in-memory state (sessions, devices,
-rate limiter, tool schema cache), wipes the per-user file store
-directory, then runs the cascade DB delete.
+rate limiter, tool schema cache), wipes the per-user workspace
+directory (via wipe_workspace helper), then runs the cascade DB delete.
 
 Each step is idempotent; errors on earlier steps do not abort the
 sequence — we'd rather have partial teardown than a half-deleted
@@ -1089,7 +1094,7 @@ changed.
 2. Populate: start a Discord bot, create a cron job, upload a file via the chat, send a few messages.
 3. Open two browser tabs.
 4. In one tab, go to Settings → Danger Zone → Delete Account → enter correct password → Delete Forever.
-5. Expected: that tab redirects to /login; the other tab's WebSocket drops (server logs "Gateway: route_kick_user user_id=… kicked=2"). The Discord bot goes offline. The file store directory `/tmp/plexus-uploads/<user_id>/` is gone. DB: `SELECT COUNT(*) FROM messages WHERE session_id IN (SELECT session_id FROM sessions WHERE user_id = '<user>')` returns 0.
+5. Expected: that tab redirects to /login; the other tab's WebSocket drops (server logs "Gateway: route_kick_user user_id=… kicked=2"). The Discord bot goes offline. The workspace directory `{PLEXUS_WORKSPACE_ROOT}/<user_id>/` is gone (includes uploads/, MEMORY.md, etc.). DB: `SELECT COUNT(*) FROM messages WHERE session_id IN (SELECT session_id FROM sessions WHERE user_id = '<user>')` returns 0.
 
 - [ ] **Step 2: Wrong password**
 

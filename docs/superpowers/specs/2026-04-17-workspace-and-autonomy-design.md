@@ -118,7 +118,7 @@ No bubblewrap, no clone_newns, no chroot. Pure Rust path validation is sufficien
 
 ### 3.5 Account deletion impact
 
-`wipe_file_store(user_id)` in the account-deletion service becomes `fs::remove_dir_all({WORKSPACE_ROOT}/{user_id}/)`. Same semantics, different path. No new code — just update the constant.
+`wipe_file_store(user_id)` in the account-deletion service becomes `fs::remove_dir_all({WORKSPACE_ROOT}/{user_id}/)` plus a `state.quota.forget_user(user_id)` call to drop the in-memory quota counter. Same semantics, different path. The plan document (`plans/2026-04-16-account-deletion.md`) is updated accordingly; the helper is renamed `wipe_workspace` and calls `QuotaCache::forget_user` after removing the directory.
 
 ---
 
