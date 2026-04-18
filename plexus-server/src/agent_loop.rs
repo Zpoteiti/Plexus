@@ -11,6 +11,108 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+pub(crate) struct PublishFinalParams {
+    pub channel: String,
+    pub chat_id: Option<String>,
+    pub session_id: String,
+    pub user_id: String,
+    pub content: String,
+    /// `None` for user turns; `Some(job_id)` for cron-driven turns.
+    pub cron_job_id: Option<String>,
+    /// Only consulted when `cron_job_id` is `Some(_)`. When the caller has
+    /// already loaded the cron row (to save a DB query), they pass the
+    /// `deliver` flag here. When `None` and `cron_job_id` is `Some`, the
+    /// helper loads the job from DB.
+    pub job_deliver: Option<bool>,
+}
+
+/// Decide whether to publish the final assistant message, and if so, send it.
+///
+/// - **User turn** (`cron_job_id == None`): publish unconditionally.
+/// - **Cron turn, `deliver == false`**: skip publish (pure side-effect cron).
+/// - **Cron turn, `deliver == true`**: run the evaluator; publish only when
+///   `should_notify`. Silence on evaluator error (default-silent).
+///
+/// Plan E (heartbeat) will add a third branch that also calls the evaluator
+/// with a different `purpose` label.
+pub(crate) async fn publish_final(
+    state: &std::sync::Arc<crate::state::AppState>,
+    params: PublishFinalParams,
+) {
+    let PublishFinalParams {
+        channel,
+        chat_id,
+        session_id,
+        user_id,
+        content,
+        cron_job_id,
+        job_deliver,
+    } = params;
+
+    // Decide whether to publish.
+    let should_publish = match &cron_job_id {
+        None => true, // user turn — always publishes
+        Some(job_id) => {
+            // Resolve the deliver flag (caller-provided, else load from DB).
+            let deliver = match job_deliver {
+                Some(d) => d,
+                None => match crate::db::cron::find_by_id(&state.db, job_id).await {
+                    Ok(Some(job)) => job.deliver,
+                    Ok(None) => {
+                        tracing::warn!(
+                            job_id,
+                            "publish_final: cron job not found, skipping publish"
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            job_id,
+                            "publish_final: cron job lookup failed, skipping publish"
+                        );
+                        return;
+                    }
+                },
+            };
+
+            if !deliver {
+                tracing::info!(job_id, "cron deliver=false; skipping OutboundEvent publish");
+                return;
+            }
+
+            // deliver == true: gate through the evaluator.
+            let purpose = format!("cron job '{job_id}'");
+            let eval =
+                crate::evaluator::evaluate_notification(state, &user_id, &content, &purpose)
+                    .await;
+            if !eval.should_notify {
+                tracing::info!(
+                    job_id,
+                    reason = %eval.reason,
+                    "evaluator suppressed cron delivery"
+                );
+                return;
+            }
+            true
+        }
+    };
+
+    if should_publish {
+        let _ = state
+            .outbound_tx
+            .send(crate::bus::OutboundEvent {
+                channel,
+                chat_id,
+                session_id,
+                user_id,
+                content,
+                media: vec![],
+            })
+            .await;
+    }
+}
+
 pub async fn run_session(
     state: Arc<AppState>,
     session_id: String,
@@ -234,18 +336,20 @@ async fn handle_event(
                 .await
                 .map_err(|e| format!("Save assistant message: {e}"))?;
 
-                // Send final response
-                let _ = state
-                    .outbound_tx
-                    .send(OutboundEvent {
+                // Send final response (gated through evaluator for cron turns)
+                publish_final(
+                    state,
+                    PublishFinalParams {
                         channel: event.channel.clone(),
                         chat_id: event.chat_id.clone(),
                         session_id: session_id.to_string(),
                         user_id: user_id.to_string(),
-                        content: content,
-                        media: vec![],
-                    })
-                    .await;
+                        content,
+                        cron_job_id: event.cron_job_id.clone(),
+                        job_deliver: None, // helper loads from DB when needed
+                    },
+                )
+                .await;
 
                 return Ok(());
             }
@@ -504,4 +608,56 @@ async fn send_error(
             media: vec![],
         })
         .await;
+}
+
+#[cfg(test)]
+mod deliver_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_publish_final_skips_when_cron_deliver_false() {
+        let tmp = TempDir::new().unwrap();
+        let (state, mut rx) = crate::state::AppState::test_minimal_with_outbound(tmp.path());
+
+        // Cron event with caller-provided deliver=false (skips DB lookup).
+        let params = PublishFinalParams {
+            channel: "gateway".into(),
+            chat_id: Some("chat-1".into()),
+            session_id: "cron:job-1".into(),
+            user_id: "alice".into(),
+            content: "all done".into(),
+            cron_job_id: Some("job-1".into()),
+            job_deliver: Some(false),
+        };
+        publish_final(&state, params).await;
+
+        // Nothing should be published.
+        assert!(
+            rx.try_recv().is_err(),
+            "deliver=false cron must not publish an OutboundEvent"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_publish_final_publishes_user_turn() {
+        let tmp = TempDir::new().unwrap();
+        let (state, mut rx) = crate::state::AppState::test_minimal_with_outbound(tmp.path());
+
+        let params = PublishFinalParams {
+            channel: "gateway".into(),
+            chat_id: Some("chat-1".into()),
+            session_id: "sess-1".into(),
+            user_id: "alice".into(),
+            content: "hi".into(),
+            cron_job_id: None,
+            job_deliver: None,
+        };
+        publish_final(&state, params).await;
+
+        let event = rx.recv().await.expect("user turn must publish");
+        assert_eq!(event.content, "hi");
+        assert_eq!(event.channel, "gateway");
+        assert_eq!(event.user_id, "alice");
+    }
 }
