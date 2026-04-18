@@ -454,3 +454,17 @@ Each channel (Discord, Telegram, Gateway) constructs a `ChannelIdentity` with se
 **Outcome:** Clean Ctrl-C / SIGTERM shutdown. In-flight HTTP requests drain; new requests rejected; background loops exit cleanly instead of mid-iteration. `AppState.shutdown` is no longer dead-scaffolded.
 
 ---
+
+## ADR-35: Dream as a protected cron job with idle check
+
+**Context:** Plexus needs nanobot-parity dream — periodic memory consolidation and skill discovery — without running expensive LLM passes on idle users.
+
+**Options:**
+- **Dedicated scheduler thread.** Simple mental model but duplicates cron's claim/dispatch/reschedule infrastructure and requires a new set of migrations + recovery semantics.
+- **Dream as a system-kind cron job.** Reuses all of cron's machinery (poll, atomic claim, reschedule-after-execution) by introducing a single `cron_jobs.kind = 'system'` discriminator protected from user deletion.
+
+**Decision:** Dream is registered as a per-user system cron job at registration time with `(cron_expr: "0 */2 * * *", deliver: false, kind: 'system')`. The poller detects `kind='system' AND name='dream'` and dispatches to `dream::handle_dream_fire` instead of publishing a regular cron event. The handler does a cheap DB idle check before spending any Phase 1 budget; only on positive activity does it advance `users.last_dream_at` and run the standalone Phase 1 LLM call. Non-empty directives are published as `InboundEvent { kind: Dream }` which the agent loop routes to `PromptMode::Dream` + `ToolAllowlist::Only(DREAM_PHASE2_ALLOWLIST)` for the execution phase.
+
+**Outcome:** Near-zero LLM cost on idle users (N users × 1 DB query / 2h). On active users, Phase 1 emits structured directives that Phase 2 applies via the restricted 7-file-tool allowlist. Dream never publishes to channels (`deliver=false` → `publish_final` skips, C-2). C-3 + C-4 prevent users from deleting the dream job via tool or HTTP; C-5's `ensure_system_cron_job` guarantees exactly one dream job per user via a partial unique index. Consolidated memory edits happen inline in `{workspace}/MEMORY.md` + `SOUL.md`; new skills land at `{workspace}/skills/{name}/SKILL.md`.
+
+---
