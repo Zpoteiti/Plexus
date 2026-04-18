@@ -214,6 +214,7 @@ mod tests {
 
         let after = get_last_heartbeat_at(&pool, &user_id).await.unwrap()
             .expect("timestamp should be present after update");
+        // Postgres TIMESTAMPTZ stores microsecond precision; allow a 5ms tolerance.
         let delta = (after - now).num_milliseconds().abs();
         assert!(delta < 5, "expected roundtrip within 5ms; got {delta}ms delta");
 
