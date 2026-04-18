@@ -18,6 +18,7 @@ fn test_config() -> Config {
         server_api_url: "http://127.0.0.1:1".into(), // intentionally unreachable
         frontend_dir: ".".into(),
         allowed_origins: AllowedOrigins::Any,
+        upload_max_bytes: 1024 * 1024 * 1024,
     }
 }
 

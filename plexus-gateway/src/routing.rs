@@ -159,6 +159,7 @@ mod tests {
                 server_api_url: "http://localhost".into(),
                 frontend_dir: ".".into(),
                 allowed_origins: AllowedOrigins::Any,
+                upload_max_bytes: 1024 * 1024 * 1024,
             },
             browsers: Arc::new(DashMap::new()),
             plexus: Arc::new(RwLock::new(None)),
