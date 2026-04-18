@@ -385,6 +385,82 @@ async fn workspace_file_put(
         })
 }
 
+// -- Workspace File Delete --
+
+#[derive(serde::Deserialize)]
+pub struct WorkspaceDeleteQuery {
+    pub path: String,
+    #[serde(default)]
+    pub recursive: bool,
+}
+
+pub async fn workspace_file_delete_path(
+    state: &AppState,
+    user_id: &str,
+    rel_path: &str,
+    recursive: bool,
+) -> Result<(), crate::workspace::WorkspaceError> {
+    let root = std::path::Path::new(&state.config.workspace_root);
+    let resolved = crate::workspace::resolve_user_path(root, user_id, rel_path).await?;
+
+    let meta = tokio::fs::metadata(&resolved).await?;
+
+    if meta.is_dir() {
+        if !recursive {
+            return Err(crate::workspace::WorkspaceError::Io(std::io::Error::other(
+                "directory delete requires recursive=true",
+            )));
+        }
+        // Sum sizes before deletion to release from quota.
+        let freed = dir_size(&resolved).await.unwrap_or(0);
+        tokio::fs::remove_dir_all(&resolved).await?;
+        state.quota.release(user_id, freed);
+    } else {
+        let size = meta.len();
+        tokio::fs::remove_file(&resolved).await?;
+        state.quota.release(user_id, size);
+    }
+    Ok(())
+}
+
+async fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut total = 0u64;
+        for entry in walkdir::WalkDir::new(&path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if entry.file_type().is_file() {
+                if let Ok(m) = entry.metadata() {
+                    total = total.saturating_add(m.len());
+                }
+            }
+        }
+        Ok(total)
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+}
+
+async fn workspace_file_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<WorkspaceDeleteQuery>,
+) -> Result<StatusCode, ApiError> {
+    let claims = claims(&headers, &state)?;
+    workspace_file_delete_path(&state, &claims.sub, &q.path, q.recursive)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| {
+            use crate::workspace::WorkspaceError;
+            match &e {
+                WorkspaceError::Traversal(_) => ApiError::new(ErrorCode::Forbidden, "forbidden"),
+                _ => ApiError::new(ErrorCode::ValidationFailed, format!("{e:?}")),
+            }
+        })
+}
+
 fn mime_from_path(p: &str) -> &'static str {
     let ext = p.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
@@ -416,7 +492,9 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/workspace/tree", get(workspace_tree))
         .route(
             "/api/workspace/file",
-            get(workspace_file_get).put(workspace_file_put),
+            get(workspace_file_get)
+                .put(workspace_file_put)
+                .delete(workspace_file_delete),
         )
 }
 
@@ -491,6 +569,47 @@ mod tests {
         let written = tokio::fs::read(user_root.join("notes.md")).await.unwrap();
         assert_eq!(written, b"hello");
         assert_eq!(state.quota.current_usage("alice"), 5);
+    }
+
+    #[tokio::test]
+    async fn test_workspace_file_delete_file_updates_quota() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_root = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_root).await.unwrap();
+        tokio::fs::write(user_root.join("doomed.txt"), b"goodbye")
+            .await
+            .unwrap();
+
+        let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 1024 * 1024);
+        state.quota.reserve_for_test("alice", 7);
+
+        workspace_file_delete_path(&state, "alice", "doomed.txt", false)
+            .await
+            .unwrap();
+
+        assert!(!user_root.join("doomed.txt").exists());
+        assert_eq!(state.quota.current_usage("alice"), 0);
+    }
+
+    #[tokio::test]
+    async fn test_workspace_file_delete_directory_requires_recursive_flag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_root = tmp.path().join("alice");
+        tokio::fs::create_dir_all(user_root.join("subdir"))
+            .await
+            .unwrap();
+
+        let state = crate::state::AppState::test_minimal(tmp.path());
+        let err = workspace_file_delete_path(&state, "alice", "subdir", false)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:?}").to_lowercase().contains("directory"));
+
+        // With recursive: true, it succeeds.
+        workspace_file_delete_path(&state, "alice", "subdir", true)
+            .await
+            .unwrap();
+        assert!(!user_root.join("subdir").exists());
     }
 
     #[tokio::test]
