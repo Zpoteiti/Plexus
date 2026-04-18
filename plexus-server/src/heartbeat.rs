@@ -31,7 +31,6 @@ const HEARTBEAT_TICK_INTERVAL_SEC: u64 = 60;
 /// pathological backlog (e.g. admin shrinking the interval on a server with
 /// many long-idle users) from spiking memory. The next tick picks up the
 /// remainder because the query orders oldest-first.
-#[allow(dead_code)] // consumed in E-8 tick_once body
 const HEARTBEAT_MAX_USERS_PER_TICK: i64 = 500;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -219,11 +218,116 @@ pub fn spawn_heartbeat_tick(state: Arc<AppState>) {
     });
 }
 
-/// One tick of the heartbeat loop. Skeleton for E-4; E-8 fills in the body.
-async fn tick_once(_state: &Arc<AppState>) -> Result<(), String> {
-    // E-8 implementation goes here: query due users, advance last_heartbeat_at,
-    // spawn Phase 1 per user, publish Phase 2 InboundEvent on Run.
-    debug!("heartbeat tick (E-4 skeleton — E-8 fills the body)");
+/// One tick of the heartbeat loop.
+async fn tick_once(state: &Arc<AppState>) -> Result<(), String> {
+    // 1. Read the admin-configurable interval. 0 → heartbeat disabled.
+    let interval_seconds = match crate::db::system_config::get(
+        &state.db,
+        "heartbeat_interval_seconds",
+    )
+    .await
+    {
+        Ok(Some(v)) => match v.parse::<i64>() {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(value = %v, error = %e, "heartbeat: interval parse error, skipping tick");
+                return Ok(());
+            }
+        },
+        Ok(None) => 1800, // seed missing — fall back to default
+        Err(e) => {
+            warn!(error = %e, "heartbeat: system_config lookup failed, skipping tick");
+            return Ok(());
+        }
+    };
+    if interval_seconds <= 0 {
+        debug!(interval_seconds, "heartbeat: globally disabled, skipping tick");
+        return Ok(());
+    }
+
+    // 2. Query due users.
+    let due = crate::db::users::list_users_due_for_heartbeat(
+        &state.db,
+        interval_seconds,
+        HEARTBEAT_MAX_USERS_PER_TICK,
+    )
+    .await
+    .map_err(|e| format!("list_users_due_for_heartbeat: {e}"))?;
+
+    if due.is_empty() {
+        return Ok(());
+    }
+    debug!(count = due.len(), "heartbeat: dispatching due users");
+
+    // 3. Per-user dispatch.
+    let ws_root = std::path::Path::new(&state.config.workspace_root).to_path_buf();
+    for user_id in due {
+        // 3a. Skip if prior heartbeat turn still running.
+        //     try_lock is a liveness probe; benign race if a new turn
+        //     starts between our check and publish.
+        if let Some(handle) = state.sessions.get(&format!("heartbeat:{user_id}")) {
+            if handle.lock.try_lock().is_err() {
+                debug!(user_id, "heartbeat: prior turn still running, skipping");
+                continue;
+            }
+        }
+
+        // 3b. Skip if HEARTBEAT.md is missing (users can delete it).
+        let heartbeat_path = ws_root.join(&user_id).join("HEARTBEAT.md");
+        match tokio::fs::try_exists(&heartbeat_path).await {
+            Ok(true) => {}
+            Ok(false) => {
+                debug!(user_id, "heartbeat: HEARTBEAT.md missing, skipping");
+                continue;
+            }
+            Err(e) => {
+                warn!(user_id, error = %e, "heartbeat: try_exists failed, skipping");
+                continue;
+            }
+        }
+
+        // 3c. Advance last_heartbeat_at BEFORE spawning Phase 1.
+        //     Prevents refire during LLM latency, and also serves as a
+        //     single-advance barrier if a concurrent tick somehow fires.
+        let now = chrono::Utc::now();
+        if let Err(e) = crate::db::users::update_last_heartbeat_at(&state.db, &user_id, now).await {
+            warn!(user_id, error = %e, "heartbeat: advance last_heartbeat_at failed, skipping");
+            continue;
+        }
+
+        // 3d. Spawn Phase 1 off the tick task. Phase 1 + publish run in
+        //     parallel across users; the tick loop stays responsive.
+        let state_clone = Arc::clone(state);
+        let user_id_clone = user_id.clone();
+        tokio::spawn(async move {
+            match run_phase1(&state_clone, &user_id_clone).await {
+                Phase1Result::Skip { reason } => {
+                    info!(user_id = %user_id_clone, reason, "heartbeat: phase 1 skipped");
+                }
+                Phase1Result::Run { tasks } => {
+                    let event = crate::bus::InboundEvent {
+                        session_id: format!("heartbeat:{user_id_clone}"),
+                        user_id: user_id_clone.clone(),
+                        kind: crate::bus::EventKind::Heartbeat,
+                        content: tasks,
+                        channel: "internal".to_string(),
+                        chat_id: None,
+                        media: vec![],
+                        cron_job_id: None,
+                        identity: None,
+                    };
+                    if let Err(e) = crate::bus::publish_inbound(&state_clone, event).await {
+                        warn!(
+                            user_id = %user_id_clone,
+                            error = %e,
+                            "heartbeat: publish_inbound failed"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 

@@ -126,6 +126,7 @@ async fn main() {
     ws::spawn_heartbeat_reaper(Arc::clone(&state));
     bus::spawn_rate_limit_refresh(Arc::clone(&state));
     cron::spawn_cron_poller(Arc::clone(&state));
+    heartbeat::spawn_heartbeat_tick(Arc::clone(&state));
 
     // Outbound dispatch loop (routes events to channels)
     channels::spawn_outbound_dispatch(Arc::clone(&state), outbound_rx);
