@@ -824,10 +824,11 @@ mod deliver_tests {
         // grow by a heap pointer's worth of indirection. Heartbeat is
         // hot enough that this matters.
         //
-        // Current fields: 2 String, 2 Option<String>, 1 EventKind (u8-sized),
-        // 1 Option<String>, 1 Option<bool>. String = 24 bytes on 64-bit,
-        // Option<String> = 24 bytes (niche on len). So the struct should
-        // be bounded around 150 bytes.
+        // Current fields: 4 String (channel, session_id, user_id, content),
+        // 2 Option<String> (chat_id, cron_job_id), 1 EventKind (u8-sized),
+        // 1 Option<bool>. String = 24 bytes on 64-bit; Option<String> = 24
+        // bytes (niche on len); Option<bool> = 2 bytes. Total lands around
+        // 150–160 bytes on x86_64.
         let size = std::mem::size_of::<PublishFinalParams>();
         assert!(
             size <= 200,
