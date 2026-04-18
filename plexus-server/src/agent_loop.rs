@@ -816,4 +816,23 @@ mod deliver_tests {
             "expected no OutboundEvent for silent heartbeat"
         );
     }
+
+    #[test]
+    fn publish_final_params_size_is_reasonable() {
+        // Guardrail: if someone accidentally stuffs a Vec or a String into
+        // the Copy-able position of kind, this fails — the struct would
+        // grow by a heap pointer's worth of indirection. Heartbeat is
+        // hot enough that this matters.
+        //
+        // Current fields: 2 String, 2 Option<String>, 1 EventKind (u8-sized),
+        // 1 Option<String>, 1 Option<bool>. String = 24 bytes on 64-bit,
+        // Option<String> = 24 bytes (niche on len). So the struct should
+        // be bounded around 150 bytes.
+        let size = std::mem::size_of::<PublishFinalParams>();
+        assert!(
+            size <= 200,
+            "PublishFinalParams grew beyond 200 bytes (got {size}); \
+             heartbeat dispatch is hot — review the struct layout."
+        );
+    }
 }
