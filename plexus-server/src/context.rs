@@ -257,8 +257,7 @@ The system will decide whether to notify the user through an external channel.\n
 async fn build_heartbeat_system(
     soul: &str,
     user: &User,
-    identity: &ChannelIdentity,
-    chat_id: Option<&str>,
+    _identity: &ChannelIdentity,
     state: &AppState,
     memory: &str,
     skills_section: &str,
@@ -273,8 +272,10 @@ async fn build_heartbeat_system(
         .filter(|s| !s.is_empty())
         .unwrap_or("(not set)");
     s += &format!("### Account\nName: {} | Email: {}\n\n", name, user.email);
-    s += &identity.build_session_section(chat_id);
-    s += "\n";
+    // Heartbeat has no interactive channel — skip identity.build_session_section
+    // (which would inject "To send media: use the message tool …", contradicting
+    // the HEARTBEAT_BANNER's no-message-tool-for-delivery rule below).
+    s += "### Current Session\nAutonomous heartbeat (no interactive channel)\n\n";
 
     // NO ## Channels section — heartbeat never routes to an interactive channel.
 
@@ -407,13 +408,10 @@ pub async fn build_context(
             s
         }
         PromptMode::Heartbeat => {
-            // `user` and `identity` are already `&…` in build_context's
-            // signature, so pass them through without an extra borrow.
             build_heartbeat_system(
                 soul,
                 user,
                 identity,
-                chat_id,
                 state,
                 &memory,
                 &skills_section,
