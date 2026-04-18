@@ -75,6 +75,11 @@ impl QuotaCache {
         self.quota_bytes
     }
 
+    /// Alias used by the /api/workspace/quota handler.
+    pub fn total_bytes(&self) -> u64 {
+        self.quota_bytes
+    }
+
     /// Remove all quota tracking for a user. Called when the user's account is
     /// deleted. After this, subsequent `check_and_reserve_upload` for the same
     /// user_id starts fresh from zero (though the account itself should be
@@ -123,6 +128,19 @@ pub(crate) async fn walk_dir_bytes(path: &std::path::Path) -> std::io::Result<u6
         }
     }
     Ok(total)
+}
+
+#[cfg(test)]
+impl QuotaCache {
+    /// Directly increment the usage counter for a user. Used in unit tests
+    /// to simulate a prior upload without going through the real upload flow.
+    pub fn reserve_for_test(&self, user_id: &str, bytes: u64) {
+        let entry = self
+            .usage
+            .entry(user_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)));
+        entry.fetch_add(bytes, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]

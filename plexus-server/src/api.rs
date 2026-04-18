@@ -215,6 +215,36 @@ async fn download_file(
         .unwrap())
 }
 
+// -- Workspace Quota --
+
+#[derive(serde::Serialize)]
+pub struct WorkspaceQuotaResponse {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+}
+
+/// Pure logic: query the quota cache for `user_id`. No I/O or DB calls.
+pub async fn workspace_quota_handler(
+    state: &AppState,
+    user_id: &str,
+) -> WorkspaceQuotaResponse {
+    let used = state.quota.current_usage(user_id);
+    let total = state.quota.total_bytes();
+    WorkspaceQuotaResponse {
+        used_bytes: used,
+        total_bytes: total,
+    }
+}
+
+/// GET /api/workspace/quota
+async fn workspace_quota(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<WorkspaceQuotaResponse>, ApiError> {
+    let c = claims(&headers, &state)?;
+    Ok(Json(workspace_quota_handler(&state, &c.sub).await))
+}
+
 pub fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/user/profile", get(get_profile))
@@ -226,4 +256,23 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/sessions/{session_id}/messages", get(get_messages))
         .route("/api/files", post(upload_file))
         .route("/api/files/{file_id}", get(download_file))
+        .route("/api/workspace/quota", get(workspace_quota))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_workspace_quota_shape() {
+        // Pure-logic test: the handler's response body matches the spec.
+        // No HTTP harness needed — we construct the state and call the handler.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 5 * 1024 * 1024);
+        state.quota.reserve_for_test("alice", 1024);
+
+        let result = workspace_quota_handler(&state, "alice").await;
+        assert_eq!(result.used_bytes, 1024);
+        assert_eq!(result.total_bytes, 5 * 1024 * 1024);
+    }
 }
