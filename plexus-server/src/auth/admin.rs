@@ -218,6 +218,34 @@ async fn put_server_mcp(
     Ok(Json(serde_json::json!({ "mcp_servers": req.mcp_servers })))
 }
 
+// -- List Users (Admin) --
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+struct AdminUserSummary {
+    user_id: String,
+    email: String,
+    display_name: Option<String>,
+    is_admin: bool,
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn list_users(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<AdminUserSummary>>, ApiError> {
+    let _admin = admin_claims(&headers, &state)?;
+    let rows: Vec<AdminUserSummary> = sqlx::query_as(
+        "SELECT user_id, email, display_name, is_admin, created_at, last_heartbeat_at \
+         FROM users \
+         ORDER BY created_at DESC",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
+    Ok(Json(rows))
+}
+
 // -- Delete User (Admin) --
 
 async fn delete_user_by_admin(
@@ -262,5 +290,6 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         )
         .route("/api/llm-config", get(get_llm_config).put(put_llm_config))
         .route("/api/server-mcp", get(get_server_mcp).put(put_server_mcp))
+        .route("/api/admin/users", get(list_users))
         .route("/api/admin/users/{user_id}", delete(delete_user_by_admin))
 }

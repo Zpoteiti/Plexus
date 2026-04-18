@@ -146,3 +146,13 @@ export type WorkspaceSkill = {
   description: string;
   always_on: boolean;
 };
+
+// Admin user summary (from GET /api/admin/users)
+export type AdminUser = {
+  user_id: string;
+  email: string;
+  display_name: string | null;
+  is_admin: boolean;
+  created_at: string;
+  last_heartbeat_at: string | null;
+};

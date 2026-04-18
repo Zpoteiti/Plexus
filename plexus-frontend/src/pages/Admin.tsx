@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
 import { api } from '../lib/api'
-import type { LlmConfig, RateLimit, DefaultSoul, McpServerEntry } from '../lib/types'
+import type { LlmConfig, RateLimit, DefaultSoul, McpServerEntry, AdminUser } from '../lib/types'
 
-type Tab = 'llm' | 'soul' | 'rate' | 'mcp'
+type Tab = 'llm' | 'soul' | 'rate' | 'mcp' | 'users'
 
 export default function Admin() {
   const [tab, setTab] = useState<Tab>('llm')
@@ -15,6 +15,7 @@ export default function Admin() {
     { id: 'soul', label: 'Default Soul' },
     { id: 'rate', label: 'Rate Limit' },
     { id: 'mcp', label: 'Server MCP' },
+    { id: 'users', label: 'Users' },
   ]
 
   return (
@@ -51,6 +52,7 @@ export default function Admin() {
         {tab === 'soul' && <DefaultSoulTab />}
         {tab === 'rate' && <RateLimitTab />}
         {tab === 'mcp' && <ServerMcpTab />}
+        {tab === 'users' && <UsersTab />}
       </div>
     </div>
   )
@@ -246,6 +248,143 @@ function ServerMcpTab() {
       />
       <AdminSave onClick={save} loading={loading} />
       {msg && <p className="text-xs" style={{ color: 'var(--accent)' }}>{msg}</p>}
+    </div>
+  )
+}
+
+// ── Users Tab ─────────────────────────────────────────────────────────────────
+
+function UsersTab() {
+  const [users, setUsers] = useState<AdminUser[]>([])
+  const [filter, setFilter] = useState('')
+  const [msg, setMsg] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<AdminUser | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
+  useEffect(() => {
+    void load()
+  }, [])
+
+  async function load() {
+    try {
+      const data = await api.get<AdminUser[]>('/api/admin/users')
+      setUsers(data)
+      setMsg(null)
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'load failed')
+    }
+  }
+
+  async function doDelete(u: AdminUser) {
+    setDeleting(true)
+    try {
+      await api.delete<{ message: string }>(`/api/admin/users/${encodeURIComponent(u.user_id)}`)
+      setConfirmDelete(null)
+      await load()
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : 'delete failed')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const visible = users.filter(
+    (u) =>
+      filter === '' ||
+      u.email.toLowerCase().includes(filter.toLowerCase()) ||
+      (u.display_name ?? '').toLowerCase().includes(filter.toLowerCase()) ||
+      u.user_id.toLowerCase().includes(filter.toLowerCase()),
+  )
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Search by email, display name, or user_id…"
+          className="flex-1 px-3 py-2 rounded text-sm outline-none border"
+          style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
+        />
+        <span className="text-xs" style={{ color: 'var(--muted)' }}>
+          {visible.length} / {users.length}
+        </span>
+      </div>
+      {msg && (
+        <div className="text-sm" style={{ color: '#ef4444' }}>
+          {msg}
+        </div>
+      )}
+      <ul className="list-none p-0 m-0">
+        {visible.map((u) => (
+          <li
+            key={u.user_id}
+            className="flex items-center gap-2 py-2 border-b"
+            style={{ borderColor: 'var(--border)' }}
+          >
+            <div className="flex-1 min-w-0">
+              <div className="text-sm">
+                <strong>{u.display_name ?? u.email}</strong>
+                {u.is_admin && (
+                  <span className="ml-2 text-xs" style={{ color: 'var(--accent)' }}>
+                    admin
+                  </span>
+                )}
+              </div>
+              <div className="text-xs" style={{ color: 'var(--muted)' }}>
+                {u.email} · {u.user_id} · joined {new Date(u.created_at).toLocaleDateString()}
+              </div>
+            </div>
+            <button
+              onClick={() => setConfirmDelete(u)}
+              className="text-xs px-2 py-1 rounded"
+              style={{ border: '1px solid var(--border)', color: '#ef4444' }}
+            >
+              Delete
+            </button>
+          </li>
+        ))}
+      </ul>
+      {confirmDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.5)' }}
+          onClick={() => !deleting && setConfirmDelete(null)}
+        >
+          <div
+            className="rounded p-6 max-w-md w-full"
+            style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold mb-2" style={{ color: '#ef4444' }}>
+              Delete {confirmDelete.display_name ?? confirmDelete.email}?
+            </h2>
+            <p className="text-sm mb-4" style={{ color: 'var(--muted)' }}>
+              This will permanently delete the user and all their data: sessions, messages,
+              channels, files, skills. <strong>This cannot be undone.</strong>
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmDelete(null)}
+                disabled={deleting}
+                className="text-sm px-3 py-1 rounded"
+                style={{ border: '1px solid var(--border)' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void doDelete(confirmDelete)}
+                disabled={deleting}
+                className="text-sm px-3 py-1 rounded"
+                style={{ background: '#ef4444', color: 'white' }}
+              >
+                {deleting ? 'Deleting…' : 'Delete Forever'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
