@@ -214,6 +214,77 @@ async fn download_file(
         .unwrap())
 }
 
+// -- Workspace Upload --
+
+#[derive(serde::Serialize)]
+pub struct WorkspaceUploadResult {
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+/// Save a single uploaded file under {user_root}/uploads/, using the same
+/// dated-hashed naming convention as the channel adapters' inbound-media path:
+///   uploads/{YYYY-MM-DD}-{8-char-hash}-{filename}
+///
+/// Quota enforcement happens inside `workspace_file_put_bytes` (reserves the
+/// delta against the existing file, rolls back on write failure). Do NOT
+/// pre-reserve here — that would double-count against the quota.
+pub async fn workspace_upload_save_one(
+    state: &AppState,
+    user_id: &str,
+    original_filename: &str,
+    bytes: Vec<u8>,
+) -> Result<WorkspaceUploadResult, crate::workspace::WorkspaceError> {
+    let size = bytes.len() as u64;
+
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        format!("{:08x}", hasher.finish() as u32)
+    };
+    let safe_name = original_filename
+        .replace(['/', '\\'], "_")
+        .replace("..", "_");
+    let rel = format!("uploads/{date}-{hash}-{safe_name}");
+
+    workspace_file_put_bytes(state, user_id, &rel, bytes).await?;
+    Ok(WorkspaceUploadResult {
+        path: rel,
+        size_bytes: size,
+    })
+}
+
+async fn workspace_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<Json<Vec<WorkspaceUploadResult>>, ApiError> {
+    let claims = claims(&headers, &state)?;
+    let mut results = Vec::new();
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::new(ErrorCode::ValidationFailed, format!("multipart: {e}")))?
+    {
+        let filename = field.file_name().unwrap_or("unnamed").to_string();
+        let bytes = field.bytes().await.map_err(|e| {
+            ApiError::new(ErrorCode::ValidationFailed, format!("multipart read: {e}"))
+        })?;
+        match workspace_upload_save_one(&state, &claims.sub, &filename, bytes.to_vec()).await {
+            Ok(r) => results.push(r),
+            Err(_) => results.push(WorkspaceUploadResult {
+                // Sentinel: "ERROR:{filename}" so the client can surface per-file failures.
+                path: format!("ERROR:{filename}"),
+                size_bytes: 0,
+            }),
+        }
+    }
+    Ok(Json(results))
+}
+
 // -- Workspace Quota --
 
 #[derive(serde::Serialize)]
@@ -496,6 +567,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
                 .put(workspace_file_put)
                 .delete(workspace_file_delete),
         )
+        .route("/api/workspace/upload", post(workspace_upload))
 }
 
 #[cfg(test)]
@@ -610,6 +682,31 @@ mod tests {
             .await
             .unwrap();
         assert!(!user_root.join("subdir").exists());
+    }
+
+    #[tokio::test]
+    async fn test_workspace_upload_saves_to_uploads_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        tokio::fs::create_dir_all(tmp.path().join("alice/uploads"))
+            .await
+            .unwrap();
+
+        let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 1024 * 1024);
+        let saved = workspace_upload_save_one(&state, "alice", "photo.jpg", b"fakedata".to_vec())
+            .await
+            .unwrap();
+
+        assert!(
+            saved.path.starts_with("uploads/"),
+            "expected uploads/ prefix; got {}",
+            saved.path
+        );
+        assert!(saved.path.ends_with("photo.jpg"));
+        assert_eq!(saved.size_bytes, 8);
+
+        // File actually exists on disk.
+        let full = tmp.path().join("alice").join(&saved.path);
+        assert!(full.exists());
     }
 
     #[tokio::test]
