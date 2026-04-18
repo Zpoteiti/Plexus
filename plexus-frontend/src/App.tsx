@@ -5,6 +5,7 @@ import Chat from './pages/Chat'
 import Settings from './pages/Settings'
 import Admin from './pages/Admin'
 import Wizard from './pages/Wizard'
+import Workspace from './pages/Workspace'
 import { WIZARD_KEY } from './lib/constants'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="/chat" element={<RequireSetup><Chat /></RequireSetup>} />
         <Route path="/chat/:sessionId" element={<RequireSetup><Chat /></RequireSetup>} />
         <Route path="/settings" element={<RequireAuth><Settings /></RequireAuth>} />
+        <Route path="/settings/workspace" element={<RequireAuth><Workspace /></RequireAuth>} />
         <Route path="/admin" element={<RequireAdmin><Admin /></RequireAdmin>} />
         <Route path="/setup" element={<RequireAuth><Wizard /></RequireAuth>} />
         <Route path="*" element={<Navigate to="/chat" replace />} />

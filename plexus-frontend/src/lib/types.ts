@@ -128,3 +128,21 @@ export interface RateLimit {
 export interface DefaultSoul {
   soul: string
 }
+
+export type WorkspaceFile = {
+  path: string;
+  is_dir: boolean;
+  size_bytes: number;
+  modified_at: string;
+};
+
+export type WorkspaceQuota = {
+  used_bytes: number;
+  total_bytes: number;
+};
+
+export type WorkspaceSkill = {
+  name: string;
+  description: string;
+  always_on: boolean;
+};
