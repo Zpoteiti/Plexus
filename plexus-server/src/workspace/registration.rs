@@ -82,6 +82,32 @@ pub async fn initialize_user_workspace(
         ).await.ok();
     }
 
+    // Register the dream system cron job (Plan D). Idempotent via
+    // ensure_system_cron_job — re-running workspace init doesn't duplicate.
+    if let Some(pool) = pool {
+        let timezone = crate::db::users::get_timezone(pool, user_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, user_id, "dream registration: timezone lookup failed, using UTC");
+                "UTC".into()
+            });
+        if let Err(e) = crate::db::cron::ensure_system_cron_job(
+            pool,
+            user_id,
+            "dream",
+            "0 */2 * * *",    // every 2 hours, top of the hour
+            &timezone,
+            "",                // message: unused — dream handler bypasses the normal cron path
+            "gateway",        // channel: required by the schema CHECK; unused for dream
+            "-",              // chat_id: required by the schema; unused for dream
+            false,            // deliver=false → publish_final skips; dream is silent
+        ).await {
+            tracing::warn!(error = %e, user_id, "failed to register dream system cron job");
+            // Non-fatal: workspace registration still succeeded; admin can
+            // re-init to retry. Dream won't fire for this user until then.
+        }
+    }
+
     Ok(())
 }
 
@@ -173,6 +199,40 @@ mod tests {
             .await
             .unwrap();
         assert!(soul.contains("baseline soul"));
+    }
+
+    #[tokio::test]
+    #[ignore]  // needs DATABASE_URL
+    async fn test_initialize_registers_dream_cron_job() {
+        let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL");
+        let pool = crate::db::init_db(&url).await;
+
+        let user_id = format!("d9-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let user_email = format!("{user_id}@test.local");
+        crate::db::users::create_user(
+            &pool, &user_id, &user_email, "", false,
+        ).await.unwrap();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        initialize_user_workspace(Some(&pool), tmp.path(), &user_id).await.unwrap();
+
+        let jobs = crate::db::cron::list_by_user(&pool, &user_id).await.unwrap();
+        let dream = jobs.iter().find(|j| j.name == "dream")
+            .expect("dream cron job should be registered for new user");
+        assert_eq!(dream.kind, crate::db::cron::SYSTEM_KIND);
+        assert!(!dream.deliver, "dream should have deliver=false");
+        assert!(dream.enabled, "dream should be enabled on creation");
+        assert_eq!(dream.cron_expr.as_deref(), Some("0 */2 * * *"));
+
+        // Second init: idempotent (no duplicate)
+        initialize_user_workspace(Some(&pool), tmp.path(), &user_id).await.unwrap();
+        let jobs2 = crate::db::cron::list_by_user(&pool, &user_id).await.unwrap();
+        let dream_count = jobs2.iter().filter(|j| j.name == "dream").count();
+        assert_eq!(dream_count, 1, "ensure_system_cron_job should be idempotent");
+
+        // Cleanup
+        sqlx::query("DELETE FROM cron_jobs WHERE user_id = $1").bind(&user_id).execute(&pool).await.ok();
+        sqlx::query("DELETE FROM users WHERE user_id = $1").bind(&user_id).execute(&pool).await.ok();
     }
 
     /// Requires a running Postgres with DATABASE_URL set and the system_config
