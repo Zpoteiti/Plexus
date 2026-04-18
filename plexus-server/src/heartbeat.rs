@@ -412,4 +412,68 @@ mod tests {
             Phase1Result::Run { .. } => panic!("expected Skip"),
         }
     }
+
+    #[tokio::test]
+    #[ignore] // needs DATABASE_URL
+    async fn test_tick_due_users_flow_end_to_end_db() {
+        // Scenario: three users, only two are due. Verify the list_users_due_for_heartbeat
+        // query returns exactly the right subset and that update_last_heartbeat_at
+        // correctly moves a user out of the due set.
+        let url = std::env::var("DATABASE_URL")
+            .expect("set DATABASE_URL to run this test");
+        let pool = crate::db::init_db(&url).await;
+
+        // Fresh users.
+        let ids: Vec<String> = (0..3)
+            .map(|i| format!("e9-{}-{}", i, &uuid::Uuid::new_v4().to_string()[..8]))
+            .collect();
+        for id in &ids {
+            crate::db::users::create_user(&pool, id, &format!("{id}@test.local"), "", false)
+                .await
+                .unwrap();
+        }
+
+        // ids[0] stays NULL. ids[1] is stale (1h ago). ids[2] is fresh.
+        crate::db::users::update_last_heartbeat_at(
+            &pool,
+            &ids[1],
+            chrono::Utc::now() - chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+        crate::db::users::update_last_heartbeat_at(
+            &pool,
+            &ids[2],
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+
+        // 30-min interval → ids[0] + ids[1] are due, ids[2] is not.
+        let due = crate::db::users::list_users_due_for_heartbeat(&pool, 1800, 100)
+            .await
+            .unwrap();
+        assert!(due.contains(&ids[0]));
+        assert!(due.contains(&ids[1]));
+        assert!(!due.contains(&ids[2]));
+
+        // Advance ids[0] to NOW → it should drop out of the due set on next query.
+        crate::db::users::update_last_heartbeat_at(&pool, &ids[0], chrono::Utc::now())
+            .await
+            .unwrap();
+        let due_after = crate::db::users::list_users_due_for_heartbeat(&pool, 1800, 100)
+            .await
+            .unwrap();
+        assert!(!due_after.contains(&ids[0]), "ids[0] should no longer be due after advance");
+        assert!(due_after.contains(&ids[1]), "ids[1] still stale");
+
+        // Cleanup.
+        for id in &ids {
+            sqlx::query("DELETE FROM users WHERE user_id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .ok();
+        }
+    }
 }
