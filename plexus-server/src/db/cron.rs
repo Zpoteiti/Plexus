@@ -6,11 +6,6 @@ use sqlx::PgPool;
 /// rather than repeat the "system" literal.
 pub const SYSTEM_KIND: &str = "system";
 
-/// Value of `cron_jobs.kind` for normal user-created jobs (the default).
-/// Used by Plan D INSERT callers — suppressed until C-5 consumes it.
-#[allow(dead_code)]
-pub const USER_KIND: &str = "user";
-
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct CronJob {
     pub job_id: String,
@@ -235,14 +230,23 @@ pub async fn ensure_system_cron_job(
     }
 
     let job_id = uuid::Uuid::new_v4().to_string();
-    let next_run_at =
-        crate::server_tools::cron_tool::compute_next_cron_pub(cron_expr, timezone).ok();
+    let next_run_at = match crate::server_tools::cron_tool::compute_next_cron_pub(cron_expr, timezone) {
+        Ok(ts) => Some(ts),
+        Err(e) => {
+            tracing::warn!(
+                cron_expr, timezone, error = %e,
+                "ensure_system_cron_job: cron expression parse failed; next_run_at left NULL — job will not fire until fixed"
+            );
+            None
+        }
+    };
 
     sqlx::query(
         "INSERT INTO cron_jobs \
          (job_id, user_id, name, kind, enabled, cron_expr, every_seconds, timezone, \
           message, channel, chat_id, delete_after_run, deliver, next_run_at, run_count) \
-         VALUES ($1, $2, $3, $4, TRUE, $5, NULL, $6, $7, $8, $9, FALSE, $10, $11, 0)",
+         VALUES ($1, $2, $3, $4, TRUE, $5, NULL, $6, $7, $8, $9, FALSE, $10, $11, 0) \
+         ON CONFLICT (user_id, name) WHERE kind = 'system' DO NOTHING",
     )
     .bind(&job_id)
     .bind(user_id)
@@ -257,6 +261,7 @@ pub async fn ensure_system_cron_job(
     .bind(next_run_at)
     .execute(pool)
     .await?;
+    tracing::info!(user_id, name, "created system cron job");
     Ok(())
 }
 
@@ -314,6 +319,13 @@ mod tests {
         let jobs1 = list_by_user(&pool, &user_id).await.unwrap();
         let dream_count_1 = jobs1.iter().filter(|j| j.name == "dream").count();
         assert_eq!(dream_count_1, 1, "first call should create exactly one dream row");
+
+        // First-call invariants: correctly-shaped row
+        let dream = jobs1.iter().find(|j| j.name == "dream").unwrap();
+        assert!(dream.enabled, "newly-created system job should be enabled");
+        assert_eq!(dream.run_count, 0, "fresh row should have run_count=0");
+        assert!(dream.next_run_at.is_some(), "next_run_at should be precomputed");
+        assert_eq!(dream.kind, SYSTEM_KIND);
 
         // Second call is a no-op.
         ensure_system_cron_job(

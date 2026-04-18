@@ -111,6 +111,10 @@ async fn create_tables(pool: &PgPool) {
         "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS last_status TEXT",
         // Migration: add kind to distinguish system-protected jobs from user jobs
         "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'",
+        // Migration: partial unique index to prevent TOCTOU duplicates on system jobs (I-1)
+        "CREATE UNIQUE INDEX IF NOT EXISTS cron_jobs_system_name_uq \
+         ON cron_jobs (user_id, name) \
+         WHERE kind = 'system'",
         // A-17: drop legacy columns / table (idempotent)
         "ALTER TABLE users DROP COLUMN IF EXISTS memory_text",
         "ALTER TABLE users DROP COLUMN IF EXISTS soul",
