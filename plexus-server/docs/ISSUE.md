@@ -5,6 +5,7 @@ Open, deferred, and closed issues for the server crate. Updated by `/wrap-up` at
 ## Open
 <!-- Active issues that need attention this session or next -->
 - [ ] Implement account deletion (spec: docs/superpowers/plans/2026-04-16-account-deletion.md) — 9 tasks, TDD per task; unblocks users leaving the system (2026-04-16)
+- [ ] **SCHEMA.md needs a full docs-sync pass** — the `users` table is missing `timezone` and `last_dream_at` (partially remedied in E-10 for `last_heartbeat_at`); `telegram_configs` table is entirely undocumented; `system_config` known-keys list is missing heartbeat-related keys. Do not try to fix all drift in E-10 — this is a separate docs-hygiene task.
 
 ## Deferred
 <!-- Acknowledged but intentionally postponed — include context and date -->
@@ -16,6 +17,14 @@ Open, deferred, and closed issues for the server crate. Updated by `/wrap-up` at
 - [ ] Admin UI for listing/searching/deleting users (context: admin endpoint `DELETE /api/admin/users/{id}` added by account-deletion plan; full admin panel UX is a separate ticket, 2026-04-16)
 - [ ] Last-admin invariant not enforced (context: ADR-33 — admin can delete their own account with a warn log; if they were the only admin, re-bootstrap requires direct DB access. Low-risk for small deployments, 2026-04-16)
 - [ ] Discord/Telegram bots and per-session agent loops not gracefully shutdown-aware (context: ADR-34 — current graceful shutdown drains HTTP + 5 background loops; individual bots and session agents drop at runtime teardown. Acceptable for M2, 2026-04-16)
+
+### Heartbeat (Plan E)
+
+- **Heartbeat multi-server deduplication** — the in-process tick loop refires per server. Single-node deployments are unaffected; multi-server needs either a leader-election pattern or a pg advisory lock held across the tick iteration. Tracked for post-M2.
+- **Heartbeat session retention / log UI** — `heartbeat:{user_id}` sessions and messages accumulate indefinitely. Spec §9.7 mentions a future "Heartbeat Log" frontend page; no GC policy ships in M2.
+- **Heartbeat Phase 2 error retry** — Phase 2 errors log and exit; `last_heartbeat_at` stays advanced. No retry; next window gets a fresh shot. Acceptable as autonomous-best-effort, but noted for observability work.
+- **Heartbeat observability** — a consistently-skipping Phase 1 (e.g. broken LLM config) is silent beyond `info!` logs. A metrics-based alert would surface regressions; deferred.
+- **Heartbeat delivery-path test coverage** — `publish_final_heartbeat`'s Discord/Telegram precedence paths only have the silent/no-config test (E-6). Covering the notify:true branches requires either a real LLM + real DB fixture or a test-double evaluator abstraction. Deferred.
 
 ## Closed
 <!-- Resolved issues — keep for historical context -->

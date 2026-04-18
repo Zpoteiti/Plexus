@@ -16,6 +16,9 @@ Core user accounts.
 | `is_admin` | `BOOLEAN NOT NULL DEFAULT FALSE` | Admin flag |
 | `soul` | `TEXT` | Custom system prompt (nullable) |
 | `memory_text` | `TEXT NOT NULL DEFAULT ''` | Persistent memory (4K char cap enforced at API level) |
+| `timezone` | `TEXT NOT NULL DEFAULT 'UTC'` | User's local timezone (IANA name). Used by heartbeat phase 1 for time-of-day gating. Added via migration (Plan C). |
+| `last_dream_at` | `TIMESTAMPTZ` (nullable) | Timestamp of the most recent dream pass for this user. NULL means never dreamed. Advanced before Phase 1 runs to prevent refire during LLM latency. See ADR-35. Added via migration (Plan D). |
+| `last_heartbeat_at` | `TIMESTAMPTZ` (nullable) | Timestamp of the most recent heartbeat tick for this user. NULL means the user has never fired; the tick loop treats this as "due immediately". Advanced *before* Phase 1 runs to prevent refire during LLM latency. See ADR-36. Added via migration (Plan E). |
 | `created_at` | `TIMESTAMPTZ DEFAULT NOW()` | |
 
 **Read by:** `auth/mod.rs` (login), `context.rs` (soul, memory), `api.rs` (profile, soul, memory)

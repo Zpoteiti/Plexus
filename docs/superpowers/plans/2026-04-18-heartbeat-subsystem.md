@@ -2373,3 +2373,33 @@ After all 10 tasks land, verify:
 - [ ] This plan file's Post-Plan Adjustments footer is populated with any execution-time deviations.
 
 At that point, Plan E is done. The autonomy subsystems (dream + heartbeat) are both live end-to-end. The remaining M2 work is Plan B (frontend Workspace page) and the M2 closeout backlog (account deletion, admin user-management, graceful-shutdown extension, session-list unread badge).
+
+---
+
+## Post-Plan Adjustments
+
+Deviations between the plan as written and the code that landed during execution.
+
+| Task | Deviation | Commit | Why |
+|---|---|---|---|
+| E-1 | Added explanatory comment on 5ms tolerance in `test_last_heartbeat_at_roundtrip`. | `6811274` | Code review — mirrored the sibling dream test's comment so future readers don't re-derive the Postgres TIMESTAMPTZ precision rationale. |
+| E-4 | `#[allow(dead_code)]` added on `HEARTBEAT_MAX_USERS_PER_TICK` const (defined in E-4, consumed in E-8). | `edd35b1` | Prevented a noisy clippy warning in the intermediate state between E-4 and E-8. Attribute was removed in E-8 when the const gained a caller. |
+| E-5 | `build_heartbeat_system` skips `identity.build_session_section` and renders an inline headless stub; drops the `chat_id` parameter; the now-unused `identity` param keeps `_identity` prefix. | `c81ce1a` | Code review — `build_session_section` always emits "To send media: use the message tool …", which directly contradicts `HEARTBEAT_BANNER`'s "Do not use the message tool" rule. |
+| E-6 | Telegram outbound `chat_id` is `format!("tg:{partner_id}")`, not the raw numeric ID. | `619fc83` | Code review — matches the channel convention (`tg:` prefix is used throughout the codebase for inbound+outbound Telegram chat IDs). Parser is currently forgiving via `strip_prefix("tg:").unwrap_or(id)`, but a future strict parse would silently drop unprefixed IDs. |
+| E-6 | `publish_final_heartbeat` uses `.is_some_and(|id| !id.is_empty())` guards on partner IDs, not the nested `if let Some(...) { if !....is_empty() {...} }` form in the plan. | `5447114` | Stylistic — behaviorally equivalent in Rust 1.70+. |
+| E-7 | Test comment field breakdown corrected (4 String, not 2; removed extra Option<String>). | `fdeda74` | The plan's comment body miscounted struct fields; a future reader auditing the comment against the struct would have been confused. |
+
+## Commits map (Plan E)
+
+| Plan step | Commits |
+|---|---|
+| E-1 | `1d4a5ae` (main), `6811274` (fix: tolerance comment) |
+| E-2 | `7f0c105` |
+| E-3 | `8bc9b25` |
+| E-4 | `edd35b1` |
+| E-5 | `72a795e` (main), `c81ce1a` (fix: headless session section) |
+| E-6 | `5447114` (main), `619fc83` (fix: Telegram tg: prefix) |
+| E-7 | `6379b95` (main), `fdeda74` (fix: comment accuracy) |
+| E-8 | `76c41a9` |
+| E-9 | `e8dbd19` |
+| E-10 | _this commit_ |

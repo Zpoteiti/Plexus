@@ -468,3 +468,43 @@ Each channel (Discord, Telegram, Gateway) constructs a `ChannelIdentity` with se
 **Outcome:** Near-zero LLM cost on idle users (N users × 1 DB query / 2h). On active users, Phase 1 emits structured directives that Phase 2 applies via the restricted 7-file-tool allowlist. Dream never publishes to channels (`deliver=false` → `publish_final` skips, C-2). C-3 + C-4 prevent users from deleting the dream job via tool or HTTP; C-5's `ensure_system_cron_job` guarantees exactly one dream job per user via a partial unique index. Consolidated memory edits happen inline in `{workspace}/MEMORY.md` + `SOUL.md`; new skills land at `{workspace}/skills/{name}/SKILL.md`.
 
 ---
+
+## ADR-36: Heartbeat as in-process tick loop with evaluator-gated external-channel delivery
+
+**Date:** 2026-04-18
+**Status:** Accepted
+**Plan:** E (heartbeat subsystem)
+
+### Context
+
+Plexus needed periodic agent wake-ups driven by a user-owned task list, mirroring nanobot's heartbeat. Unlike dream (which is idempotent memory consolidation on idle users), heartbeat fires on a fixed interval regardless of conversation activity and must be able to notify the user through an external channel.
+
+Three architectural questions resolved here:
+
+1. **Scheduling:** tick loop vs. cron job?
+2. **Delivery:** how does the final agent message reach the user without becoming notification spam?
+3. **Channel selection:** where does the notification go?
+
+### Decision
+
+- **Scheduling:** A dedicated in-process tick loop (`heartbeat::spawn_heartbeat_tick`), not a cron job. Interval is fixed at 60 s (tick cadence), with the actual wake-up cadence tunable via `system_config.heartbeat_interval_seconds` (default 1800 s / 30 min). `0` is a global kill switch.
+- **Delivery:** Shared `evaluator::evaluate_notification` (Plan C) gates every heartbeat output with `purpose = "heartbeat wake-up"`. Default-silence on any evaluator error — the 4 AM guard fires here, not for dream.
+- **Channel selection:** Discord → Telegram → silence. The gateway is explicitly skipped: heartbeat must not interrupt an active browser session.
+
+### Consequences
+
+- **Positive:**
+  - Fixed-cadence semantics are cleaner than cron-style expression matching for "every N minutes".
+  - Tick loop watches `state.shutdown` — graceful shutdown is free.
+  - Reusing the agent loop + `publish_final` keeps the heartbeat path consistent with cron and dream (same compression, crash recovery, tool dispatch).
+- **Negative:**
+  - Server-specific state: a multi-server deployment would refire heartbeat per server unless an advisory lock or node-leader pattern is added later. Plexus is currently single-node; this is tracked as a follow-up.
+  - `last_heartbeat_at` is advanced *before* Phase 1 runs. A Phase 1 crash would skip that user until the next interval elapses. Same trade-off as dream's `last_dream_at` advance; preferred over re-firing after a poisoned Phase 1.
+
+### Alternatives considered
+
+- **Cron-based scheduling** (like dream): would require a per-user system cron job and make the "0 means disabled" knob awkward. Rejected.
+- **Evaluator applies to all turns** (user turns included): would break sync conversations. Evaluator is autonomy-only.
+- **Gateway delivery when no external channel is configured:** would interrupt active browser sessions for stale heartbeat output. Rejected per spec §9.7.
+
+---
