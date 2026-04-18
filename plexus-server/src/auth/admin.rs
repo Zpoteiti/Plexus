@@ -3,9 +3,9 @@
 use crate::auth::extract_claims;
 use crate::config::LlmConfig;
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::{Json, Router};
 use plexus_common::error::{ApiError, ErrorCode};
 use serde::Deserialize;
@@ -218,6 +218,31 @@ async fn put_server_mcp(
     Ok(Json(serde_json::json!({ "mcp_servers": req.mcp_servers })))
 }
 
+// -- Delete User (Admin) --
+
+async fn delete_user_by_admin(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let admin = admin_claims(&headers, &state)?;
+    let user = crate::db::users::find_by_id(&state.db, &user_id)
+        .await
+        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "User not found"))?;
+
+    tracing::info!(
+        admin_id = %admin.sub,
+        target_user_id = %user.user_id,
+        target_email = %user.email,
+        "Admin deleting user"
+    );
+
+    crate::account::delete_user_everywhere(&state, &user.user_id).await;
+
+    Ok(Json(serde_json::json!({ "message": "User deleted" })))
+}
+
 pub fn admin_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
@@ -230,4 +255,5 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         )
         .route("/api/llm-config", get(get_llm_config).put(put_llm_config))
         .route("/api/server-mcp", get(get_server_mcp).put(put_server_mcp))
+        .route("/api/admin/users/{user_id}", delete(delete_user_by_admin))
 }
