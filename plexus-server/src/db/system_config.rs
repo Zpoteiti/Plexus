@@ -37,6 +37,10 @@ pub async fn seed_defaults_if_missing(pool: &PgPool) -> Result<(), sqlx::Error> 
             "default_heartbeat",
             include_str!("../../templates/workspace/HEARTBEAT.md"),
         ),
+        (
+            "heartbeat_phase1_prompt",
+            include_str!("../../templates/prompts/heartbeat_phase1.md"),
+        ),
     ] {
         if get(pool, key).await?.is_none() {
             set(pool, key, default).await?;
