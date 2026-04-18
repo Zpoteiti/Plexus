@@ -191,7 +191,7 @@ async fn publish_final_heartbeat(
             .outbound_tx
             .send(crate::bus::OutboundEvent {
                 channel: crate::channels::CHANNEL_TELEGRAM.to_string(),
-                chat_id: Some(partner_id.to_string()),
+                chat_id: Some(format!("tg:{partner_id}")),
                 session_id: format!("heartbeat:{user_id}"),
                 user_id: user_id.to_string(),
                 content: content.to_string(),
