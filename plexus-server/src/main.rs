@@ -60,6 +60,13 @@ async fn main() {
         .unwrap_or_else(|| {
             include_str!("../templates/prompts/dream_phase2.md").to_string()
         });
+    let heartbeat_phase1_prompt = db::system_config::get(&pool, "heartbeat_phase1_prompt")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            include_str!("../templates/prompts/heartbeat_phase1.md").to_string()
+        });
 
     let (outbound_tx, outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(1000);
 
@@ -78,6 +85,7 @@ async fn main() {
         default_soul: Arc::new(RwLock::new(None)),
         dream_phase1_prompt: Arc::new(RwLock::new(dream_phase1_prompt)),
         dream_phase2_prompt: Arc::new(RwLock::new(dream_phase2_prompt)),
+        heartbeat_phase1_prompt: Arc::new(RwLock::new(heartbeat_phase1_prompt)),
         sessions: Default::default(),
         web_fetch_semaphore: Arc::new(Semaphore::new(
             plexus_common::consts::WEB_FETCH_CONCURRENT_MAX,

@@ -54,6 +54,9 @@ pub struct AppState {
     pub dream_phase1_prompt: Arc<RwLock<String>>,
     pub dream_phase2_prompt: Arc<RwLock<String>>,
 
+    // Heartbeat Phase 1 prompt (admin-overridable via system_config)
+    pub heartbeat_phase1_prompt: Arc<RwLock<String>>,
+
     // Session handles
     pub sessions: DashMap<String, Arc<SessionHandle>>,
 
@@ -211,6 +214,9 @@ impl AppState {
             dream_phase2_prompt: std::sync::Arc::new(RwLock::new(
                 include_str!("../templates/prompts/dream_phase2.md").to_string(),
             )),
+            heartbeat_phase1_prompt: std::sync::Arc::new(RwLock::new(
+                include_str!("../templates/prompts/heartbeat_phase1.md").to_string(),
+            )),
             sessions: Default::default(),
             web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
             http_client: reqwest::Client::new(),
@@ -250,6 +256,9 @@ impl AppState {
             )),
             dream_phase2_prompt: std::sync::Arc::new(RwLock::new(
                 include_str!("../templates/prompts/dream_phase2.md").to_string(),
+            )),
+            heartbeat_phase1_prompt: std::sync::Arc::new(RwLock::new(
+                include_str!("../templates/prompts/heartbeat_phase1.md").to_string(),
             )),
             sessions: Default::default(),
             web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
