@@ -140,6 +140,17 @@ pub async fn list_users_due_for_heartbeat(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
+/// Delete a user and (via ON DELETE CASCADE on every user-referencing FK)
+/// every row in every dependent table. Returns true if a row was actually
+/// deleted, false if the user_id did not exist.
+pub async fn delete_user(pool: &PgPool, user_id: &str) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM users WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +248,122 @@ mod tests {
                 .await
                 .ok();
         }
+    }
+
+    #[tokio::test]
+    #[ignore] // needs DATABASE_URL
+    async fn test_delete_user_cascades_dependent_rows() {
+        let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL to run this test");
+        let pool = crate::db::init_db(&url).await;
+
+        let uid = format!("ad2-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let email = format!("{uid}@test.local");
+        create_user(&pool, &uid, &email, "hash", false)
+            .await
+            .unwrap();
+
+        // Insert rows in every cascaded table.
+        let sess_id = format!("sess-{uid}");
+        sqlx::query("INSERT INTO sessions (session_id, user_id) VALUES ($1, $2)")
+            .bind(&sess_id)
+            .bind(&uid)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let msg_id = format!("msg-{uid}");
+        sqlx::query(
+            "INSERT INTO messages (message_id, session_id, role, content) \
+             VALUES ($1, $2, 'user', 'hi')",
+        )
+        .bind(&msg_id)
+        .bind(&sess_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let tok = format!("tok-{uid}");
+        sqlx::query(
+            "INSERT INTO device_tokens (token, user_id, device_name) VALUES ($1, $2, 'dev')",
+        )
+        .bind(&tok)
+        .bind(&uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // cron_jobs: covers the Plan D system-cron case (dream job per user) too.
+        let cron_id = format!("cron-{uid}");
+        sqlx::query(
+            "INSERT INTO cron_jobs (job_id, user_id, name, kind, message, channel, chat_id) \
+             VALUES ($1, $2, 'test-job', 'user', 'hi', 'gateway', '-')",
+        )
+        .bind(&cron_id)
+        .bind(&uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Delete the user.
+        let deleted = delete_user(&pool, &uid).await.unwrap();
+        assert!(deleted, "delete_user should report success");
+
+        // Assert every dependent row is gone.
+        let remaining_users: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE user_id = $1")
+                .bind(&uid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_users, 0, "user row should be gone");
+
+        let remaining_sessions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = $1")
+                .bind(&uid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_sessions, 0, "sessions should cascade");
+
+        let remaining_messages: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE message_id = $1")
+                .bind(&msg_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining_messages, 0,
+            "messages should cascade via sessions"
+        );
+
+        let remaining_tokens: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM device_tokens WHERE user_id = $1")
+                .bind(&uid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_tokens, 0, "device_tokens should cascade");
+
+        let remaining_cron: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cron_jobs WHERE user_id = $1")
+                .bind(&uid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining_cron, 0, "cron_jobs should cascade");
+    }
+
+    #[tokio::test]
+    #[ignore] // needs DATABASE_URL
+    async fn test_delete_user_returns_false_for_missing() {
+        let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL to run this test");
+        let pool = crate::db::init_db(&url).await;
+
+        let ghost = format!("ad2-ghost-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let deleted = delete_user(&pool, &ghost).await.unwrap();
+        assert!(
+            !deleted,
+            "delete_user should return false for a missing user_id"
+        );
     }
 }
