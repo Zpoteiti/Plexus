@@ -233,14 +233,17 @@ function TreeItem({
   );
 }
 
-function ContentPane({ path, onChanged: _onChanged }: { path: string; onChanged: () => void }) {
+function ContentPane({ path, onChanged }: { path: string; onChanged: () => void }) {
   const [text, setText] = useState<string | null>(null);
+  const [editBuf, setEditBuf] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!path) {
       setText(null);
+      setEditBuf(null);
       return;
     }
     void load();
@@ -269,22 +272,86 @@ function ContentPane({ path, onChanged: _onChanged }: { path: string; onChanged:
     }
   }
 
+  async function save() {
+    if (editBuf === null) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
+        body: editBuf,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      setText(editBuf);
+      setEditBuf(null);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'save failed');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   if (!path) return <div style={{ color: 'var(--muted)' }}>Select a file to view its contents.</div>;
   if (loading) return <div style={{ color: 'var(--muted)' }}>Loading…</div>;
   if (error) return <div style={{ color: '#ef4444' }}>{error}</div>;
 
+  const isEditable = text !== null;
+  const inEditMode = editBuf !== null;
   const isMarkdown = path.toLowerCase().endsWith('.md');
 
   return (
     <div className="flex flex-col gap-4 h-full">
-      <div
-        className="text-xs px-2 py-1 rounded"
-        style={{ background: 'var(--sidebar)', color: 'var(--muted)' }}
-      >
-        {path}
+      <div className="flex items-center gap-2">
+        <div
+          className="text-xs px-2 py-1 rounded flex-1"
+          style={{ background: 'var(--sidebar)', color: 'var(--muted)' }}
+        >
+          {path}
+        </div>
+        {isEditable && !inEditMode && (
+          <button
+            onClick={() => setEditBuf(text)}
+            className="text-xs px-2 py-1 rounded"
+            style={{ border: '1px solid var(--border)' }}
+          >
+            Edit
+          </button>
+        )}
+        {inEditMode && (
+          <>
+            <button
+              onClick={save}
+              disabled={saving}
+              className="text-xs px-2 py-1 rounded"
+              style={{ background: 'var(--accent)', color: 'var(--bg)' }}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              onClick={() => setEditBuf(null)}
+              className="text-xs px-2 py-1 rounded"
+              style={{ border: '1px solid var(--border)' }}
+            >
+              Cancel
+            </button>
+          </>
+        )}
       </div>
       <div className="flex-1 overflow-y-auto">
-        {isMarkdown && text !== null ? (
+        {inEditMode ? (
+          <textarea
+            value={editBuf ?? ''}
+            onChange={(e) => setEditBuf(e.target.value)}
+            className="w-full h-full text-sm font-mono p-4"
+            style={{
+              background: 'var(--card)',
+              color: 'var(--text)',
+              border: '1px solid var(--border)',
+            }}
+          />
+        ) : isMarkdown && text !== null ? (
           <div className="prose prose-invert max-w-none">
             <ReactMarkdown>{text}</ReactMarkdown>
           </div>
