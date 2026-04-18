@@ -48,7 +48,7 @@ async fn create_tables(pool: &PgPool) {
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ",
         "CREATE TABLE IF NOT EXISTS device_tokens (
             token          TEXT PRIMARY KEY,
-            user_id        TEXT NOT NULL REFERENCES users(user_id),
+            user_id        TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
             device_name    TEXT NOT NULL,
             fs_policy      JSONB NOT NULL DEFAULT '{\"mode\":\"sandbox\"}',
             mcp_config     JSONB NOT NULL DEFAULT '[]',
@@ -60,12 +60,12 @@ async fn create_tables(pool: &PgPool) {
         )",
         "CREATE TABLE IF NOT EXISTS sessions (
             session_id     TEXT PRIMARY KEY,
-            user_id        TEXT NOT NULL REFERENCES users(user_id),
+            user_id        TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
             created_at     TIMESTAMPTZ DEFAULT NOW()
         )",
         "CREATE TABLE IF NOT EXISTS messages (
             message_id     TEXT PRIMARY KEY,
-            session_id     TEXT NOT NULL REFERENCES sessions(session_id),
+            session_id     TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
             role           TEXT NOT NULL,
             content        TEXT NOT NULL,
             tool_call_id   TEXT,
@@ -76,7 +76,7 @@ async fn create_tables(pool: &PgPool) {
         )",
         "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at)",
         "CREATE TABLE IF NOT EXISTS discord_configs (
-            user_id           TEXT PRIMARY KEY REFERENCES users(user_id),
+            user_id           TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
             bot_token         TEXT NOT NULL,
             bot_user_id       TEXT,
             partner_discord_id TEXT,
@@ -92,7 +92,7 @@ async fn create_tables(pool: &PgPool) {
         )",
         "CREATE TABLE IF NOT EXISTS cron_jobs (
             job_id          TEXT PRIMARY KEY,
-            user_id         TEXT NOT NULL REFERENCES users(user_id),
+            user_id         TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
             name            TEXT NOT NULL,
             kind            TEXT NOT NULL DEFAULT 'user' CHECK (kind IN ('user', 'system')),
             enabled         BOOLEAN DEFAULT TRUE,
@@ -124,7 +124,7 @@ async fn create_tables(pool: &PgPool) {
         "ALTER TABLE users DROP COLUMN IF EXISTS soul",
         "DROP TABLE IF EXISTS skills",
         "CREATE TABLE IF NOT EXISTS telegram_configs (
-            user_id           TEXT PRIMARY KEY REFERENCES users(user_id),
+            user_id           TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
             bot_token         TEXT NOT NULL,
             partner_telegram_id TEXT,
             enabled           BOOLEAN DEFAULT TRUE,
@@ -140,5 +140,63 @@ async fn create_tables(pool: &PgPool) {
             .execute(pool)
             .await
             .unwrap_or_else(|e| panic!("Failed to execute SQL: {e}\n{sql}"));
+    }
+
+    // Migration: add ON DELETE CASCADE to existing user-referencing FKs.
+    // Idempotent — re-dropping and re-adding with the same target is safe;
+    // on fresh DBs the new CREATE TABLE CASCADE form means this migration
+    // drops and re-adds constraints that are already correct, which Postgres
+    // handles without drama.
+    let cascade_migrations = [
+        (
+            "device_tokens",
+            "device_tokens_user_id_fkey",
+            "user_id",
+            "users(user_id)",
+        ),
+        (
+            "sessions",
+            "sessions_user_id_fkey",
+            "user_id",
+            "users(user_id)",
+        ),
+        (
+            "messages",
+            "messages_session_id_fkey",
+            "session_id",
+            "sessions(session_id)",
+        ),
+        (
+            "discord_configs",
+            "discord_configs_user_id_fkey",
+            "user_id",
+            "users(user_id)",
+        ),
+        (
+            "cron_jobs",
+            "cron_jobs_user_id_fkey",
+            "user_id",
+            "users(user_id)",
+        ),
+        (
+            "telegram_configs",
+            "telegram_configs_user_id_fkey",
+            "user_id",
+            "users(user_id)",
+        ),
+    ];
+    // Note: skills is gone (Plan A-17 DROP TABLE); no cascade needed.
+
+    for (table, constraint, col, refs) in cascade_migrations {
+        let sql = format!(
+            "DO $$ BEGIN \
+               ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {constraint}; \
+               ALTER TABLE {table} ADD CONSTRAINT {constraint} \
+                 FOREIGN KEY ({col}) REFERENCES {refs} ON DELETE CASCADE; \
+             END $$;"
+        );
+        if let Err(e) = sqlx::query(&sql).execute(pool).await {
+            tracing::warn!("Cascade migration for {table}: {e}");
+        }
     }
 }
