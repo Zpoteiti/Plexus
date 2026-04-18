@@ -5,7 +5,6 @@ Open, deferred, and closed issues for the server crate. Updated by `/wrap-up` at
 ## Open
 <!-- Active issues that need attention this session or next -->
 - [ ] Implement account deletion (spec: docs/superpowers/plans/2026-04-16-account-deletion.md) — 9 tasks, TDD per task; unblocks users leaving the system (2026-04-16)
-- [ ] **SCHEMA.md needs a full docs-sync pass** — the `users` table is missing `timezone` and `last_dream_at` (partially remedied in E-10 for `last_heartbeat_at`); `telegram_configs` table is entirely undocumented; `system_config` known-keys list is missing heartbeat-related keys. Do not try to fix all drift in E-10 — this is a separate docs-hygiene task.
 
 ## Deferred
 <!-- Acknowledged but intentionally postponed — include context and date -->
@@ -40,6 +39,7 @@ Open, deferred, and closed issues for the server crate. Updated by `/wrap-up` at
 
 ## Closed
 <!-- Resolved issues — keep for historical context -->
+- [x] **SCHEMA.md full docs-sync pass** — drifted over Plans A/C/D/E + account deletion. Fixed: users table (added display_name, timezone, last_dream_at, last_heartbeat_at; removed stale soul/memory_text); device_tokens (added workspace_path, shell_timeout, ssrf_whitelist); discord_configs (owner_discord_id → partner_discord_id; corrected nullability); cron_jobs (added kind, deliver, claimed_at, last_status; partial unique index); telegram_configs added (was entirely missing); skills table removed (dropped by A-17); ON DELETE CASCADE noted on all user-referencing FKs (AD-1); system_config known-keys expanded with default_memory, default_heartbeat, heartbeat_phase1_prompt, heartbeat_interval_seconds, dream_enabled, workspace_quota_bytes, dream_phase1_prompt, dream_phase2_prompt. (commit: pending, 2026-04-18)
 - [x] Telegram dispatcher `shutdown_token().shutdown()` returned a Future that was never awaited (resolved: now matched and awaited in channels/telegram.rs:113, commit e56780c, 2026-04-15)
 - [x] `InboundEvent.sender_id` was set by every channel adapter but never read (resolved: deleted; `ChannelIdentity.sender_id` is the one source of truth, commit e56780c, 2026-04-15)
 - [x] `InboundEvent.metadata`, `ChannelIdentity.partner_name`, `ChannelIdentity.partner_id` all populated but never consumed (resolved: deleted; cross-channel addressing uses a DB-query path in `context::load_channel_snapshot` rather than these fields, commit 426c5b5, 2026-04-16)
