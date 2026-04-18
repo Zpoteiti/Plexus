@@ -50,6 +50,10 @@ pub struct AppState {
     // Default soul cache
     pub default_soul: Arc<RwLock<Option<String>>>,
 
+    // Dream prompt templates (admin-overridable via system_config)
+    pub dream_phase1_prompt: Arc<RwLock<String>>,
+    pub dream_phase2_prompt: Arc<RwLock<String>>,
+
     // Session handles
     pub sessions: DashMap<String, Arc<SessionHandle>>,
 
@@ -201,6 +205,12 @@ impl AppState {
             rate_limiter: Default::default(),
             rate_limit_config: std::sync::Arc::new(RwLock::new(0)),
             default_soul: std::sync::Arc::new(RwLock::new(None)),
+            dream_phase1_prompt: std::sync::Arc::new(RwLock::new(
+                include_str!("../templates/prompts/dream_phase1.md").to_string(),
+            )),
+            dream_phase2_prompt: std::sync::Arc::new(RwLock::new(
+                include_str!("../templates/prompts/dream_phase2.md").to_string(),
+            )),
             sessions: Default::default(),
             web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
             http_client: reqwest::Client::new(),
@@ -235,6 +245,12 @@ impl AppState {
             rate_limiter: Default::default(),
             rate_limit_config: std::sync::Arc::new(RwLock::new(0)),
             default_soul: std::sync::Arc::new(RwLock::new(None)),
+            dream_phase1_prompt: std::sync::Arc::new(RwLock::new(
+                include_str!("../templates/prompts/dream_phase1.md").to_string(),
+            )),
+            dream_phase2_prompt: std::sync::Arc::new(RwLock::new(
+                include_str!("../templates/prompts/dream_phase2.md").to_string(),
+            )),
             sessions: Default::default(),
             web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
             http_client: reqwest::Client::new(),
