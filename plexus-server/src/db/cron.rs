@@ -1,6 +1,16 @@
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
+/// Value of `cron_jobs.kind` for server-managed jobs (e.g., Plan D's "dream").
+/// See C-3, C-4, and C-5 — all three sites compare against this const
+/// rather than repeat the "system" literal.
+pub const SYSTEM_KIND: &str = "system";
+
+/// Value of `cron_jobs.kind` for normal user-created jobs (the default).
+/// Used by Plan D INSERT callers — suppressed until C-5 consumes it.
+#[allow(dead_code)]
+pub const USER_KIND: &str = "user";
+
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
 pub struct CronJob {
     pub job_id: String,

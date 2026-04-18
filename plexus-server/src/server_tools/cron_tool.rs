@@ -179,7 +179,7 @@ async fn remove_job(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32,
     }
 
     // Kind guard: system jobs are server-managed and must not be removed by users.
-    if job.kind == "system" {
+    if job.kind == crate::db::cron::SYSTEM_KIND {
         return (
             1,
             "Cannot remove system cron jobs (these are managed by the server).".into(),
