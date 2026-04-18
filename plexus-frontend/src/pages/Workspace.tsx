@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ChangeEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, ChevronRight, ChevronDown, File, Folder } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
@@ -74,6 +74,7 @@ export default function Workspace() {
           <ContentPane path={selectedPath} onChanged={() => void refresh()} />
         </section>
       </main>
+      <UploadDropZone onUploaded={() => void refresh()} />
     </div>
   );
 }
@@ -432,5 +433,93 @@ function ContentPane({ path, onChanged }: { path: string; onChanged: () => void 
         )}
       </div>
     </div>
+  );
+}
+
+function UploadDropZone({ onUploaded }: { onUploaded: () => void }) {
+  const [dragActive, setDragActive] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const enter = (e: DragEvent) => { e.preventDefault(); setDragActive(true); };
+    const over = (e: DragEvent) => { e.preventDefault(); };
+    const leave = (e: DragEvent) => {
+      // Only reset when leaving the window entirely.
+      if ((e.target as HTMLElement).nodeName === 'HTML') setDragActive(false);
+    };
+    const drop = (e: DragEvent) => {
+      e.preventDefault();
+      setDragActive(false);
+      if (e.dataTransfer?.files) void uploadFiles(Array.from(e.dataTransfer.files));
+    };
+    window.addEventListener('dragenter', enter);
+    window.addEventListener('dragover', over);
+    window.addEventListener('dragleave', leave);
+    window.addEventListener('drop', drop);
+    return () => {
+      window.removeEventListener('dragenter', enter);
+      window.removeEventListener('dragover', over);
+      window.removeEventListener('dragleave', leave);
+      window.removeEventListener('drop', drop);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function uploadFiles(files: File[]) {
+    if (files.length === 0) return;
+    setUploading(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      for (const f of files) form.append('files', f, f.name);
+      const res = await fetch('/api/workspace/upload', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
+        body: form,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      onUploaded();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'upload failed');
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function onPick(e: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    void uploadFiles(files);
+    e.target.value = '';
+  }
+
+  return (
+    <>
+      <div
+        className="border-t px-4 py-2 flex items-center gap-2"
+        style={{ borderColor: 'var(--border)' }}
+      >
+        <label
+          className="text-xs px-2 py-1 rounded cursor-pointer"
+          style={{ border: '1px solid var(--border)' }}
+        >
+          {uploading ? 'Uploading…' : 'Upload'}
+          <input type="file" multiple onChange={onPick} className="hidden" />
+        </label>
+        <span className="text-xs" style={{ color: 'var(--muted)' }}>
+          or drop files anywhere on this page
+        </span>
+        {error && <span className="text-xs" style={{ color: '#ef4444' }}>{error}</span>}
+      </div>
+      {dragActive && (
+        <div
+          className="fixed inset-0 pointer-events-none z-50"
+          style={{
+            border: '3px dashed var(--accent)',
+            background: 'rgba(57, 255, 20, 0.1)',
+          }}
+        />
+      )}
+    </>
   );
 }
