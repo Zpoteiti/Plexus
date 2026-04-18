@@ -7,6 +7,7 @@ mod config;
 mod context;
 mod cron;
 mod db;
+pub mod evaluator;
 mod file_store;
 mod memory;
 mod providers;

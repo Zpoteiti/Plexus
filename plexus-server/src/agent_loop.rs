@@ -208,7 +208,7 @@ async fn handle_event(
             Some(tool_schemas.clone())
         };
 
-        let response = openai::call_llm(&state.http_client, &config, messages, tools).await;
+        let response = openai::call_llm(&state.http_client, &config, messages, tools, None).await;
 
         match response {
             Ok(LlmResponse::Text { content, vision_stripped: stripped }) => {

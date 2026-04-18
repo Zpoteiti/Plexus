@@ -202,11 +202,12 @@ pub async fn call_llm(
     config: &LlmConfig,
     messages: Vec<ChatMessage>,
     tools: Option<Vec<Value>>,
+    tool_choice: Option<String>,
 ) -> Result<LlmResponse, String> {
     let url = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
 
     // First attempt: original messages (may contain images).
-    let first = attempt_chat(client, &url, config, &messages, tools.as_ref()).await;
+    let first = attempt_chat(client, &url, config, &messages, tools.as_ref(), tool_choice.as_deref()).await;
 
     match first {
         Ok(resp) => Ok(resp),
@@ -218,7 +219,7 @@ pub async fn call_llm(
                 return Err(msg);
             }
             warn!("LLM non-transient error with images; retrying stripped");
-            match attempt_chat(client, &url, config, &stripped, tools.as_ref()).await {
+            match attempt_chat(client, &url, config, &stripped, tools.as_ref(), tool_choice.as_deref()).await {
                 Ok(mut r) => {
                     // Flip vision_stripped on successful retry.
                     match &mut r {
@@ -244,8 +245,11 @@ async fn attempt_chat(
     config: &LlmConfig,
     messages: &[ChatMessage],
     tools: Option<&Vec<Value>>,
+    tool_choice: Option<&str>,
 ) -> Result<LlmResponse, CallError> {
-    let tool_choice = if tools.is_some_and(|t| !t.is_empty()) {
+    let tool_choice = if let Some(tc) = tool_choice {
+        Some(tc.to_string())
+    } else if tools.is_some_and(|t| !t.is_empty()) {
         Some("auto".to_string())
     } else {
         None
