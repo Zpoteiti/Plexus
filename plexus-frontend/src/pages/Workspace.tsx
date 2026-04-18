@@ -4,6 +4,7 @@ import { ArrowLeft, ChevronRight, ChevronDown, File, Folder } from 'lucide-react
 import ReactMarkdown from 'react-markdown';
 import { api } from '../lib/api';
 import type { WorkspaceFile, WorkspaceQuota } from '../lib/types';
+import { ConfirmModal } from '../components/ConfirmModal';
 
 export default function Workspace() {
   const navigate = useNavigate();
@@ -71,7 +72,13 @@ export default function Workspace() {
         </aside>
 
         <section className="flex-1 overflow-y-auto p-4">
-          <ContentPane path={selectedPath} onChanged={() => void refresh()} />
+          <ContentPane
+            path={selectedPath}
+            onChanged={(info) => {
+              void refresh();
+              if (info?.deleted) setParams({});
+            }}
+          />
         </section>
       </main>
       <UploadDropZone onUploaded={() => void refresh()} />
@@ -234,7 +241,13 @@ function TreeItem({
   );
 }
 
-function ContentPane({ path, onChanged }: { path: string; onChanged: () => void }) {
+function ContentPane({
+  path,
+  onChanged,
+}: {
+  path: string;
+  onChanged: (info?: { deleted?: boolean }) => void;
+}) {
   const [text, setText] = useState<string | null>(null);
   const [bytes, setBytes] = useState<ArrayBuffer | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
@@ -243,6 +256,8 @@ function ContentPane({ path, onChanged }: { path: string; onChanged: () => void 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!path) {
@@ -321,6 +336,24 @@ function ContentPane({ path, onChanged }: { path: string; onChanged: () => void 
     }
   }
 
+  async function doDelete() {
+    setDeleting(true);
+    try {
+      const url = `/api/workspace/file?path=${encodeURIComponent(path)}&recursive=true`;
+      const res = await fetch(url, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      setConfirmDelete(false);
+      onChanged({ deleted: true });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'delete failed');
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   if (!path) return <div style={{ color: 'var(--muted)' }}>Select a file to view its contents.</div>;
   if (loading) return <div style={{ color: 'var(--muted)' }}>Loading…</div>;
   if (error) return <div style={{ color: '#ef4444' }}>{error}</div>;
@@ -346,6 +379,15 @@ function ContentPane({ path, onChanged }: { path: string; onChanged: () => void 
             style={{ border: '1px solid var(--border)' }}
           >
             Edit
+          </button>
+        )}
+        {!inEditMode && (
+          <button
+            onClick={() => setConfirmDelete(true)}
+            className="text-xs px-2 py-1 rounded"
+            style={{ border: '1px solid var(--border)', color: '#ef4444' }}
+          >
+            Delete
           </button>
         )}
         {inEditMode && (
@@ -432,6 +474,15 @@ function ContentPane({ path, onChanged }: { path: string; onChanged: () => void 
           </div>
         )}
       </div>
+      <ConfirmModal
+        open={confirmDelete}
+        title={`Delete ${path}?`}
+        message="This cannot be undone. If this is a directory, its contents will be removed recursively."
+        confirmLabel={deleting ? 'Deleting…' : 'Delete'}
+        destructive
+        onConfirm={doDelete}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }
