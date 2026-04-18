@@ -2839,3 +2839,43 @@ After all 16 tasks land, verify:
 - [ ] This plan file's Post-Plan Adjustments footer is populated with any execution-time deviations.
 
 At that point, Plan B is done and the A → C → D → E → B arc of the workspace/autonomy rewrite is complete. What remains is the M2 closeout backlog: account deletion, admin user-management UI, graceful-shutdown extension, session-list unread badge.
+
+---
+
+## Post-Plan Adjustments
+
+Deviations between the plan as written and the code that landed during execution.
+
+| Task | Deviation | Commit | Why |
+|---|---|---|---|
+| B-1 | Dropped the `total_bytes()` alias; `workspace_quota_handler` is sync (no await points). | `924511a` | Code review — `quota_bytes()` already existed; adding an alias was needless duplication. Handler had no I/O; `async` was misleading. |
+| B-2 | `warn!` added on symlink-escape branch. | `68ac422` | Code review — a dropped symlink entry is a security signal, not just a benign filesystem condition. Warn-level log keeps operator visibility without aborting the walk. |
+| B-2 | `cargo fmt -p plexus-server` reformatted 31 files (not just the 3 B-2 files). | `68ac422` | One-time sweep to bring the whole crate into fmt compliance. Future commits stay minimal. |
+| B-3 | Auth pattern uses existing `claims()` helper + `HeaderMap`, not an axum `Claims` extractor. `WorkspaceError` was `Io(std::io::Error)` with `#[from]`, not `Io(String)`. Error body type is `ApiError`, not the plan's placeholder `ErrorBody`. | `bf49889` | Mirrored the actual api.rs patterns. Plan text was written before inspecting the codebase at this depth. |
+| B-4 | Bridged `QuotaError` into `WorkspaceError::Io(Other, "quota: …")` with the HTTP wrapper string-matching on "quota" to route to 422. | `356575d` | `WorkspaceError` doesn't have a `Quota` variant yet. String-match is pragmatic for M2; proper `Quota(QuotaError)` variant tracked in ISSUE.md. |
+| B-4 | Used `ErrorCode::ValidationFailed` (not `BadRequest` which doesn't exist). | `356575d` | Matched actual plexus-common ErrorCode variants. |
+| B-6 | `react-markdown` was already in `package.json` from an earlier install; `pnpm add` just reconciled the lockfile. | `2ac5bbd` | Harmless — dep is declared and installed. No diff on package.json. |
+| B-8 | `tree` state renamed to `_tree` (underscore prefix) to satisfy `noUnusedLocals` until B-9 consumes it. Restored in B-9. | `7cb99da` | TypeScript strict mode forbids unused locals. Temporary `_`-prefix is the idiomatic workaround. |
+| B-12 | The non-image binary "Download" action uses a JS-driven blob URL + synthesized `<a>` click, not `<a href="/api/workspace/file?path=…">`. | `5b9f4d3` | Browser-initiated `<a href>` GETs don't attach the JWT, so the raw API URL approach would fail authentication. The JS-driven path uses the already-fetched `bytes` state. |
+| B-14 | `onChanged` prop signature extended from `() => void` to `(info?: { deleted?: boolean }) => void`. | `34ba406` | Needed to distinguish save (keep selection) from delete (clear selection). Simple extension vs. a second callback. |
+
+## Commits map (Plan B)
+
+| Plan step | Commits |
+|---|---|
+| B-1 | `ada4779` (main), `924511a` (fix: drop total_bytes alias, sync handler) |
+| B-2 | `81489c2` (main), `68ac422` (fix: fmt + warn on symlink escape) |
+| B-3 | `bf49889` |
+| B-4 | `356575d` |
+| B-5 | `973d3cd` |
+| B-6 | `4a08a65` |
+| B-7 | `35373a1` |
+| B-8 | `7cb99da` |
+| B-9 | `ef13474` |
+| B-10 | `2ac5bbd` |
+| B-11 | `37eea7b` |
+| B-12 | `5b9f4d3` |
+| B-13 | `4c1d310` |
+| B-14 | `34ba406` |
+| B-15 | `e31598d` |
+| B-16 | _this commit_ |

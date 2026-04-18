@@ -554,3 +554,51 @@ Client device WebSocket connection. Not JWT-authenticated -- uses device token h
 - File transfer: `FileUploadResponse`, `FileDownloadResponse`
 
 Heartbeat interval: 15s (`HEARTBEAT_INTERVAL_SEC` constant). Timeout: 4 missed heartbeats = 60s (built-in constant, not configurable).
+
+---
+
+## Workspace API
+
+All endpoints require a valid user JWT. Paths in the `path` query param are relative to `{WORKSPACE_ROOT}/{user_id}/`. Traversal attempts return 403 Forbidden. Quota overflows return 413 Payload Too Large (or 422 ValidationFailed, per current ApiError mapping).
+
+### GET /api/workspace/quota
+
+Returns the user's current workspace usage and total quota.
+
+**Response:** `{ "used_bytes": number, "total_bytes": number }` (200 OK)
+
+### GET /api/workspace/tree
+
+Returns a flat list of the user's workspace entries. Directories first, then alphabetical.
+
+**Response:** `[{ "path": string, "is_dir": bool, "size_bytes": number, "modified_at": "RFC3339" }]` (200 OK)
+
+### GET /api/workspace/file?path={path}
+
+Streams the file's bytes. Content-Type sniffed from extension.
+
+**Response:** raw bytes (200 OK), or 403/404 on error.
+
+### PUT /api/workspace/file?path={path}
+
+Body is raw bytes. Parent dirs are created as needed. Quota-checked.
+
+**Response:** 204 No Content on success; 403/422/500 on failure.
+
+### DELETE /api/workspace/file?path={path}&recursive={bool}
+
+Deletes the file (or directory if `recursive=true`).
+
+**Response:** 204 No Content; 422 if directory without recursive; 403 on traversal.
+
+### POST /api/workspace/upload (multipart/form-data)
+
+Accepts one or more files under any form-field name. Each is saved at `uploads/{date}-{hash}-{filename}`.
+
+**Response:** `[{ "path": string, "size_bytes": number }]` — failed files appear with `path="ERROR:{filename}"` + `size_bytes: 0`.
+
+### GET /api/workspace/skills
+
+Returns the user's skills as parsed frontmatter. Reuses the server's SkillsCache.
+
+**Response:** `[{ "name": string, "description": string, "always_on": bool }]`.

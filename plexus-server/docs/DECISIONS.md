@@ -508,3 +508,53 @@ Three architectural questions resolved here:
 - **Gateway delivery when no external channel is configured:** would interrupt active browser sessions for stale heartbeat output. Rejected per spec §9.7.
 
 ---
+
+## ADR-37: Workspace REST API + frontend file manager
+
+**Date:** 2026-04-18
+**Status:** Accepted
+**Plan:** B (workspace frontend)
+
+### Context
+
+Plan A moved per-user state (soul, memory, skills, uploads) into a single `{WORKSPACE_ROOT}/{user_id}/` tree. The agent's server tools read and write this tree through `resolve_user_path` + `QuotaCache`. Plan A's cutover left the Settings page broken: its Soul + Memory textareas hit `PATCH /api/user/soul` / `PATCH /api/user/memory` which return 410 Gone, and the Skills tab's `/api/skills` endpoints also return 410. Users had no way to see or edit their workspace until Plan B landed.
+
+### Decision
+
+Add 7 REST endpoints under `/api/workspace/*` and one frontend page at `/settings/workspace`:
+
+- `GET /api/workspace/quota` — `{used_bytes, total_bytes}`.
+- `GET /api/workspace/tree` — flat sorted list of `{path, is_dir, size_bytes, modified_at}` under the user's root. Symlink escape rejected via canonicalized prefix check.
+- `GET /api/workspace/file?path=…` — stream bytes with Content-Type sniff.
+- `PUT /api/workspace/file?path=…` — write raw body bytes with quota enforcement.
+- `DELETE /api/workspace/file?path=…&recursive=bool` — delete with recursive-directory gate.
+- `POST /api/workspace/upload` — multipart upload; files land under `uploads/{YYYY-MM-DD}-{hash}-{filename}` matching the channel-adapter convention.
+- `GET /api/workspace/skills` — parsed SKILL.md frontmatter (reuses Plan A's SkillsCache).
+
+All path validation flows through `workspace::resolve_user_path` / `resolve_user_path_for_create` — the same sandbox the agent uses. Quota checks flow through `state.quota.check_and_reserve_upload`. No bypass path; no special-case frontend trust.
+
+The frontend page is a single-file React component (`pages/Workspace.tsx`) with a tree pane (client-side tree-built from the flat server response), a content pane that dispatches on MIME (markdown via `react-markdown`, text as `<pre>`, images inline, binaries as download link), a quota bar with amber/red thresholds, drag-and-drop multi-file upload, and a quick-access sidebar for SOUL/MEMORY/HEARTBEAT.
+
+The existing Settings page loses its Soul + Memory textareas and rewires the Skills tab from the dropped `/api/skills` to the new `/api/workspace/skills`. All 410-returning endpoints on the user flow are retired.
+
+### Consequences
+
+- **Positive:**
+  - Single sandbox enforcement: agent tools and frontend share `resolve_user_path` — no second path-validation code to get wrong.
+  - Quota state is global: the frontend quota bar reflects live state from the same counter the agent's writes touch.
+  - Deep-linkable via `?path=…` — the Skills tab can link directly to `skills/{name}/SKILL.md`.
+  - `react-markdown` is a single ~50 KB dep with no peer conflicts; the editor is a plain textarea so no code-editor dep is pulled in.
+- **Negative:**
+  - No rename endpoint in v1 (spec §7.2 listed rename as a UI action, but §7.3's endpoint list didn't include it). Users must delete + re-upload. Tracked in ISSUE.md.
+  - Frontend has no automated test harness — all verification is manual. Noted in ISSUE.md as a post-M2 effort.
+  - The upload "ERROR:{filename}" sentinel for failed partial uploads is a string-in-path hack; a cleaner shape would be `{path: string, size_bytes: number, error?: string}` but the current shape keeps the response monomorphic.
+  - `QuotaError` is bridged to `WorkspaceError::Io` via a string-prefix ("quota: ...") so the HTTP wrapper can string-match to route quota overages to ValidationFailed (422). A proper `WorkspaceError::Quota(QuotaError)` variant is cleaner but deferred.
+  - `GET /api/workspace/file` uses `tokio::fs::read` (loads entire file into memory). For large files near the 4 GB per-upload cap, this is an OOM risk. Streaming body should be added before this endpoint sees large-file traffic.
+
+### Alternatives considered
+
+- **Client-side rename via `upload-to-new + delete-old`:** rejected for this plan — silly for large binaries, and the spec doesn't require it. Re-add as an endpoint if users ask.
+- **Separate frontend route per file type** (e.g., `/settings/memory`, `/settings/soul`): rejected — the single Workspace page is simpler and reflects the underlying "it's all just files" model.
+- **TanStack Query for server-state caching:** overkill for a page with ~5 fetches. Local `useState` + manual refresh is fine.
+
+---

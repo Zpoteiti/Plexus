@@ -18,6 +18,18 @@ Open, deferred, and closed issues for the server crate. Updated by `/wrap-up` at
 - [ ] Last-admin invariant not enforced (context: ADR-33 — admin can delete their own account with a warn log; if they were the only admin, re-bootstrap requires direct DB access. Low-risk for small deployments, 2026-04-16)
 - [ ] Discord/Telegram bots and per-session agent loops not gracefully shutdown-aware (context: ADR-34 — current graceful shutdown drains HTTP + 5 background loops; individual bots and session agents drop at runtime teardown. Acceptable for M2, 2026-04-16)
 
+### Workspace Frontend (Plan B)
+
+- **File rename endpoint** — spec §7.2 lists rename as a UI action, but §7.3's endpoint list omitted it. v1 requires delete + re-upload. Re-add a `POST /api/workspace/rename` with `{from, to}` if users ask.
+- **Frontend test harness** — `plexus-frontend` has no Vitest/Jest/RTL/Playwright setup. Plan B's verification is manual smoke + visual review. Wiring up Vitest + React Testing Library is a post-M2 effort.
+- **Bulk file operations** — multi-file select, bulk delete, bulk move. Single-file ops only in v1.
+- **File-type coverage for inline preview** — SVG, HEIC, PDF, and video files currently fall through to the binary-metadata branch. Extending inline preview requires type-specific renderers (`<object>` for PDF, `<video>` for video, etc.).
+- **Upload "ERROR:" sentinel** — the partial-success response shape uses a string prefix to indicate per-file failure. A cleaner shape would be `{path, size_bytes, error?: string}`. Both server and frontend would need to move together.
+- **Server-pushed tree invalidation** — the tree refetches on every mutation initiated by the user in this tab, but an agent write (e.g., dream creating a new skill) doesn't push an invalidation. A WebSocket event or SSE push would let the tree auto-refresh while the page is open.
+- **`WorkspaceError::Quota(QuotaError)` variant** — B-4 bridged QuotaError via `Io(Other, "quota: …")` string-prefix, with the HTTP wrapper string-matching on "quota" to route to 422. Add a proper enum variant + explicit match arm.
+- **`GET /api/workspace/file` streaming** — B-3 uses `tokio::fs::read` (entire file into memory). For files near the 4 GB per-upload cap, serving via `Body::from(Vec<u8>)` is an OOM risk. Replace with `tokio::fs::File` + streaming body before this endpoint sees large-file traffic.
+- **`X-Content-Type-Options: nosniff`** — B-3 omits this defense-in-depth header that `download_file` sets. Add for consistency.
+
 ### Heartbeat (Plan E)
 
 - **Heartbeat multi-server deduplication** — the in-process tick loop refires per server. Single-node deployments are unaffected; multi-server needs either a leader-election pattern or a pg advisory lock held across the tick iteration. Tracked for post-M2.
