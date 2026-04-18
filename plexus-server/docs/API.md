@@ -381,10 +381,14 @@ Enable/disable or change the message.
 
 ### DELETE /api/cron-jobs/{job_id}  (auth required)
 
-```json
-// Response 200
-{ "message": "Cron job deleted" }
 ```
+// Response 204 No Content  (empty body)
+
+// Response 404 Not Found  — job does not exist, or belongs to a different user
+// Response 403 Forbidden  — job has kind='system' (managed by the server; not user-deletable)
+```
+
+System-kind cron jobs (e.g. Plan D's per-user "dream" job) cannot be deleted through this endpoint or via the `cron` server tool; both paths return the same refusal shape. Ownership mismatch returns 404 rather than 403 to avoid leaking the existence of other users' job IDs.
 
 ---
 
