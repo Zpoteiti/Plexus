@@ -17,6 +17,13 @@ pub(crate) struct PublishFinalParams {
     pub session_id: String,
     pub user_id: String,
     pub content: String,
+    /// Dispatch discriminant. Drives which publish branch runs:
+    /// - UserTurn  → publish to `channel`/`chat_id` unconditionally.
+    /// - Cron      → existing evaluator-gated-by-deliver branch.
+    /// - Heartbeat → evaluator + external-channel precedence
+    ///   (Discord → Telegram → silence; never gateway).
+    /// - Dream     → no publish (dream cron rows have deliver=false).
+    pub kind: crate::bus::EventKind,
     /// `None` for user turns; `Some(job_id)` for cron-driven turns.
     pub cron_job_id: Option<String>,
     /// Only consulted when `cron_job_id` is `Some(_)`. When the caller has
@@ -28,13 +35,12 @@ pub(crate) struct PublishFinalParams {
 
 /// Decide whether to publish the final assistant message, and if so, send it.
 ///
-/// - **User turn** (`cron_job_id == None`): publish unconditionally.
-/// - **Cron turn, `deliver == false`**: skip publish (pure side-effect cron).
-/// - **Cron turn, `deliver == true`**: run the evaluator; publish only when
-///   `should_notify`. Silence on evaluator error (default-silent).
-///
-/// Plan E (heartbeat) will add a third branch that also calls the evaluator
-/// with a different `purpose` label.
+/// Dispatches on `params.kind`:
+/// - **UserTurn**: publish to `channel`/`chat_id` unconditionally.
+/// - **Cron**: existing evaluator-gated-by-deliver branch.
+/// - **Heartbeat**: evaluator gate → external-channel precedence
+///   (Discord → Telegram → silence; never gateway).
+/// - **Dream**: no publish (dream cron rows have deliver=false; defensive arm).
 pub(crate) async fn publish_final(
     state: &std::sync::Arc<crate::state::AppState>,
     params: PublishFinalParams,
@@ -45,45 +51,31 @@ pub(crate) async fn publish_final(
         session_id,
         user_id,
         content,
+        kind,
         cron_job_id,
         job_deliver,
     } = params;
 
-    if let Some(job_id) = cron_job_id {
-        let deliver = match job_deliver {
-            Some(d) => d,
-            None => match crate::db::cron::find_by_id(&state.db, &job_id).await {
-                Ok(Some(job)) => job.deliver,
-                Ok(None) => {
-                    // Cron job was deleted mid-turn — benign race, skip publish.
-                    warn!(job_id, "publish_final: cron job not found, skipping publish");
-                    return;
-                }
-                Err(e) => {
-                    warn!(error = %e, job_id, "publish_final: cron job lookup failed, skipping publish");
-                    return;
-                }
-            },
-        };
-
-        if !deliver {
-            info!(job_id, "cron deliver=false; skipping OutboundEvent publish");
-            return;
-        }
-
-        let purpose = format!("cron job '{job_id}'");
-        let eval = crate::evaluator::evaluate_notification(state, &user_id, &content, &purpose).await;
-        if !eval.should_notify {
-            info!(
-                job_id,
-                reason = %eval.reason,
-                "evaluator suppressed cron delivery"
-            );
-            return;
+    use crate::bus::EventKind;
+    match kind {
+        EventKind::UserTurn => publish_via_channel(state, channel, chat_id, session_id, user_id, content).await,
+        EventKind::Cron => publish_final_cron(state, channel, chat_id, session_id, user_id, content, cron_job_id, job_deliver).await,
+        EventKind::Heartbeat => publish_final_heartbeat(state, &user_id, &content).await,
+        EventKind::Dream => {
+            // Dream cron rows have deliver=false; this arm is defensive.
+            info!(session_id, "dream turn completed; no publish");
         }
     }
+}
 
-    // Reached only if: user turn, or cron with deliver=true + evaluator approved.
+async fn publish_via_channel(
+    state: &std::sync::Arc<crate::state::AppState>,
+    channel: String,
+    chat_id: Option<String>,
+    session_id: String,
+    user_id: String,
+    content: String,
+) {
     let _ = state
         .outbound_tx
         .send(crate::bus::OutboundEvent {
@@ -95,6 +87,123 @@ pub(crate) async fn publish_final(
             media: vec![],
         })
         .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_final_cron(
+    state: &std::sync::Arc<crate::state::AppState>,
+    channel: String,
+    chat_id: Option<String>,
+    session_id: String,
+    user_id: String,
+    content: String,
+    cron_job_id: Option<String>,
+    job_deliver: Option<bool>,
+) {
+    let Some(job_id) = cron_job_id else {
+        // Cron kind without a job_id would be a bug; log and drop.
+        warn!(session_id, "publish_final: EventKind::Cron with no cron_job_id — skipping publish");
+        return;
+    };
+
+    let deliver = match job_deliver {
+        Some(d) => d,
+        None => match crate::db::cron::find_by_id(&state.db, &job_id).await {
+            Ok(Some(job)) => job.deliver,
+            Ok(None) => {
+                warn!(job_id, "publish_final: cron job not found, skipping publish");
+                return;
+            }
+            Err(e) => {
+                warn!(error = %e, job_id, "publish_final: cron job lookup failed, skipping publish");
+                return;
+            }
+        },
+    };
+
+    if !deliver {
+        info!(job_id, "cron deliver=false; skipping OutboundEvent publish");
+        return;
+    }
+
+    let purpose = format!("cron job '{job_id}'");
+    let eval = crate::evaluator::evaluate_notification(state, &user_id, &content, &purpose).await;
+    if !eval.should_notify {
+        info!(
+            job_id,
+            reason = %eval.reason,
+            "evaluator suppressed cron delivery"
+        );
+        return;
+    }
+
+    publish_via_channel(state, channel, chat_id, session_id, user_id, content).await;
+}
+
+/// Heartbeat: evaluator gate → external-channel precedence (Discord → Telegram).
+/// Never gateway. Silence on no-config.
+async fn publish_final_heartbeat(
+    state: &std::sync::Arc<crate::state::AppState>,
+    user_id: &str,
+    content: &str,
+) {
+    // 1. Evaluator gate.
+    let eval = crate::evaluator::evaluate_notification(
+        state,
+        user_id,
+        content,
+        "heartbeat wake-up",
+    )
+    .await;
+    if !eval.should_notify {
+        info!(user_id, reason = %eval.reason, "heartbeat: evaluator suppressed notification");
+        return;
+    }
+
+    // 2. Discord first.
+    if let Ok(Some(cfg)) = crate::db::discord::get_config(&state.db, user_id).await
+        && cfg.enabled
+        && cfg.partner_discord_id.as_deref().is_some_and(|id| !id.is_empty())
+    {
+        let partner_id = cfg.partner_discord_id.as_deref().unwrap();
+        let _ = state
+            .outbound_tx
+            .send(crate::bus::OutboundEvent {
+                channel: plexus_common::consts::CHANNEL_DISCORD.to_string(),
+                chat_id: Some(format!("dm/{partner_id}")),
+                session_id: format!("heartbeat:{user_id}"),
+                user_id: user_id.to_string(),
+                content: content.to_string(),
+                media: vec![],
+            })
+            .await;
+        info!(user_id, "heartbeat: delivered via discord");
+        return;
+    }
+
+    // 3. Telegram second.
+    if let Ok(Some(cfg)) = crate::db::telegram::get_config(&state.db, user_id).await
+        && cfg.enabled
+        && cfg.partner_telegram_id.as_deref().is_some_and(|id| !id.is_empty())
+    {
+        let partner_id = cfg.partner_telegram_id.as_deref().unwrap();
+        let _ = state
+            .outbound_tx
+            .send(crate::bus::OutboundEvent {
+                channel: crate::channels::CHANNEL_TELEGRAM.to_string(),
+                chat_id: Some(partner_id.to_string()),
+                session_id: format!("heartbeat:{user_id}"),
+                user_id: user_id.to_string(),
+                content: content.to_string(),
+                media: vec![],
+            })
+            .await;
+        info!(user_id, "heartbeat: delivered via telegram");
+        return;
+    }
+
+    // 4. Silence.
+    info!(user_id, "heartbeat: no external channel configured; output stored only");
 }
 
 pub async fn run_session(
@@ -346,6 +455,7 @@ async fn handle_event(
                         session_id: session_id.to_string(),
                         user_id: user_id.to_string(),
                         content,
+                        kind: event.kind,
                         cron_job_id: event.cron_job_id.clone(),
                         job_deliver: None, // helper loads from DB when needed
                     },
@@ -644,6 +754,7 @@ mod deliver_tests {
             session_id: "cron:job-1".into(),
             user_id: "alice".into(),
             content: "all done".into(),
+            kind: crate::bus::EventKind::Cron,
             cron_job_id: Some("job-1".into()),
             job_deliver: Some(false),
         };
@@ -667,6 +778,7 @@ mod deliver_tests {
             session_id: "sess-1".into(),
             user_id: "alice".into(),
             content: "hi".into(),
+            kind: crate::bus::EventKind::UserTurn,
             cron_job_id: None,
             job_deliver: None,
         };
@@ -676,5 +788,32 @@ mod deliver_tests {
         assert_eq!(event.content, "hi");
         assert_eq!(event.channel, "gateway");
         assert_eq!(event.user_id, "alice");
+    }
+
+    #[tokio::test]
+    async fn test_publish_final_heartbeat_no_channels_is_silent() {
+        // Heartbeat with no Discord / Telegram config and no LLM config
+        // (evaluator defaults to silence). Expect: no OutboundEvent.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (state, mut outbound_rx) = crate::state::AppState::test_minimal_with_outbound(tmp.path());
+
+        let params = PublishFinalParams {
+            channel: "internal".into(),
+            chat_id: None,
+            session_id: "heartbeat:alice".into(),
+            user_id: "alice".into(),
+            content: "Did the thing.".into(),
+            kind: crate::bus::EventKind::Heartbeat,
+            cron_job_id: None,
+            job_deliver: None,
+        };
+
+        publish_final(&state, params).await;
+
+        // Evaluator defaults to silence without an LLM config, so nothing ships.
+        assert!(
+            outbound_rx.try_recv().is_err(),
+            "expected no OutboundEvent for silent heartbeat"
+        );
     }
 }
