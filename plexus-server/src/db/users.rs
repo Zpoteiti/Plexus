@@ -102,18 +102,6 @@ pub async fn update_last_dream_at(
         .map(|_| ())
 }
 
-pub async fn get_last_heartbeat_at(
-    pool: &PgPool,
-    user_id: &str,
-) -> sqlx::Result<Option<DateTime<Utc>>> {
-    let row: Option<(Option<DateTime<Utc>>,)> =
-        sqlx::query_as("SELECT last_heartbeat_at FROM users WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.and_then(|(v,)| v))
-}
-
 pub async fn update_last_heartbeat_at(
     pool: &PgPool,
     user_id: &str,
@@ -186,38 +174,6 @@ mod tests {
         assert!(delta < 5, "expected roundtrip within 5ms; got {delta}ms delta");
 
         // Cleanup.
-        sqlx::query("DELETE FROM users WHERE user_id = $1")
-            .bind(&user_id)
-            .execute(&pool)
-            .await
-            .ok();
-    }
-
-    #[tokio::test]
-    #[ignore] // needs DATABASE_URL
-    async fn test_last_heartbeat_at_roundtrip() {
-        let url = std::env::var("DATABASE_URL")
-            .expect("set DATABASE_URL to run this test");
-        let pool = crate::db::init_db(&url).await;
-
-        let user_id = format!("e1-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-        let user_email = format!("{user_id}@test.local");
-        crate::db::users::create_user(&pool, &user_id, &user_email, "", false)
-            .await
-            .unwrap();
-
-        let initial = get_last_heartbeat_at(&pool, &user_id).await.unwrap();
-        assert!(initial.is_none(), "fresh user should have NULL last_heartbeat_at");
-
-        let now = chrono::Utc::now();
-        update_last_heartbeat_at(&pool, &user_id, now).await.unwrap();
-
-        let after = get_last_heartbeat_at(&pool, &user_id).await.unwrap()
-            .expect("timestamp should be present after update");
-        // Postgres TIMESTAMPTZ stores microsecond precision; allow a 5ms tolerance.
-        let delta = (after - now).num_milliseconds().abs();
-        assert!(delta < 5, "expected roundtrip within 5ms; got {delta}ms delta");
-
         sqlx::query("DELETE FROM users WHERE user_id = $1")
             .bind(&user_id)
             .execute(&pool)

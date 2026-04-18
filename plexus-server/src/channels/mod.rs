@@ -36,6 +36,17 @@ pub fn spawn_outbound_dispatch(state: Arc<AppState>, mut rx: mpsc::Receiver<Outb
                         CHANNEL_TELEGRAM => {
                             telegram::deliver(&state, &event).await;
                         }
+                        "internal" => {
+                            // Heartbeat (Plan E) sets channel="internal" on InboundEvent;
+                            // Phase 2's per-tool progress hints + send_error inherit that
+                            // channel. Intentionally drop — heartbeat has no interactive
+                            // channel to receive them; final delivery goes through
+                            // publish_final_heartbeat's evaluator + external-channel path.
+                            debug!(
+                                "Dropped outbound on 'internal' channel (heartbeat progress/error hint): {} chars",
+                                event.content.len()
+                            );
+                        }
                         other => {
                             warn!("Unknown outbound channel: {other}");
                         }
