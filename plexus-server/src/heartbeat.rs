@@ -138,9 +138,14 @@ pub async fn run_phase1(state: &Arc<AppState>, user_id: &str) -> Phase1Result {
     .await;
 
     let calls = match response {
-        Ok(crate::providers::openai::LlmResponse::ToolCalls { calls, .. }) if !calls.is_empty() => calls,
+        Ok(crate::providers::openai::LlmResponse::ToolCalls { calls, .. }) if !calls.is_empty() => {
+            calls
+        }
         Ok(_) => {
-            warn!(user_id, "heartbeat phase 1: LLM did not return a tool call, skipping");
+            warn!(
+                user_id,
+                "heartbeat phase 1: LLM did not return a tool call, skipping"
+            );
             return Phase1Result::Skip {
                 reason: "LLM did not call the heartbeat tool".into(),
             };
@@ -178,14 +183,20 @@ pub async fn run_phase1(state: &Arc<AppState>, user_id: &str) -> Phase1Result {
         "run" if args.tasks.trim().is_empty() => {
             // Degenerate "run" with no task description — treat as skip rather than
             // wake the agent with nothing to do.
-            info!(user_id, "heartbeat phase 1: run with empty tasks, treating as skip");
+            info!(
+                user_id,
+                "heartbeat phase 1: run with empty tasks, treating as skip"
+            );
             Phase1Result::Skip {
                 reason: "run with empty tasks".into(),
             }
         }
         "run" => Phase1Result::Run { tasks: args.tasks },
         other => {
-            warn!(action = other, user_id, "heartbeat phase 1: unexpected action, skipping");
+            warn!(
+                action = other,
+                user_id, "heartbeat phase 1: unexpected action, skipping"
+            );
             Phase1Result::Skip {
                 reason: format!("unexpected action: {other}"),
             }
@@ -199,9 +210,8 @@ pub async fn run_phase1(state: &Arc<AppState>, user_id: &str) -> Phase1Result {
 /// E-8 fills in the tick body; this skeleton stops on shutdown and does nothing else.
 pub fn spawn_heartbeat_tick(state: Arc<AppState>) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-            HEARTBEAT_TICK_INTERVAL_SEC,
-        ));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(HEARTBEAT_TICK_INTERVAL_SEC));
         loop {
             tokio::select! {
                 _ = state.shutdown.cancelled() => {
@@ -221,27 +231,26 @@ pub fn spawn_heartbeat_tick(state: Arc<AppState>) {
 /// One tick of the heartbeat loop.
 async fn tick_once(state: &Arc<AppState>) -> Result<(), String> {
     // 1. Read the admin-configurable interval. 0 → heartbeat disabled.
-    let interval_seconds = match crate::db::system_config::get(
-        &state.db,
-        "heartbeat_interval_seconds",
-    )
-    .await
-    {
-        Ok(Some(v)) => match v.parse::<i64>() {
-            Ok(n) => n,
+    let interval_seconds =
+        match crate::db::system_config::get(&state.db, "heartbeat_interval_seconds").await {
+            Ok(Some(v)) => match v.parse::<i64>() {
+                Ok(n) => n,
+                Err(e) => {
+                    warn!(value = %v, error = %e, "heartbeat: interval parse error, skipping tick");
+                    return Ok(());
+                }
+            },
+            Ok(None) => 1800, // seed missing — fall back to default
             Err(e) => {
-                warn!(value = %v, error = %e, "heartbeat: interval parse error, skipping tick");
+                warn!(error = %e, "heartbeat: system_config lookup failed, skipping tick");
                 return Ok(());
             }
-        },
-        Ok(None) => 1800, // seed missing — fall back to default
-        Err(e) => {
-            warn!(error = %e, "heartbeat: system_config lookup failed, skipping tick");
-            return Ok(());
-        }
-    };
+        };
     if interval_seconds <= 0 {
-        debug!(interval_seconds, "heartbeat: globally disabled, skipping tick");
+        debug!(
+            interval_seconds,
+            "heartbeat: globally disabled, skipping tick"
+        );
         return Ok(());
     }
 
@@ -359,10 +368,8 @@ mod tests {
 
     #[test]
     fn tool_args_parse_run_with_tasks() {
-        let parsed: ToolArgs = serde_json::from_str(
-            r#"{"action": "run", "tasks": "check email"}"#,
-        )
-        .unwrap();
+        let parsed: ToolArgs =
+            serde_json::from_str(r#"{"action": "run", "tasks": "check email"}"#).unwrap();
         assert_eq!(parsed.action, "run");
         assert_eq!(parsed.tasks, "check email");
     }
@@ -380,7 +387,9 @@ mod tests {
         // shadow the LLM-config check we're actually testing.
         let user_root = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_root).await.unwrap();
-        tokio::fs::write(user_root.join("HEARTBEAT.md"), b"- test task").await.unwrap();
+        tokio::fs::write(user_root.join("HEARTBEAT.md"), b"- test task")
+            .await
+            .unwrap();
 
         let state = crate::state::AppState::test_minimal(tmp.path());
         // test_minimal does NOT set an LLM config.
@@ -419,8 +428,7 @@ mod tests {
         // Scenario: three users, only two are due. Verify the list_users_due_for_heartbeat
         // query returns exactly the right subset and that update_last_heartbeat_at
         // correctly moves a user out of the due set.
-        let url = std::env::var("DATABASE_URL")
-            .expect("set DATABASE_URL to run this test");
+        let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL to run this test");
         let pool = crate::db::init_db(&url).await;
 
         // Fresh users.
@@ -441,13 +449,9 @@ mod tests {
         )
         .await
         .unwrap();
-        crate::db::users::update_last_heartbeat_at(
-            &pool,
-            &ids[2],
-            chrono::Utc::now(),
-        )
-        .await
-        .unwrap();
+        crate::db::users::update_last_heartbeat_at(&pool, &ids[2], chrono::Utc::now())
+            .await
+            .unwrap();
 
         // 30-min interval → ids[0] + ids[1] are due, ids[2] is not.
         let due = crate::db::users::list_users_due_for_heartbeat(&pool, 1800, 100)
@@ -464,7 +468,10 @@ mod tests {
         let due_after = crate::db::users::list_users_due_for_heartbeat(&pool, 1800, 100)
             .await
             .unwrap();
-        assert!(!due_after.contains(&ids[0]), "ids[0] should no longer be due after advance");
+        assert!(
+            !due_after.contains(&ids[0]),
+            "ids[0] should no longer be due after advance"
+        );
         assert!(due_after.contains(&ids[1]), "ids[1] still stale");
 
         // Cleanup.

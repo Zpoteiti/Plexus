@@ -138,7 +138,10 @@ impl AppState {
     /// observe `OutboundEvent`s published by the tool under test.
     pub fn test_minimal_with_outbound(
         workspace_root: &std::path::Path,
-    ) -> (std::sync::Arc<Self>, tokio::sync::mpsc::Receiver<crate::bus::OutboundEvent>) {
+    ) -> (
+        std::sync::Arc<Self>,
+        tokio::sync::mpsc::Receiver<crate::bus::OutboundEvent>,
+    ) {
         use tokio::sync::mpsc;
 
         let config = crate::config::ServerConfig {
@@ -152,7 +155,10 @@ impl AppState {
         };
 
         let (outbound_tx, outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(16);
-        (Self::build_test_state(config, outbound_tx, 1024 * 1024), outbound_rx)
+        (
+            Self::build_test_state(config, outbound_tx, 1024 * 1024),
+            outbound_rx,
+        )
     }
 
     /// Same as `test_minimal` but with an explicit quota size.
@@ -181,7 +187,10 @@ impl AppState {
     /// Build a minimal AppState backed by a real PgPool.
     /// Used by DB-integrated tests that need to call tool functions against an actual
     /// database. Requires `DATABASE_URL` — gate callers with `#[ignore]`.
-    pub fn test_with_pool(pool: sqlx::PgPool, workspace_root: &std::path::Path) -> std::sync::Arc<Self> {
+    pub fn test_with_pool(
+        pool: sqlx::PgPool,
+        workspace_root: &std::path::Path,
+    ) -> std::sync::Arc<Self> {
         use tokio::sync::{RwLock, Semaphore, mpsc};
         use tokio_util::sync::CancellationToken;
 
@@ -221,9 +230,9 @@ impl AppState {
             web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
             http_client: reqwest::Client::new(),
             web_fetch_client: reqwest::Client::new(),
-            server_mcp: std::sync::Arc::new(RwLock::new(
-                crate::server_mcp::ServerMcpManager::new(),
-            )),
+            server_mcp: std::sync::Arc::new(
+                RwLock::new(crate::server_mcp::ServerMcpManager::new()),
+            ),
             gateway_sink: RwLock::new(None),
             outbound_tx,
             shutdown: CancellationToken::new(),
@@ -264,9 +273,9 @@ impl AppState {
             web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
             http_client: reqwest::Client::new(),
             web_fetch_client: reqwest::Client::new(),
-            server_mcp: std::sync::Arc::new(RwLock::new(
-                crate::server_mcp::ServerMcpManager::new(),
-            )),
+            server_mcp: std::sync::Arc::new(
+                RwLock::new(crate::server_mcp::ServerMcpManager::new()),
+            ),
             gateway_sink: RwLock::new(None),
             outbound_tx,
             shutdown: CancellationToken::new(),

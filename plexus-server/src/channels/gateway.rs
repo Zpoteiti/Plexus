@@ -196,7 +196,10 @@ mod tests {
         }"#;
         let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
         let media = extract_media(&parsed);
-        assert_eq!(media, vec!["/api/files/a".to_string(), "/api/files/b".to_string()]);
+        assert_eq!(
+            media,
+            vec!["/api/files/a".to_string(), "/api/files/b".to_string()]
+        );
     }
 
     #[test]

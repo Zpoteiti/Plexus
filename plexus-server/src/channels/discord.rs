@@ -296,39 +296,32 @@ impl EventHandler for DiscordHandler {
                 Ok(r) => match r.bytes().await {
                     Ok(b) => b.to_vec(),
                     Err(e) => {
-                        warn!(
-                            "discord attachment read failed ({}): {}",
-                            att.filename, e
-                        );
+                        warn!("discord attachment read failed ({}): {}", att.filename, e);
                         content.push('\n');
                         content.push_str(&failed_download_marker(&att.filename));
                         continue;
                     }
                 },
                 Err(e) => {
-                    warn!(
-                        "discord attachment fetch failed ({}): {}",
-                        att.filename, e
-                    );
+                    warn!("discord attachment fetch failed ({}): {}", att.filename, e);
                     content.push('\n');
                     content.push_str(&failed_download_marker(&att.filename));
                     continue;
                 }
             };
-            match crate::file_store::save_upload(&self.state, &self.plexus_user_id, &att.filename, &bytes)
-                .await
+            match crate::file_store::save_upload(
+                &self.state,
+                &self.plexus_user_id,
+                &att.filename,
+                &bytes,
+            )
+            .await
             {
                 Ok(file_id) => media_urls.push(format!("/api/files/{file_id}")),
                 Err(e) => {
-                    warn!(
-                        "discord attachment save failed ({}): {}",
-                        att.filename, e
-                    );
+                    warn!("discord attachment save failed ({}): {}", att.filename, e);
                     content.push('\n');
-                    content.push_str(&format!(
-                        "[Attachment: {} — storage failed]",
-                        att.filename
-                    ));
+                    content.push_str(&format!("[Attachment: {} — storage failed]", att.filename));
                 }
             }
         }
@@ -421,7 +414,10 @@ pub(crate) fn parse_chat_id(s: &str) -> Option<ChatIdKind> {
     let mut parts = s.splitn(2, '/');
     let guild_id: u64 = parts.next()?.parse().ok()?;
     let channel_id: u64 = parts.next()?.parse().ok()?;
-    Some(ChatIdKind::Guild { guild_id, channel_id })
+    Some(ChatIdKind::Guild {
+        guild_id,
+        channel_id,
+    })
 }
 
 #[cfg(test)]
@@ -446,7 +442,10 @@ mod tests {
 
     #[test]
     fn test_parse_chat_id_dm_form() {
-        assert_eq!(parse_chat_id("dm/123456789"), Some(ChatIdKind::Dm(123456789)));
+        assert_eq!(
+            parse_chat_id("dm/123456789"),
+            Some(ChatIdKind::Dm(123456789))
+        );
         assert_eq!(parse_chat_id("dm/"), None);
         assert_eq!(parse_chat_id("dm/abc"), None); // non-numeric
     }
@@ -455,7 +454,10 @@ mod tests {
     fn test_parse_chat_id_guild_form() {
         assert_eq!(
             parse_chat_id("111/222"),
-            Some(ChatIdKind::Guild { guild_id: 111, channel_id: 222 }),
+            Some(ChatIdKind::Guild {
+                guild_id: 111,
+                channel_id: 222
+            }),
         );
         assert_eq!(parse_chat_id("111/abc"), None);
         assert_eq!(parse_chat_id("bad-format"), None);

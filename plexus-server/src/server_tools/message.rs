@@ -85,16 +85,19 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
             let (bytes, filename) = if device_name == "server" {
                 // Read from the user's server workspace.
                 let ws_root = std::path::Path::new(&state.config.workspace_root);
-                let resolved = match crate::workspace::resolve_user_path(ws_root, &ctx.user_id, path).await {
-                    Ok(p) => p,
-                    Err(crate::workspace::WorkspaceError::Traversal(_)) => {
-                        return (1, "Path escapes user workspace".into());
-                    }
-                    Err(crate::workspace::WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                        return (1, format!("File not found: {path}"));
-                    }
-                    Err(e) => return (1, format!("Resolve error on {path}: {e}")),
-                };
+                let resolved =
+                    match crate::workspace::resolve_user_path(ws_root, &ctx.user_id, path).await {
+                        Ok(p) => p,
+                        Err(crate::workspace::WorkspaceError::Traversal(_)) => {
+                            return (1, "Path escapes user workspace".into());
+                        }
+                        Err(crate::workspace::WorkspaceError::Io(e))
+                            if e.kind() == std::io::ErrorKind::NotFound =>
+                        {
+                            return (1, format!("File not found: {path}"));
+                        }
+                        Err(e) => return (1, format!("Resolve error on {path}: {e}")),
+                    };
                 let bytes = match tokio::fs::read(&resolved).await {
                     Ok(b) => b,
                     Err(e) => return (1, format!("Read error on {path}: {e}")),
@@ -153,8 +156,12 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("uploads")).await.unwrap();
-        tokio::fs::write(user_dir.join("uploads/report.pdf"), b"fake-pdf-bytes").await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("uploads"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("uploads/report.pdf"), b"fake-pdf-bytes")
+            .await
+            .unwrap();
 
         let (state, mut outbound_rx) = AppState::test_minimal_with_outbound(tmp.path());
 
@@ -195,7 +202,9 @@ mod tests {
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
         let other = tmp.path().join("bob");
         tokio::fs::create_dir_all(&other).await.unwrap();
-        tokio::fs::write(other.join("secret.pdf"), b"x").await.unwrap();
+        tokio::fs::write(other.join("secret.pdf"), b"x")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
 
@@ -247,7 +256,10 @@ mod tests {
         let (code, out) = message_tool(&state, &ctx, &args).await;
         assert_eq!(code, 1);
         assert!(out.contains("not found"), "got: {out}");
-        assert!(out.contains("uploads/ghost.pdf"), "expected path echo, got: {out}");
+        assert!(
+            out.contains("uploads/ghost.pdf"),
+            "expected path echo, got: {out}"
+        );
     }
 
     #[tokio::test]
@@ -256,9 +268,15 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("uploads")).await.unwrap();
-        tokio::fs::write(user_dir.join("uploads/a.txt"), b"one").await.unwrap();
-        tokio::fs::write(user_dir.join("uploads/b.txt"), b"two").await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("uploads"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("uploads/a.txt"), b"one")
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("uploads/b.txt"), b"two")
+            .await
+            .unwrap();
 
         let (state, mut outbound_rx) = AppState::test_minimal_with_outbound(tmp.path());
 
@@ -299,8 +317,10 @@ mod tests {
     fn test_guard_allows_partner_cross_channel() {
         let err = check_cross_channel(
             /*is_partner=*/ true,
-            "discord", Some("c1"),
-            "telegram", Some("c2"),
+            "discord",
+            Some("c1"),
+            "telegram",
+            Some("c2"),
         );
         assert!(err.is_none(), "partner should be allowed cross-channel");
     }
@@ -309,18 +329,25 @@ mod tests {
     fn test_guard_allows_non_partner_same_channel() {
         let err = check_cross_channel(
             /*is_partner=*/ false,
-            "discord", Some("c1"),
-            "discord", Some("c1"),
+            "discord",
+            Some("c1"),
+            "discord",
+            Some("c1"),
         );
-        assert!(err.is_none(), "non-partner same-channel same-chat_id should be allowed");
+        assert!(
+            err.is_none(),
+            "non-partner same-channel same-chat_id should be allowed"
+        );
     }
 
     #[test]
     fn test_guard_blocks_non_partner_different_channel() {
         let err = check_cross_channel(
             /*is_partner=*/ false,
-            "discord", Some("c1"),
-            "telegram", Some("c2"),
+            "discord",
+            Some("c1"),
+            "telegram",
+            Some("c2"),
         );
         assert!(err.is_some(), "non-partner cross-channel must be rejected");
     }
@@ -329,9 +356,14 @@ mod tests {
     fn test_guard_blocks_non_partner_different_chat_id_same_channel() {
         let err = check_cross_channel(
             /*is_partner=*/ false,
-            "discord", Some("c1"),
-            "discord", Some("c2"),
+            "discord",
+            Some("c1"),
+            "discord",
+            Some("c2"),
         );
-        assert!(err.is_some(), "non-partner different chat_id must be rejected even on same channel");
+        assert!(
+            err.is_some(),
+            "non-partner different chat_id must be rejected even on same channel"
+        );
     }
 }

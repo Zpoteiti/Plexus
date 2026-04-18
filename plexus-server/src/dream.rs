@@ -56,9 +56,9 @@ pub async fn handle_dream_fire(
         .map_err(|e| format!("get_last_dream_at: {e}"))?;
 
     let should_dream = match (last_activity, last_dream) {
-        (None, _) => false,           // no activity ever
-        (Some(_), None) => true,      // first dream
-        (Some(a), Some(d)) => a > d,  // new activity since last dream
+        (None, _) => false,          // no activity ever
+        (Some(_), None) => true,     // first dream
+        (Some(a), Some(d)) => a > d, // new activity since last dream
     };
     if !should_dream {
         info!(user_id = %job.user_id, "dream: no new activity, skipping");
@@ -219,7 +219,10 @@ async fn run_phase1(
     {
         Ok(crate::providers::openai::LlmResponse::Text { content, .. }) => content,
         Ok(_) => {
-            warn!(user_id, "dream phase 1: LLM returned unexpected response shape");
+            warn!(
+                user_id,
+                "dream phase 1: LLM returned unexpected response shape"
+            );
             String::new()
         }
         Err(e) => {

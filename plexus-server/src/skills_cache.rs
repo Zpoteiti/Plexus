@@ -31,11 +31,7 @@ impl SkillsCache {
 
     /// Return the cached skill list, loading from disk if not present.
     /// The returned Arc<Vec<SkillInfo>> is safe to clone cheaply.
-    pub async fn get_or_load(
-        &self,
-        user_id: &str,
-        workspace_root: &Path,
-    ) -> Arc<Vec<SkillInfo>> {
+    pub async fn get_or_load(&self, user_id: &str, workspace_root: &Path) -> Arc<Vec<SkillInfo>> {
         if let Some(existing) = self.entries.get(user_id) {
             return existing.clone();
         }
@@ -85,7 +81,11 @@ async fn load_skills_from_disk(workspace_root: &Path, user_id: &str) -> Vec<Skil
         };
 
         // Prefer frontmatter name; fall back to directory name if missing.
-        let final_name = if name.is_empty() { skill_dir_name } else { name };
+        let final_name = if name.is_empty() {
+            skill_dir_name
+        } else {
+            name
+        };
 
         // Optimization: on-demand skills don't need their body cached. context.rs
         // only reads SkillInfo.content for always-on skills; on-demand shows up in
@@ -153,17 +153,13 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    async fn write_skill(
-        root: &Path,
-        user_id: &str,
-        name: &str,
-        frontmatter: &str,
-        body: &str,
-    ) {
+    async fn write_skill(root: &Path, user_id: &str, name: &str, frontmatter: &str, body: &str) {
         let dir = root.join(user_id).join("skills").join(name);
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let contents = format!("---\n{frontmatter}---\n{body}");
-        tokio::fs::write(dir.join("SKILL.md"), contents).await.unwrap();
+        tokio::fs::write(dir.join("SKILL.md"), contents)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -194,7 +190,10 @@ mod tests {
         assert!(skills[0].content.contains("always body"));
         assert_eq!(skills[1].name, "ondemand1");
         assert!(!skills[1].always_on);
-        assert_eq!(skills[1].content, "", "on-demand content should be empty in cache");
+        assert_eq!(
+            skills[1].content, "",
+            "on-demand content should be empty in cache"
+        );
     }
 
     #[tokio::test]
@@ -209,7 +208,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("alice/skills/bad");
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        tokio::fs::write(dir.join("SKILL.md"), "no frontmatter here\nraw content\n").await.unwrap();
+        tokio::fs::write(dir.join("SKILL.md"), "no frontmatter here\nraw content\n")
+            .await
+            .unwrap();
 
         write_skill(
             tmp.path(),
@@ -271,7 +272,10 @@ mod tests {
         .unwrap();
 
         let second = cache.get_or_load("alice", tmp.path()).await;
-        assert_eq!(second[0].description, "first", "cache should serve stale data until invalidated");
+        assert_eq!(
+            second[0].description, "first",
+            "cache should serve stale data until invalidated"
+        );
     }
 
     #[tokio::test]
@@ -300,7 +304,10 @@ mod tests {
         cache.invalidate("alice");
 
         let second = cache.get_or_load("alice", tmp.path()).await;
-        assert_eq!(second[0].description, "updated", "cache should reload fresh data after invalidate");
+        assert_eq!(
+            second[0].description, "updated",
+            "cache should reload fresh data after invalidate"
+        );
     }
 
     #[tokio::test]

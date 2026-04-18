@@ -191,10 +191,9 @@ mod create_tests {
         let user_dir = root.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
 
-        let result =
-            resolve_user_path_for_create(root.path(), "alice", "skills/git/SKILL.md")
-                .await
-                .unwrap();
+        let result = resolve_user_path_for_create(root.path(), "alice", "skills/git/SKILL.md")
+            .await
+            .unwrap();
         let expected = user_dir
             .canonicalize()
             .unwrap()
@@ -210,8 +209,7 @@ mod create_tests {
         let user_dir = root.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
 
-        let result =
-            resolve_user_path_for_create(root.path(), "alice", "../etc/passwd").await;
+        let result = resolve_user_path_for_create(root.path(), "alice", "../etc/passwd").await;
         assert!(matches!(result, Err(WorkspaceError::Traversal(_))));
     }
 

@@ -60,18 +60,31 @@ pub async fn compress(
     summary_messages.push(ChatMessage::user(conversation));
 
     // Call LLM for summary (reuse shared HTTP client)
-    let summary =
-        match openai::call_llm(&state.http_client, llm_config, summary_messages, None, None).await {
-            Ok(openai::LlmResponse::Text { content, vision_stripped: _ }) => content,
-            Ok(openai::LlmResponse::ToolCalls { calls: _, vision_stripped: _ }) => {
-                warn!("Compression LLM returned tool calls instead of summary");
-                return;
-            }
-            Err(e) => {
-                warn!("Compression failed: {e}");
-                return;
-            }
-        };
+    let summary = match openai::call_llm(
+        &state.http_client,
+        llm_config,
+        summary_messages,
+        None,
+        None,
+    )
+    .await
+    {
+        Ok(openai::LlmResponse::Text {
+            content,
+            vision_stripped: _,
+        }) => content,
+        Ok(openai::LlmResponse::ToolCalls {
+            calls: _,
+            vision_stripped: _,
+        }) => {
+            warn!("Compression LLM returned tool calls instead of summary");
+            return;
+        }
+        Err(e) => {
+            warn!("Compression failed: {e}");
+            return;
+        }
+    };
 
     // Mark compressed messages in DB
     let ids: Vec<String> = to_compress.iter().map(|m| m.message_id.clone()).collect();

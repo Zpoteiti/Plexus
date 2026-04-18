@@ -105,11 +105,8 @@ pub async fn file_transfer(state: &Arc<AppState>, user_id: &str, args: &Value) -
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = tokio::fs::set_permissions(
-                &target,
-                std::fs::Permissions::from_mode(0o600),
-            )
-            .await;
+            let _ =
+                tokio::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).await;
         }
 
         (0, format!("File saved to server: {rel_target}"))
@@ -137,9 +134,7 @@ async fn read_server_file(
             crate::workspace::WorkspaceError::Traversal(_) => {
                 "Path escapes user workspace".to_string()
             }
-            crate::workspace::WorkspaceError::Io(e)
-                if e.kind() == std::io::ErrorKind::NotFound =>
-            {
+            crate::workspace::WorkspaceError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 format!("File not found: {file_path}")
             }
             e => format!("Resolve error: {e}"),
@@ -281,8 +276,12 @@ mod tests {
     async fn test_read_server_file_happy_path() {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("uploads")).await.unwrap();
-        tokio::fs::write(user_dir.join("uploads/a.txt"), b"hello").await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("uploads"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("uploads/a.txt"), b"hello")
+            .await
+            .unwrap();
 
         let state = crate::state::AppState::test_minimal(tmp.path());
         let (bytes, fname) = read_server_file(state.as_ref(), "alice", "uploads/a.txt")
@@ -299,7 +298,9 @@ mod tests {
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
         let bob = tmp.path().join("bob");
         tokio::fs::create_dir_all(&bob).await.unwrap();
-        tokio::fs::write(bob.join("secret.txt"), b"s").await.unwrap();
+        tokio::fs::write(bob.join("secret.txt"), b"s")
+            .await
+            .unwrap();
 
         let state = crate::state::AppState::test_minimal(tmp.path());
         let err = read_server_file(state.as_ref(), "alice", "../bob/secret.txt")
@@ -325,8 +326,12 @@ mod tests {
     async fn test_file_transfer_server_to_server_write_with_quota() {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("src")).await.unwrap();
-        tokio::fs::write(user_dir.join("src/x.txt"), b"contents").await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("src"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("src/x.txt"), b"contents")
+            .await
+            .unwrap();
 
         let state = crate::state::AppState::test_minimal(tmp.path());
         let args = serde_json::json!({
@@ -345,12 +350,16 @@ mod tests {
     async fn test_file_transfer_server_to_server_overwrite_tracks_net_size() {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("src")).await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("src"))
+            .await
+            .unwrap();
 
         let state = crate::state::AppState::test_minimal(tmp.path());
 
         // First transfer: 5 bytes.
-        tokio::fs::write(user_dir.join("src/x.txt"), b"hello").await.unwrap();
+        tokio::fs::write(user_dir.join("src/x.txt"), b"hello")
+            .await
+            .unwrap();
         let args = serde_json::json!({
             "from_device": "server",
             "to_device": "server",
@@ -361,13 +370,17 @@ mod tests {
         assert_eq!(state.quota.current_usage("alice"), 5);
 
         // Second transfer: grow to 10 bytes.
-        tokio::fs::write(user_dir.join("src/x.txt"), b"helloworld").await.unwrap();
+        tokio::fs::write(user_dir.join("src/x.txt"), b"helloworld")
+            .await
+            .unwrap();
         let (code, _) = file_transfer(&state, "alice", &args).await;
         assert_eq!(code, 0);
         assert_eq!(state.quota.current_usage("alice"), 10);
 
         // Third transfer: shrink to 3 bytes.
-        tokio::fs::write(user_dir.join("src/x.txt"), b"hey").await.unwrap();
+        tokio::fs::write(user_dir.join("src/x.txt"), b"hey")
+            .await
+            .unwrap();
         let (code, _) = file_transfer(&state, "alice", &args).await;
         assert_eq!(code, 0);
         assert_eq!(state.quota.current_usage("alice"), 3);

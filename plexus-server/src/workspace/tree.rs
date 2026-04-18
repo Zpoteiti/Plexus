@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 use std::path::Path;
+use tracing::warn;
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct WorkspaceEntry {
@@ -40,7 +41,11 @@ pub async fn walk_user_tree(
                 Err(_) => continue,
             };
             if !canon.starts_with(&user_root_for_task) {
-                continue; // symlink escape — drop silently
+                warn!(
+                    path = %full.display(),
+                    "workspace tree: symlink escape blocked"
+                );
+                continue;
             }
             let rel = match full.strip_prefix(&user_root_for_task) {
                 Ok(r) => r,
@@ -81,20 +86,40 @@ mod tests {
     async fn walk_returns_sorted_entries() {
         let tmp = TempDir::new().unwrap();
         let user_root = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_root.join("skills/foo")).await.unwrap();
-        tokio::fs::write(user_root.join("SOUL.md"), b"hello").await.unwrap();
-        tokio::fs::write(user_root.join("skills/foo/SKILL.md"), b"---\nname: foo\n---").await.unwrap();
+        tokio::fs::create_dir_all(user_root.join("skills/foo"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_root.join("SOUL.md"), b"hello")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            user_root.join("skills/foo/SKILL.md"),
+            b"---\nname: foo\n---",
+        )
+        .await
+        .unwrap();
 
         let entries = walk_user_tree(tmp.path(), "alice").await.unwrap();
 
         // Directories first.
-        assert!(entries[0].is_dir, "expected first entry to be dir; got {:?}", entries);
+        assert!(
+            entries[0].is_dir,
+            "expected first entry to be dir; got {:?}",
+            entries
+        );
         // All paths relative.
         for e in &entries {
-            assert!(!e.path.starts_with('/'), "paths must be relative; got {}", e.path);
+            assert!(
+                !e.path.starts_with('/'),
+                "paths must be relative; got {}",
+                e.path
+            );
         }
         // SOUL.md present with its bytes.
-        let soul = entries.iter().find(|e| e.path == "SOUL.md").expect("SOUL.md missing");
+        let soul = entries
+            .iter()
+            .find(|e| e.path == "SOUL.md")
+            .expect("SOUL.md missing");
         assert_eq!(soul.size_bytes, 5);
         assert!(!soul.is_dir);
     }
@@ -112,7 +137,10 @@ mod tests {
         let entries = walk_user_tree(tmp.path(), "alice").await.unwrap();
 
         // escape.txt must NOT be in the results (its canonicalized target escapes user_root).
-        assert!(!entries.iter().any(|e| e.path == "escape.txt"),
-                "symlink escape leaked into walk output: {:?}", entries);
+        assert!(
+            !entries.iter().any(|e| e.path == "escape.txt"),
+            "symlink escape leaked into walk output: {:?}",
+            entries
+        );
     }
 }

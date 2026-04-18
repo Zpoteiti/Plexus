@@ -34,8 +34,13 @@ impl ToolAllowlist {
 /// Tools available during dream Phase 2: file I/O only. No message, cron,
 /// file_transfer, or web_fetch — dream is silent and workspace-local.
 pub const DREAM_PHASE2_ALLOWLIST: &[&str] = &[
-    "read_file", "write_file", "edit_file", "delete_file",
-    "list_dir", "glob", "grep",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "list_dir",
+    "glob",
+    "grep",
 ];
 
 /// All server tool names.

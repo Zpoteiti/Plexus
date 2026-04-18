@@ -39,10 +39,7 @@ async fn get_profile(
 // Soul is now a workspace file: {workspace}/{user_id}/SOUL.md
 // These endpoints return 410 Gone.
 
-async fn get_soul(
-    _headers: HeaderMap,
-    _state: State<Arc<AppState>>,
-) -> (StatusCode, &'static str) {
+async fn get_soul(_headers: HeaderMap, _state: State<Arc<AppState>>) -> (StatusCode, &'static str) {
     (
         StatusCode::GONE,
         "Soul is now a workspace file. Use read_file on SOUL.md or the workspace file API.",
@@ -81,7 +78,9 @@ async fn patch_display_name(
     crate::db::users::update_display_name(&state.db, &c.sub, name)
         .await
         .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
-    Ok(Json(serde_json::json!({ "message": "Display name updated" })))
+    Ok(Json(
+        serde_json::json!({ "message": "Display name updated" }),
+    ))
 }
 
 // -- Memory (deprecated) --
@@ -224,10 +223,7 @@ pub struct WorkspaceQuotaResponse {
 }
 
 /// Pure logic: query the quota cache for `user_id`. No I/O or DB calls.
-pub fn workspace_quota_handler(
-    state: &AppState,
-    user_id: &str,
-) -> WorkspaceQuotaResponse {
+pub fn workspace_quota_handler(state: &AppState, user_id: &str) -> WorkspaceQuotaResponse {
     let used = state.quota.current_usage(user_id);
     let total = state.quota.quota_bytes();
     WorkspaceQuotaResponse {

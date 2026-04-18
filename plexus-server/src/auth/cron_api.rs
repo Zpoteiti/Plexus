@@ -301,9 +301,7 @@ mod tests {
         );
 
         // Row must still exist.
-        let still = crate::db::cron::find_by_id(&pool, &job_id)
-            .await
-            .unwrap();
+        let still = crate::db::cron::find_by_id(&pool, &job_id).await.unwrap();
         assert!(still.is_some(), "system job must not have been deleted");
 
         // Cleanup
@@ -384,11 +382,11 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok(), "expected Ok for user job delete, got: {result:?}");
-        assert_eq!(
-            result.unwrap(),
-            axum::http::StatusCode::NO_CONTENT,
+        assert!(
+            result.is_ok(),
+            "expected Ok for user job delete, got: {result:?}"
         );
+        assert_eq!(result.unwrap(), axum::http::StatusCode::NO_CONTENT,);
 
         // Row must be gone.
         let gone = crate::db::cron::find_by_id(&pool, &job_id).await.unwrap();

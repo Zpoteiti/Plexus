@@ -91,7 +91,6 @@ impl ServerMcpManager {
         }
         Err(format!("Server MCP not found for: {prefixed_name}"))
     }
-
 }
 
 async fn start_session(entry: &McpServerEntry) -> Result<McpSession, String> {

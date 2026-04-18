@@ -3,7 +3,9 @@
 use crate::db::messages::Message;
 use crate::db::users::User;
 use crate::file_store;
-use crate::providers::openai::{ChatMessage, Content, ContentBlock, FunctionCall, ImageUrl, ToolCall};
+use crate::providers::openai::{
+    ChatMessage, Content, ContentBlock, FunctionCall, ImageUrl, ToolCall,
+};
 use crate::state::AppState;
 
 /// Channel-agnostic sender identity for security boundaries.
@@ -96,7 +98,11 @@ pub async fn build_user_content(
         let uid = uid.clone();
         let fid = fid.to_string();
         let state = state.clone();
-        async move { file_store::load_file(&state, &uid, &fid).await.map_err(|e| e.message) }
+        async move {
+            file_store::load_file(&state, &uid, &fid)
+                .await
+                .map_err(|e| e.message)
+        }
     })
     .await
 }
@@ -130,9 +136,7 @@ where
         let (bytes, filename) = match load(file_id).await {
             Ok(x) => x,
             Err(_) => {
-                non_image_refs.push(format!(
-                    "[Attachment: {file_id} — storage read failed]"
-                ));
+                non_image_refs.push(format!("[Attachment: {file_id} — storage read failed]"));
                 continue;
             }
         };
@@ -408,15 +412,7 @@ pub async fn build_context(
             s
         }
         PromptMode::Heartbeat => {
-            build_heartbeat_system(
-                soul,
-                user,
-                identity,
-                state,
-                &memory,
-                &skills_section,
-            )
-            .await
+            build_heartbeat_system(soul, user, identity, state, &memory, &skills_section).await
         }
         PromptMode::Dream => {
             // Dream Phase 2: phase2 prompt + memory + soul + skills.
@@ -468,7 +464,12 @@ async fn build_device_status(state: &AppState, user_id: &str) -> String {
     for key in keys.value() {
         if let Some(conn) = state.devices.get(key) {
             let (mode, workspace) = if let Some(t) = token_map.get(&conn.device_name) {
-                let m = t.fs_policy.get("mode").and_then(|v| v.as_str()).unwrap_or("sandbox").to_string();
+                let m = t
+                    .fs_policy
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("sandbox")
+                    .to_string();
                 (m, t.workspace_path.clone())
             } else {
                 ("sandbox".to_string(), "~/.plexus/workspace".to_string())
@@ -713,19 +714,16 @@ mod tests {
     #[tokio::test]
     async fn test_build_user_content_with_image() {
         let png_bytes = vec![0x89u8, 0x50, 0x4E, 0x47];
-        let blocks = build_user_content_inner(
-            "what is this",
-            &["/api/files/abc123".to_string()],
-            |fid| {
+        let blocks =
+            build_user_content_inner("what is this", &["/api/files/abc123".to_string()], |fid| {
                 let bytes = png_bytes.clone();
                 let fid = fid.to_string();
                 async move {
                     assert_eq!(fid, "abc123");
                     Ok::<_, String>((bytes, "photo.png".to_string()))
                 }
-            },
-        )
-        .await;
+            })
+            .await;
 
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "what is this"));
@@ -739,18 +737,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_user_content_with_non_image() {
-        let blocks = build_user_content_inner(
-            "",
-            &["/api/files/xyz".to_string()],
-            |_| async { Ok::<_, String>((b"hello".to_vec(), "notes.txt".to_string())) },
-        )
+        let blocks = build_user_content_inner("", &["/api/files/xyz".to_string()], |_| async {
+            Ok::<_, String>((b"hello".to_vec(), "notes.txt".to_string()))
+        })
         .await;
 
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             ContentBlock::Text { text } => {
                 assert!(text.contains("[Attachment: notes.txt → /api/files/xyz]"));
-                assert!(text.contains("Use file_transfer to move it to a client device for further processing."));
+                assert!(text.contains(
+                    "Use file_transfer to move it to a client device for further processing."
+                ));
             }
             _ => panic!("expected Text"),
         }
@@ -761,10 +759,7 @@ mod tests {
         // text + 1 image + 1 doc → [text, image, trailing-text-with-attachment]
         let blocks = build_user_content_inner(
             "mixed",
-            &[
-                "/api/files/i1".to_string(),
-                "/api/files/d1".to_string(),
-            ],
+            &["/api/files/i1".to_string(), "/api/files/d1".to_string()],
             |fid| {
                 let fid = fid.to_string();
                 async move {
@@ -928,10 +923,22 @@ mod mode_tests {
         assert!(content.contains("helpful-alice"), "SOUL.md content missing");
 
         // Dream mode should NOT include UserTurn-only sections.
-        assert!(!content.contains("## Channels"), "Dream must omit Channels section");
-        assert!(!content.contains("## Connected Devices"), "Dream must omit Devices section");
-        assert!(!content.contains("Current time:"), "Dream must omit runtime timestamp");
-        assert!(!content.contains("## Identity"), "Dream must omit Identity section");
+        assert!(
+            !content.contains("## Channels"),
+            "Dream must omit Channels section"
+        );
+        assert!(
+            !content.contains("## Connected Devices"),
+            "Dream must omit Devices section"
+        );
+        assert!(
+            !content.contains("Current time:"),
+            "Dream must omit runtime timestamp"
+        );
+        assert!(
+            !content.contains("## Identity"),
+            "Dream must omit Identity section"
+        );
     }
 
     #[test]
@@ -942,8 +949,14 @@ mod mode_tests {
 
         let content = assemble_dream_system_prompt("PHASE2", "mem", "soul", skills_section);
 
-        assert!(content.contains("## Skill: wrap-up"), "always-on skill missing");
-        assert!(content.contains("## Available Skills"), "on-demand skills index missing");
+        assert!(
+            content.contains("## Skill: wrap-up"),
+            "always-on skill missing"
+        );
+        assert!(
+            content.contains("## Available Skills"),
+            "on-demand skills index missing"
+        );
         assert!(content.contains("**git**"), "on-demand skill entry missing");
     }
 

@@ -108,7 +108,10 @@ pub async fn evaluate_notification(
     let llm_config = match state.llm_config.read().await.clone() {
         Some(c) => c,
         None => {
-            warn!(user_id, purpose, "evaluator: no LLM config available, defaulting to silence");
+            warn!(
+                user_id,
+                purpose, "evaluator: no LLM config available, defaulting to silence"
+            );
             return EvaluationResult {
                 should_notify: false,
                 reason: "no LLM config".into(),
@@ -127,9 +130,14 @@ pub async fn evaluate_notification(
     .await;
 
     let calls = match response {
-        Ok(crate::providers::openai::LlmResponse::ToolCalls { calls, .. }) if !calls.is_empty() => calls,
+        Ok(crate::providers::openai::LlmResponse::ToolCalls { calls, .. }) if !calls.is_empty() => {
+            calls
+        }
         Ok(_) => {
-            warn!(user_id, purpose, "evaluator: LLM did not return a tool call, defaulting to silence");
+            warn!(
+                user_id,
+                purpose, "evaluator: LLM did not return a tool call, defaulting to silence"
+            );
             return EvaluationResult {
                 should_notify: false,
                 reason: "LLM did not call the evaluate_notification tool".into(),
@@ -177,7 +185,8 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = crate::state::AppState::test_minimal(tmp.path());
         // test_minimal does not set an LLM config.
-        let result = evaluate_notification(&state, "alice", "Report produced.", "cron 'daily'").await;
+        let result =
+            evaluate_notification(&state, "alice", "Report produced.", "cron 'daily'").await;
         assert!(!result.should_notify);
         assert!(
             result.reason.contains("no LLM config") || result.reason.contains("LLM"),

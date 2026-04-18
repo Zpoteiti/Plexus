@@ -2,7 +2,7 @@
 
 use crate::state::AppState;
 use crate::workspace::{
-    is_under_skills_dir, resolve_user_path, resolve_user_path_for_create, WorkspaceError,
+    WorkspaceError, is_under_skills_dir, resolve_user_path, resolve_user_path_for_create,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -269,11 +269,7 @@ pub async fn list_dir(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i3
         let name = entry.file_name().to_string_lossy().to_string();
         let ft = entry.file_type().await.ok();
         let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
-        let size_bytes = entry
-            .metadata()
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size_bytes = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
         rows.push(serde_json::json!({
             "name": name,
             "is_dir": is_dir,
@@ -290,7 +286,10 @@ pub async fn list_dir(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i3
         b_dir.cmp(&a_dir).then(a_name.cmp(b_name))
     });
 
-    (0, serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into()))
+    (
+        0,
+        serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into()),
+    )
 }
 
 pub async fn delete_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, String) {
@@ -298,7 +297,10 @@ pub async fn delete_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> 
         Some(p) => p,
         None => return (1, "Missing required parameter: path".into()),
     };
-    let recursive = args.get("recursive").and_then(Value::as_bool).unwrap_or(false);
+    let recursive = args
+        .get("recursive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     let ws_root = std::path::Path::new(&state.config.workspace_root);
     let resolved = match resolve_user_path(ws_root, user_id, path).await {
@@ -364,7 +366,10 @@ pub async fn grep(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, S
         Some(p) => p,
         None => return (1, "Missing required parameter: pattern".into()),
     };
-    let path_prefix = args.get("path_prefix").and_then(Value::as_str).unwrap_or("");
+    let path_prefix = args
+        .get("path_prefix")
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
 
     let ws_root = std::path::Path::new(&state.config.workspace_root);
@@ -477,7 +482,10 @@ pub async fn glob(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32, S
             if entry.path() == user_root_clone {
                 continue;
             }
-            let rel = entry.path().strip_prefix(&user_root_clone).unwrap_or(entry.path());
+            let rel = entry
+                .path()
+                .strip_prefix(&user_root_clone)
+                .unwrap_or(entry.path());
             if matcher.is_match(rel) {
                 out.push(rel.display().to_string());
             }
@@ -545,8 +553,14 @@ mod tests {
         let args = serde_json::json!({"path": "nonexistent.txt"});
         let (code, out) = read_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
-        assert!(out.contains("not found"), "expected 'not found' in output, got: {out}");
-        assert!(out.contains("nonexistent.txt"), "expected path echo in output, got: {out}");
+        assert!(
+            out.contains("not found"),
+            "expected 'not found' in output, got: {out}"
+        );
+        assert!(
+            out.contains("nonexistent.txt"),
+            "expected path echo in output, got: {out}"
+        );
     }
 
     #[tokio::test]
@@ -555,14 +569,22 @@ mod tests {
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
         let large = vec![b'x'; (MAX_READ_BYTES + 1) as usize];
-        tokio::fs::write(user_dir.join("big.txt"), &large).await.unwrap();
+        tokio::fs::write(user_dir.join("big.txt"), &large)
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"path": "big.txt"});
         let (code, out) = read_file(&state, "alice", &args).await;
         assert_eq!(code, 0);
-        assert!(out.contains("too large"), "expected 'too large' in output, got: {out}");
-        assert!(out.contains("file_transfer"), "expected remediation hint, got: {out}");
+        assert!(
+            out.contains("too large"),
+            "expected 'too large' in output, got: {out}"
+        );
+        assert!(
+            out.contains("file_transfer"),
+            "expected remediation hint, got: {out}"
+        );
     }
 
     // --- write_file tests ---
@@ -578,7 +600,9 @@ mod tests {
         let (code, out) = write_file(&state, "alice", &args).await;
         assert_eq!(code, 0, "got: {out}");
         assert_eq!(
-            tokio::fs::read_to_string(user_dir.join("hello.txt")).await.unwrap(),
+            tokio::fs::read_to_string(user_dir.join("hello.txt"))
+                .await
+                .unwrap(),
             "hi"
         );
         assert_eq!(state.quota.current_usage("alice"), 2);
@@ -664,7 +688,9 @@ mod tests {
         // Attempt a grow-overwrite into a read-only directory — will fail at mkdir.
         // Create a file named "readonly_dir" (so mkdir will fail because it exists
         // but is a file, not a directory).
-        tokio::fs::write(user_dir.join("readonly_dir"), b"block").await.unwrap();
+        tokio::fs::write(user_dir.join("readonly_dir"), b"block")
+            .await
+            .unwrap();
         let args2 = serde_json::json!({
             "path": "readonly_dir/child.txt",
             "content": "y".repeat(200),  // growth
@@ -723,7 +749,9 @@ mod tests {
         });
         let (code, _) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 0);
-        let after = tokio::fs::read_to_string(user_dir.join("m.txt")).await.unwrap();
+        let after = tokio::fs::read_to_string(user_dir.join("m.txt"))
+            .await
+            .unwrap();
         assert!(after.contains("foo baz"));
         assert!(!after.contains("foo bar"));
         // Same size edit — quota unchanged.
@@ -735,7 +763,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("m.txt"), "nothing here").await.unwrap();
+        tokio::fs::write(user_dir.join("m.txt"), "nothing here")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({
@@ -753,13 +783,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("m.txt"), "abc\nabc\n").await.unwrap();
+        tokio::fs::write(user_dir.join("m.txt"), "abc\nabc\n")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"path": "m.txt", "old_string": "abc", "new_string": "xyz"});
         let (code, out) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
-        assert!(out.contains("appears 2 times") || out.contains("2 times"), "got: {out}");
+        assert!(
+            out.contains("appears 2 times") || out.contains("2 times"),
+            "got: {out}"
+        );
     }
 
     #[tokio::test]
@@ -781,7 +816,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("f.txt"), "hi").await.unwrap(); // 2 bytes
+        tokio::fs::write(user_dir.join("f.txt"), "hi")
+            .await
+            .unwrap(); // 2 bytes
 
         let state = AppState::test_minimal(tmp.path());
         state.quota.check_and_reserve_upload("alice", 2).unwrap();
@@ -802,7 +839,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("f.txt"), "hello world").await.unwrap(); // 11 bytes
+        tokio::fs::write(user_dir.join("f.txt"), "hello world")
+            .await
+            .unwrap(); // 11 bytes
 
         let state = AppState::test_minimal(tmp.path());
         state.quota.check_and_reserve_upload("alice", 11).unwrap();
@@ -823,7 +862,9 @@ mod tests {
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
         let large = vec![b'x'; (MAX_READ_BYTES + 1) as usize];
-        tokio::fs::write(user_dir.join("big.txt"), &large).await.unwrap();
+        tokio::fs::write(user_dir.join("big.txt"), &large)
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({
@@ -843,7 +884,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("x.txt"), b"12345").await.unwrap();
+        tokio::fs::write(user_dir.join("x.txt"), b"12345")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         state.quota.check_and_reserve_upload("alice", 5).unwrap();
@@ -873,9 +916,15 @@ mod tests {
     async fn test_delete_dir_recursive_removes_tree_and_releases_quota() {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("sub/nested")).await.unwrap();
-        tokio::fs::write(user_dir.join("sub/a.txt"), b"aaa").await.unwrap();  // 3
-        tokio::fs::write(user_dir.join("sub/nested/b.txt"), b"bbbbbb").await.unwrap();  // 6
+        tokio::fs::create_dir_all(user_dir.join("sub/nested"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("sub/a.txt"), b"aaa")
+            .await
+            .unwrap(); // 3
+        tokio::fs::write(user_dir.join("sub/nested/b.txt"), b"bbbbbb")
+            .await
+            .unwrap(); // 6
 
         let state = AppState::test_minimal(tmp.path());
         state.quota.check_and_reserve_upload("alice", 9).unwrap();
@@ -931,7 +980,10 @@ mod tests {
         let args = serde_json::json!({"path": ".", "recursive": true});
         let (code, out) = delete_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
-        assert!(out.contains("workspace root") || out.contains("Cannot delete"), "got: {out}");
+        assert!(
+            out.contains("workspace root") || out.contains("Cannot delete"),
+            "got: {out}"
+        );
         // User dir still intact.
         assert!(user_dir.exists());
     }
@@ -942,8 +994,12 @@ mod tests {
     async fn test_list_dir_shows_children() {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("skills/git")).await.unwrap();
-        tokio::fs::write(user_dir.join("x.txt"), b"hi").await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("skills/git"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("x.txt"), b"hi")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"path": "."});
@@ -960,7 +1016,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("SOUL.md"), b"s").await.unwrap();
+        tokio::fs::write(user_dir.join("SOUL.md"), b"s")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         // No `path` arg — should default to "."
@@ -975,7 +1033,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::create_dir_all(tmp.path().join("bob")).await.unwrap();
+        tokio::fs::create_dir_all(tmp.path().join("bob"))
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"path": "../bob"});
@@ -989,7 +1049,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("a.txt"), b"hi").await.unwrap();
+        tokio::fs::write(user_dir.join("a.txt"), b"hi")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"path": "a.txt"});
@@ -1011,10 +1073,18 @@ mod tests {
     async fn test_glob_matches_skills() {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("skills/git")).await.unwrap();
-        tokio::fs::write(user_dir.join("skills/git/SKILL.md"), b"x").await.unwrap();
-        tokio::fs::create_dir_all(user_dir.join("skills/memory")).await.unwrap();
-        tokio::fs::write(user_dir.join("skills/memory/SKILL.md"), b"y").await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("skills/git"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("skills/git/SKILL.md"), b"x")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(user_dir.join("skills/memory"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("skills/memory/SKILL.md"), b"y")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"pattern": "skills/*/SKILL.md"});
@@ -1028,9 +1098,15 @@ mod tests {
     async fn test_glob_double_star_recursive() {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("a/b/c")).await.unwrap();
-        tokio::fs::write(user_dir.join("a/b/c/deep.txt"), b"x").await.unwrap();
-        tokio::fs::write(user_dir.join("top.txt"), b"y").await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("a/b/c"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("a/b/c/deep.txt"), b"x")
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("top.txt"), b"y")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"pattern": "**/*.txt"});
@@ -1063,7 +1139,10 @@ mod tests {
         let args = serde_json::json!({"pattern": "[invalid"});
         let (code, out) = glob(&state, "alice", &args).await;
         assert_eq!(code, 1);
-        assert!(out.to_lowercase().contains("pattern") || out.to_lowercase().contains("bad"), "got: {out}");
+        assert!(
+            out.to_lowercase().contains("pattern") || out.to_lowercase().contains("bad"),
+            "got: {out}"
+        );
     }
 
     // --- grep tests ---
@@ -1073,8 +1152,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("a.md"), "hello\nworld\n").await.unwrap();
-        tokio::fs::write(user_dir.join("b.md"), "foo\nbar\n").await.unwrap();
+        tokio::fs::write(user_dir.join("a.md"), "hello\nworld\n")
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("b.md"), "foo\nbar\n")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"pattern": "world"});
@@ -1089,7 +1172,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("t.md"), "foo123\nbar456\nnothing\n").await.unwrap();
+        tokio::fs::write(user_dir.join("t.md"), "foo123\nbar456\nnothing\n")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"pattern": r"\d{3}", "regex": true});
@@ -1104,9 +1189,15 @@ mod tests {
     async fn test_grep_path_prefix_scopes_search() {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_dir.join("skills")).await.unwrap();
-        tokio::fs::write(user_dir.join("skills/x.md"), "target\n").await.unwrap();
-        tokio::fs::write(user_dir.join("root.md"), "target\n").await.unwrap();
+        tokio::fs::create_dir_all(user_dir.join("skills"))
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("skills/x.md"), "target\n")
+            .await
+            .unwrap();
+        tokio::fs::write(user_dir.join("root.md"), "target\n")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"pattern": "target", "path_prefix": "skills"});
@@ -1121,8 +1212,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::create_dir_all(tmp.path().join("bob")).await.unwrap();
-        tokio::fs::write(tmp.path().join("bob/secret.txt"), "target\n").await.unwrap();
+        tokio::fs::create_dir_all(tmp.path().join("bob"))
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("bob/secret.txt"), "target\n")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"pattern": "target", "path_prefix": "../bob"});
@@ -1149,7 +1244,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("a.md"), "hello\n").await.unwrap();
+        tokio::fs::write(user_dir.join("a.md"), "hello\n")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({"pattern": "missing"});
@@ -1166,7 +1263,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("f.txt"), "hi").await.unwrap();
+        tokio::fs::write(user_dir.join("f.txt"), "hi")
+            .await
+            .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
         state.quota.check_and_reserve_upload("alice", 2).unwrap();
@@ -1175,7 +1274,9 @@ mod tests {
         tokio::fs::set_permissions(
             user_dir.join("f.txt"),
             std::fs::Permissions::from_mode(0o400),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         // Attempt an edit that would grow the file by 9 bytes.
         let args = serde_json::json!({
@@ -1199,6 +1300,8 @@ mod tests {
         tokio::fs::set_permissions(
             user_dir.join("f.txt"),
             std::fs::Permissions::from_mode(0o600),
-        ).await.ok();
+        )
+        .await
+        .ok();
     }
 }

@@ -71,12 +71,10 @@ pub async fn create_job(
 }
 
 pub async fn list_by_user(pool: &PgPool, user_id: &str) -> Result<Vec<CronJob>, sqlx::Error> {
-    sqlx::query_as::<_, CronJob>(
-        "SELECT * FROM cron_jobs WHERE user_id = $1 ORDER BY created_at",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
+    sqlx::query_as::<_, CronJob>("SELECT * FROM cron_jobs WHERE user_id = $1 ORDER BY created_at")
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
 }
 
 pub async fn find_by_id(pool: &PgPool, job_id: &str) -> Result<Option<CronJob>, sqlx::Error> {
@@ -86,18 +84,12 @@ pub async fn find_by_id(pool: &PgPool, job_id: &str) -> Result<Option<CronJob>, 
         .await
 }
 
-pub async fn delete_job(
-    pool: &PgPool,
-    job_id: &str,
-    user_id: &str,
-) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM cron_jobs WHERE job_id = $1 AND user_id = $2",
-    )
-    .bind(job_id)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
+pub async fn delete_job(pool: &PgPool, job_id: &str, user_id: &str) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM cron_jobs WHERE job_id = $1 AND user_id = $2")
+        .bind(job_id)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -230,7 +222,9 @@ pub async fn ensure_system_cron_job(
     }
 
     let job_id = uuid::Uuid::new_v4().to_string();
-    let next_run_at = match crate::server_tools::cron_tool::compute_next_cron_pub(cron_expr, timezone) {
+    let next_run_at = match crate::server_tools::cron_tool::compute_next_cron_pub(
+        cron_expr, timezone,
+    ) {
         Ok(ts) => Some(ts),
         Err(e) => {
             tracing::warn!(
@@ -299,8 +293,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // needs DATABASE_URL
     async fn test_ensure_system_cron_job_is_idempotent() {
-        let url = std::env::var("DATABASE_URL")
-            .expect("set DATABASE_URL to run this test");
+        let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL to run this test");
         let pool = crate::db::init_db(&url).await;
 
         let user_id = format!("c5-idem-{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -311,25 +304,47 @@ mod tests {
 
         // First call creates.
         ensure_system_cron_job(
-            &pool, &user_id, "dream", "0 */2 * * *", "UTC", "", "gateway", "-", false,
+            &pool,
+            &user_id,
+            "dream",
+            "0 */2 * * *",
+            "UTC",
+            "",
+            "gateway",
+            "-",
+            false,
         )
         .await
         .unwrap();
 
         let jobs1 = list_by_user(&pool, &user_id).await.unwrap();
         let dream_count_1 = jobs1.iter().filter(|j| j.name == "dream").count();
-        assert_eq!(dream_count_1, 1, "first call should create exactly one dream row");
+        assert_eq!(
+            dream_count_1, 1,
+            "first call should create exactly one dream row"
+        );
 
         // First-call invariants: correctly-shaped row
         let dream = jobs1.iter().find(|j| j.name == "dream").unwrap();
         assert!(dream.enabled, "newly-created system job should be enabled");
         assert_eq!(dream.run_count, 0, "fresh row should have run_count=0");
-        assert!(dream.next_run_at.is_some(), "next_run_at should be precomputed");
+        assert!(
+            dream.next_run_at.is_some(),
+            "next_run_at should be precomputed"
+        );
         assert_eq!(dream.kind, SYSTEM_KIND);
 
         // Second call is a no-op.
         ensure_system_cron_job(
-            &pool, &user_id, "dream", "0 */2 * * *", "UTC", "", "gateway", "-", false,
+            &pool,
+            &user_id,
+            "dream",
+            "0 */2 * * *",
+            "UTC",
+            "",
+            "gateway",
+            "-",
+            false,
         )
         .await
         .unwrap();

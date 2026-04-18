@@ -155,8 +155,14 @@ pub struct FunctionCall {
 }
 
 pub enum LlmResponse {
-    Text { content: String, vision_stripped: bool },
-    ToolCalls { calls: Vec<ToolCall>, vision_stripped: bool },
+    Text {
+        content: String,
+        vision_stripped: bool,
+    },
+    ToolCalls {
+        calls: Vec<ToolCall>,
+        vision_stripped: bool,
+    },
 }
 
 // -- Internal request/response structs --
@@ -207,7 +213,15 @@ pub async fn call_llm(
     let url = format!("{}/chat/completions", config.api_base.trim_end_matches('/'));
 
     // First attempt: original messages (may contain images).
-    let first = attempt_chat(client, &url, config, &messages, tools.as_ref(), tool_choice.as_deref()).await;
+    let first = attempt_chat(
+        client,
+        &url,
+        config,
+        &messages,
+        tools.as_ref(),
+        tool_choice.as_deref(),
+    )
+    .await;
 
     match first {
         Ok(resp) => Ok(resp),
@@ -219,12 +233,25 @@ pub async fn call_llm(
                 return Err(msg);
             }
             warn!("LLM non-transient error with images; retrying stripped");
-            match attempt_chat(client, &url, config, &stripped, tools.as_ref(), tool_choice.as_deref()).await {
+            match attempt_chat(
+                client,
+                &url,
+                config,
+                &stripped,
+                tools.as_ref(),
+                tool_choice.as_deref(),
+            )
+            .await
+            {
                 Ok(mut r) => {
                     // Flip vision_stripped on successful retry.
                     match &mut r {
-                        LlmResponse::Text { vision_stripped, .. } => *vision_stripped = true,
-                        LlmResponse::ToolCalls { vision_stripped, .. } => *vision_stripped = true,
+                        LlmResponse::Text {
+                            vision_stripped, ..
+                        } => *vision_stripped = true,
+                        LlmResponse::ToolCalls {
+                            vision_stripped, ..
+                        } => *vision_stripped = true,
                     }
                     Ok(r)
                 }
@@ -322,13 +349,19 @@ async fn attempt_chat(
 
         if let Some(tool_calls) = choice.message.tool_calls {
             if !tool_calls.is_empty() {
-                return Ok(LlmResponse::ToolCalls { calls: tool_calls, vision_stripped: false });
+                return Ok(LlmResponse::ToolCalls {
+                    calls: tool_calls,
+                    vision_stripped: false,
+                });
             }
         }
 
         if let Some(content) = choice.message.content {
             let cleaned = strip_think_tags(&content.into_text());
-            return Ok(LlmResponse::Text { content: cleaned, vision_stripped: false });
+            return Ok(LlmResponse::Text {
+                content: cleaned,
+                vision_stripped: false,
+            });
         }
 
         return Err(CallError::NonTransient(
@@ -402,15 +435,23 @@ mod tests {
     #[test]
     fn test_chat_message_user_with_blocks_serializes_as_array() {
         let m = ChatMessage::user_with_blocks(vec![
-            ContentBlock::Text { text: "describe".into() },
+            ContentBlock::Text {
+                text: "describe".into(),
+            },
             ContentBlock::ImageUrl {
-                image_url: ImageUrl { url: "data:image/png;base64,AA".into() },
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,AA".into(),
+                },
             },
         ]);
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains(r#""role":"user""#));
         assert!(json.contains(r#""content":[{"type":"text","text":"describe"}"#));
-        assert!(json.contains(r#"{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]"#));
+        assert!(
+            json.contains(
+                r#"{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]"#
+            )
+        );
     }
 
     #[test]
@@ -452,7 +493,9 @@ mod tests {
         let blocks = Content::Blocks(vec![
             ContentBlock::Text { text: "ab".into() },
             ContentBlock::ImageUrl {
-                image_url: ImageUrl { url: "ignored".into() },
+                image_url: ImageUrl {
+                    url: "ignored".into(),
+                },
             },
             ContentBlock::Text { text: "cde".into() },
         ]);
@@ -478,9 +521,13 @@ mod tests {
 
     fn make_user_with_image() -> ChatMessage {
         ChatMessage::user_with_blocks(vec![
-            ContentBlock::Text { text: "what is this".into() },
+            ContentBlock::Text {
+                text: "what is this".into(),
+            },
             ContentBlock::ImageUrl {
-                image_url: ImageUrl { url: "data:image/png;base64,AA".into() },
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,AA".into(),
+                },
             },
         ])
     }
@@ -499,7 +546,9 @@ mod tests {
         match msgs[1].content.as_ref().unwrap() {
             Content::Blocks(blocks) => {
                 assert_eq!(blocks.len(), 2);
-                assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "what is this"));
+                assert!(
+                    matches!(&blocks[0], ContentBlock::Text { text } if text == "what is this")
+                );
                 assert!(matches!(
                     &blocks[1],
                     ContentBlock::Text { text } if text.starts_with("[Image omitted")
@@ -522,7 +571,10 @@ mod tests {
             vision_stripped: false,
         };
         match r {
-            LlmResponse::Text { content, vision_stripped } => {
+            LlmResponse::Text {
+                content,
+                vision_stripped,
+            } => {
                 assert_eq!(content, "hi");
                 assert!(!vision_stripped);
             }

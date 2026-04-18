@@ -1,6 +1,6 @@
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct QuotaCache {
     /// user_id -> current usage in bytes
@@ -49,9 +49,9 @@ impl QuotaCache {
         let quota = self.quota_bytes;
         let update_result = counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             if current > quota {
-                None                                    // soft-locked — refuse
+                None // soft-locked — refuse
             } else {
-                Some(current.saturating_add(bytes))     // reserve (grace window allows exceed)
+                Some(current.saturating_add(bytes)) // reserve (grace window allows exceed)
             }
         });
         match update_result {
@@ -204,7 +204,7 @@ mod tests {
         use std::sync::Arc as StdArc;
         use std::thread;
 
-        let q = StdArc::new(QuotaCache::new(10_000));   // 10 KB quota
+        let q = StdArc::new(QuotaCache::new(10_000)); // 10 KB quota
         // per-upload cap = 8000
         let mut handles = Vec::new();
         for _ in 0..100 {
@@ -214,7 +214,9 @@ mod tests {
                 let _ = q.check_and_reserve_upload("alice", 50);
             }));
         }
-        for h in handles { h.join().unwrap(); }
+        for h in handles {
+            h.join().unwrap();
+        }
         // With the old load+store, concurrent writers lose updates and the
         // counter sits well below 5000. With fetch_update, every increment
         // is preserved.

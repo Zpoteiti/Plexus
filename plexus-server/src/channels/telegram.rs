@@ -432,7 +432,10 @@ mod tests {
     #[test]
     fn test_synth_filename_voice() {
         let ts = Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 5).unwrap();
-        assert_eq!(synth_filename_for_voice(ts), "voice_message_20260415_103005.ogg");
+        assert_eq!(
+            synth_filename_for_voice(ts),
+            "voice_message_20260415_103005.ogg"
+        );
     }
 
     #[test]
@@ -443,7 +446,8 @@ mod tests {
 
     #[test]
     fn test_oversize_attachment_marker() {
-        let marker = oversize_attachment_marker("big.zip", (TELEGRAM_ATTACHMENT_MAX_BYTES + 1) as u64);
+        let marker =
+            oversize_attachment_marker("big.zip", (TELEGRAM_ATTACHMENT_MAX_BYTES + 1) as u64);
         assert!(marker.contains("big.zip"));
         assert!(marker.contains("exceeds"));
         assert!(marker.contains("20 MB"));

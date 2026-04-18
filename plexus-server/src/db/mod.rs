@@ -141,5 +141,4 @@ async fn create_tables(pool: &PgPool) {
             .await
             .unwrap_or_else(|e| panic!("Failed to execute SQL: {e}\n{sql}"));
     }
-
 }

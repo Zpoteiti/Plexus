@@ -147,31 +147,38 @@ mod tests {
     #[tokio::test]
     #[ignore] // needs DATABASE_URL
     async fn test_last_dream_at_roundtrip() {
-        let url = std::env::var("DATABASE_URL")
-            .expect("set DATABASE_URL to run this test");
+        let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL to run this test");
         let pool = crate::db::init_db(&url).await;
 
         let user_id = format!("d3-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let user_email = format!("{user_id}@test.local");
-        crate::db::users::create_user(
-            &pool, &user_id, &user_email, "", false,
-        ).await.unwrap();
+        crate::db::users::create_user(&pool, &user_id, &user_email, "", false)
+            .await
+            .unwrap();
 
         // Initial state: None (column default NULL).
         let initial = get_last_dream_at(&pool, &user_id).await.unwrap();
-        assert!(initial.is_none(), "freshly-created user should have last_dream_at=NULL");
+        assert!(
+            initial.is_none(),
+            "freshly-created user should have last_dream_at=NULL"
+        );
 
         // Write a timestamp.
         let now = chrono::Utc::now();
         update_last_dream_at(&pool, &user_id, now).await.unwrap();
 
         // Read it back.
-        let after = get_last_dream_at(&pool, &user_id).await.unwrap()
+        let after = get_last_dream_at(&pool, &user_id)
+            .await
+            .unwrap()
             .expect("timestamp should be present after update");
 
         // Postgres TIMESTAMPTZ stores microsecond precision; allow a 5ms tolerance.
         let delta = (after - now).num_milliseconds().abs();
-        assert!(delta < 5, "expected roundtrip within 5ms; got {delta}ms delta");
+        assert!(
+            delta < 5,
+            "expected roundtrip within 5ms; got {delta}ms delta"
+        );
 
         // Cleanup.
         sqlx::query("DELETE FROM users WHERE user_id = $1")
@@ -184,8 +191,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // needs DATABASE_URL
     async fn test_list_users_due_for_heartbeat_selects_null_and_stale() {
-        let url = std::env::var("DATABASE_URL")
-            .expect("set DATABASE_URL to run this test");
+        let url = std::env::var("DATABASE_URL").expect("set DATABASE_URL to run this test");
         let pool = crate::db::init_db(&url).await;
 
         // Three users: one NULL, one stale (1h ago), one fresh (10s ago).
@@ -193,15 +199,9 @@ mod tests {
             .map(|i| format!("e1d-{}-{}", i, &uuid::Uuid::new_v4().to_string()[..8]))
             .collect();
         for id in &ids {
-            crate::db::users::create_user(
-                &pool,
-                id,
-                &format!("{id}@test.local"),
-                "",
-                false,
-            )
-            .await
-            .unwrap();
+            crate::db::users::create_user(&pool, id, &format!("{id}@test.local"), "", false)
+                .await
+                .unwrap();
         }
 
         // ids[0] stays NULL. ids[1] is stale. ids[2] is fresh.
@@ -225,7 +225,10 @@ mod tests {
         // Oldest-first ordering: NULL (epoch) < 1h-ago.
         let pos_null = due.iter().position(|x| x == &ids[0]).unwrap();
         let pos_stale = due.iter().position(|x| x == &ids[1]).unwrap();
-        assert!(pos_null < pos_stale, "NULL user should sort before stale user");
+        assert!(
+            pos_null < pos_stale,
+            "NULL user should sort before stale user"
+        );
 
         for id in &ids {
             sqlx::query("DELETE FROM users WHERE user_id = $1")

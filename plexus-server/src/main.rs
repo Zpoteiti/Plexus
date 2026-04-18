@@ -9,8 +9,8 @@ mod cron;
 mod db;
 pub mod dream;
 pub mod evaluator;
-pub mod heartbeat;
 mod file_store;
+pub mod heartbeat;
 mod memory;
 mod providers;
 mod server_mcp;
@@ -51,23 +51,17 @@ async fn main() {
         .await
         .ok()
         .flatten()
-        .unwrap_or_else(|| {
-            include_str!("../templates/prompts/dream_phase1.md").to_string()
-        });
+        .unwrap_or_else(|| include_str!("../templates/prompts/dream_phase1.md").to_string());
     let dream_phase2_prompt = db::system_config::get(&pool, "dream_phase2_prompt")
         .await
         .ok()
         .flatten()
-        .unwrap_or_else(|| {
-            include_str!("../templates/prompts/dream_phase2.md").to_string()
-        });
+        .unwrap_or_else(|| include_str!("../templates/prompts/dream_phase2.md").to_string());
     let heartbeat_phase1_prompt = db::system_config::get(&pool, "heartbeat_phase1_prompt")
         .await
         .ok()
         .flatten()
-        .unwrap_or_else(|| {
-            include_str!("../templates/prompts/heartbeat_phase1.md").to_string()
-        });
+        .unwrap_or_else(|| include_str!("../templates/prompts/heartbeat_phase1.md").to_string());
 
     let (outbound_tx, outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(1000);
 

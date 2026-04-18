@@ -27,11 +27,14 @@ static BLOCKED_RANGES: LazyLock<Vec<IpNet>> = LazyLock::new(|| {
 });
 
 // Compiled once at startup — all O(n) passes over the text
-static RE_HEAD:   LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?si)<head[\s\S]*?</head>").unwrap());
-static RE_SCRIPT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?si)<script[\s\S]*?</script>").unwrap());
-static RE_STYLE:  LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?si)<style[\s\S]*?</style>").unwrap());
-static RE_TAGS:   LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
-static RE_LINES:  LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+static RE_HEAD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?si)<head[\s\S]*?</head>").unwrap());
+static RE_SCRIPT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?si)<script[\s\S]*?</script>").unwrap());
+static RE_STYLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?si)<style[\s\S]*?</style>").unwrap());
+static RE_TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
+static RE_LINES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 static RE_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t]+").unwrap());
 
 /// Strip HTML to readable plain text.
@@ -44,11 +47,11 @@ fn extract_text(html: &str) -> String {
 
     // Decode common HTML entities
     let s = s
-        .replace("&amp;",  "&")
-        .replace("&lt;",   "<")
-        .replace("&gt;",   ">")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
         .replace("&quot;", "\"")
-        .replace("&#39;",  "'")
+        .replace("&#39;", "'")
         .replace("&nbsp;", " ")
         .replace("&ndash;", "–")
         .replace("&mdash;", "—")
@@ -74,7 +77,12 @@ pub async fn web_fetch(state: &Arc<AppState>, _user_id: &str, args: &Value) -> (
     // Acquire semaphore permit
     let _permit = match state.web_fetch_semaphore.try_acquire() {
         Ok(p) => p,
-        Err(_) => return (1, "Too many concurrent web fetches. Try again later.".into()),
+        Err(_) => {
+            return (
+                1,
+                "Too many concurrent web fetches. Try again later.".into(),
+            );
+        }
     };
 
     let resp = match state

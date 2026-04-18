@@ -52,7 +52,10 @@ async fn poll_and_execute(state: &Arc<AppState>) -> Result<(), String> {
     // Step 3: Dispatch each claimed job to the message bus.
     // DO NOT reschedule here — that happens after the agent loop completes.
     for job in claimed {
-        info!("Cron firing: {} [{}] kind={}", job.name, job.job_id, job.kind);
+        info!(
+            "Cron firing: {} [{}] kind={}",
+            job.name, job.job_id, job.kind
+        );
 
         // Dream system-cron: dispatch to the dream handler on a new task.
         // handle_dream_fire owns the decision to skip (idle check, NO-OP
@@ -90,9 +93,15 @@ async fn poll_and_execute(state: &Arc<AppState>) -> Result<(), String> {
         if let Err(e) = bus::publish_inbound(state, event).await {
             // Dispatch failed — unclaim immediately so it retries in 1 minute
             // rather than waiting 30 min for the stuck recovery sweep.
-            error!("Cron dispatch failed for {} [{}]: {e}", job.name, job.job_id);
+            error!(
+                "Cron dispatch failed for {} [{}]: {e}",
+                job.name, job.job_id
+            );
             if let Err(ue) = crate::db::cron::unclaim_job(&state.db, &job.job_id).await {
-                warn!("Cron: failed to unclaim job {} after dispatch failure: {ue}", job.job_id);
+                warn!(
+                    "Cron: failed to unclaim job {} after dispatch failure: {ue}",
+                    job.job_id
+                );
             }
         }
         // Rescheduling intentionally omitted — see reschedule_after_completion below.
@@ -106,11 +115,7 @@ async fn poll_and_execute(state: &Arc<AppState>) -> Result<(), String> {
 /// computed from "now" (after execution finished), not from when the job was claimed.
 ///
 /// `success`: true if handle_event returned Ok(()), false if it returned Err.
-pub async fn reschedule_after_completion(
-    state: &Arc<AppState>,
-    job_id: &str,
-    success: bool,
-) {
+pub async fn reschedule_after_completion(state: &Arc<AppState>, job_id: &str, success: bool) {
     // Load the job to get its schedule parameters.
     // The job still exists even though next_run_at is NULL (claimed state).
     let job = match crate::db::cron::find_by_id(&state.db, job_id).await {
@@ -163,9 +168,7 @@ pub async fn reschedule_after_completion(
     }
 }
 
-fn compute_next_run(
-    job: &crate::db::cron::CronJob,
-) -> Option<chrono::DateTime<chrono::Utc>> {
+fn compute_next_run(job: &crate::db::cron::CronJob) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Some(ref expr) = job.cron_expr {
         crate::server_tools::cron_tool::compute_next_cron_pub(expr, &job.timezone).ok()
     } else if let Some(secs) = job.every_seconds {

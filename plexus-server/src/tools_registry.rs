@@ -57,8 +57,13 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
     };
     for schema in server_mcp_schemas {
         let name = tool_name(&schema).to_string();
-        if name.is_empty() { continue; }
-        mcp_sources.entry(name.clone()).or_default().push(SERVER_DEVICE_NAME.to_string());
+        if name.is_empty() {
+            continue;
+        }
+        mcp_sources
+            .entry(name.clone())
+            .or_default()
+            .push(SERVER_DEVICE_NAME.to_string());
         representatives.entry(name).or_insert(schema);
     }
 
@@ -66,13 +71,23 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
     for (device_name, tools) in &device_tools {
         for schema in tools {
             let name = tool_name(schema).to_string();
-            if name.is_empty() { continue; }
-            if name.starts_with("mcp_") {
-                mcp_sources.entry(name.clone()).or_default().push(device_name.clone());
-            } else {
-                native_sources.entry(name.clone()).or_default().push(device_name.clone());
+            if name.is_empty() {
+                continue;
             }
-            representatives.entry(name).or_insert_with(|| schema.clone());
+            if name.starts_with("mcp_") {
+                mcp_sources
+                    .entry(name.clone())
+                    .or_default()
+                    .push(device_name.clone());
+            } else {
+                native_sources
+                    .entry(name.clone())
+                    .or_default()
+                    .push(device_name.clone());
+            }
+            representatives
+                .entry(name)
+                .or_insert_with(|| schema.clone());
         }
     }
 

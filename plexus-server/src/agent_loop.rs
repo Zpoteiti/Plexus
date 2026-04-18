@@ -58,8 +58,22 @@ pub(crate) async fn publish_final(
 
     use crate::bus::EventKind;
     match kind {
-        EventKind::UserTurn => publish_via_channel(state, channel, chat_id, session_id, user_id, content).await,
-        EventKind::Cron => publish_final_cron(state, channel, chat_id, session_id, user_id, content, cron_job_id, job_deliver).await,
+        EventKind::UserTurn => {
+            publish_via_channel(state, channel, chat_id, session_id, user_id, content).await
+        }
+        EventKind::Cron => {
+            publish_final_cron(
+                state,
+                channel,
+                chat_id,
+                session_id,
+                user_id,
+                content,
+                cron_job_id,
+                job_deliver,
+            )
+            .await
+        }
         EventKind::Heartbeat => publish_final_heartbeat(state, &user_id, &content).await,
         EventKind::Dream => {
             // Dream cron rows have deliver=false; this arm is defensive.
@@ -102,7 +116,10 @@ async fn publish_final_cron(
 ) {
     let Some(job_id) = cron_job_id else {
         // Cron kind without a job_id would be a bug; log and drop.
-        warn!(session_id, "publish_final: EventKind::Cron with no cron_job_id — skipping publish");
+        warn!(
+            session_id,
+            "publish_final: EventKind::Cron with no cron_job_id — skipping publish"
+        );
         return;
     };
 
@@ -111,7 +128,10 @@ async fn publish_final_cron(
         None => match crate::db::cron::find_by_id(&state.db, &job_id).await {
             Ok(Some(job)) => job.deliver,
             Ok(None) => {
-                warn!(job_id, "publish_final: cron job not found, skipping publish");
+                warn!(
+                    job_id,
+                    "publish_final: cron job not found, skipping publish"
+                );
                 return;
             }
             Err(e) => {
@@ -148,13 +168,8 @@ async fn publish_final_heartbeat(
     content: &str,
 ) {
     // 1. Evaluator gate.
-    let eval = crate::evaluator::evaluate_notification(
-        state,
-        user_id,
-        content,
-        "heartbeat wake-up",
-    )
-    .await;
+    let eval =
+        crate::evaluator::evaluate_notification(state, user_id, content, "heartbeat wake-up").await;
     if !eval.should_notify {
         info!(user_id, reason = %eval.reason, "heartbeat: evaluator suppressed notification");
         return;
@@ -163,7 +178,10 @@ async fn publish_final_heartbeat(
     // 2. Discord first.
     if let Ok(Some(cfg)) = crate::db::discord::get_config(&state.db, user_id).await
         && cfg.enabled
-        && cfg.partner_discord_id.as_deref().is_some_and(|id| !id.is_empty())
+        && cfg
+            .partner_discord_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
     {
         let partner_id = cfg.partner_discord_id.as_deref().unwrap();
         let _ = state
@@ -184,7 +202,10 @@ async fn publish_final_heartbeat(
     // 3. Telegram second.
     if let Ok(Some(cfg)) = crate::db::telegram::get_config(&state.db, user_id).await
         && cfg.enabled
-        && cfg.partner_telegram_id.as_deref().is_some_and(|id| !id.is_empty())
+        && cfg
+            .partner_telegram_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
     {
         let partner_id = cfg.partner_telegram_id.as_deref().unwrap();
         let _ = state
@@ -203,7 +224,10 @@ async fn publish_final_heartbeat(
     }
 
     // 4. Silence.
-    info!(user_id, "heartbeat: no external channel configured; output stored only");
+    info!(
+        user_id,
+        "heartbeat: no external channel configured; output stored only"
+    );
 }
 
 pub async fn run_session(
@@ -263,10 +287,14 @@ async fn handle_event(
 
     // Large message conversion: >4K chars → save full to file, inline first 4K
     let content = if event.content.len() > USER_MESSAGE_MAX_CHARS {
-        let file_id =
-            crate::file_store::save_upload(state, user_id, "large_message.txt", event.content.as_bytes())
-                .await
-                .map_err(|e| format!("Save large message: {}", e.message))?;
+        let file_id = crate::file_store::save_upload(
+            state,
+            user_id,
+            "large_message.txt",
+            event.content.as_bytes(),
+        )
+        .await
+        .map_err(|e| format!("Save large message: {}", e.message))?;
         format!(
             "{}\n\n[Full message saved as file: /api/files/{file_id}]",
             &event.content[..USER_MESSAGE_MAX_CHARS]
@@ -296,7 +324,8 @@ async fn handle_event(
     let content_to_store = if event.media.is_empty() {
         content.clone()
     } else {
-        let blocks = crate::context::build_user_content(state, user_id, &content, &event.media).await;
+        let blocks =
+            crate::context::build_user_content(state, user_id, &content, &event.media).await;
         // Serialize Content::Blocks(blocks) → JSON array of blocks.
         // On serde failure (should be impossible for owned data), fall back
         // to plain text so the turn still proceeds.
@@ -339,9 +368,9 @@ async fn handle_event(
         _ => crate::context::PromptMode::UserTurn,
     };
     let allowlist = match event.kind {
-        crate::bus::EventKind::Dream => crate::server_tools::ToolAllowlist::Only(
-            crate::server_tools::DREAM_PHASE2_ALLOWLIST,
-        ),
+        crate::bus::EventKind::Dream => {
+            crate::server_tools::ToolAllowlist::Only(crate::server_tools::DREAM_PHASE2_ALLOWLIST)
+        }
         _ => crate::server_tools::ToolAllowlist::All,
     };
 
@@ -386,7 +415,8 @@ async fn handle_event(
             event.chat_id.as_deref(),
             vision_stripped,
             mode,
-        ).await;
+        )
+        .await;
 
         // Check compression
         let llm_config = state.llm_config.read().await;
@@ -423,7 +453,10 @@ async fn handle_event(
         let response = openai::call_llm(&state.http_client, &config, messages, tools, None).await;
 
         match response {
-            Ok(LlmResponse::Text { content, vision_stripped: stripped }) => {
+            Ok(LlmResponse::Text {
+                content,
+                vision_stripped: stripped,
+            }) => {
                 // Persist vision_stripped flag to session handle if provider stripped images
                 if stripped {
                     session_handle
@@ -464,7 +497,10 @@ async fn handle_event(
 
                 return Ok(());
             }
-            Ok(LlmResponse::ToolCalls { calls, vision_stripped: stripped }) => {
+            Ok(LlmResponse::ToolCalls {
+                calls,
+                vision_stripped: stripped,
+            }) => {
                 // Persist vision_stripped flag to session handle if provider stripped images
                 if stripped {
                     session_handle
@@ -795,7 +831,8 @@ mod deliver_tests {
         // Heartbeat with no Discord / Telegram config and no LLM config
         // (evaluator defaults to silence). Expect: no OutboundEvent.
         let tmp = tempfile::TempDir::new().unwrap();
-        let (state, mut outbound_rx) = crate::state::AppState::test_minimal_with_outbound(tmp.path());
+        let (state, mut outbound_rx) =
+            crate::state::AppState::test_minimal_with_outbound(tmp.path());
 
         let params = PublishFinalParams {
             channel: "internal".into(),
