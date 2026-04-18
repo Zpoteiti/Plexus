@@ -9,8 +9,8 @@ fn main() {
     {
         use std::process::Command;
 
-        let frontend_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../plexus-frontend");
+        let frontend_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../plexus-frontend");
 
         // Re-run this build script if frontend source changes.
         println!("cargo:rerun-if-changed=../plexus-frontend/src");

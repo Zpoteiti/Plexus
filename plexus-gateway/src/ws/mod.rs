@@ -1,2 +1,2 @@
-pub mod plexus;
 pub mod chat;
+pub mod plexus;

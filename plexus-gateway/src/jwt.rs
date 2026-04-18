@@ -1,4 +1,4 @@
-use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -22,7 +22,7 @@ pub fn validate(token: &str, secret: &str) -> Result<Claims, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{encode, EncodingKey, Header};
+    use jsonwebtoken::{EncodingKey, Header, encode};
 
     const SECRET: &str = "test-secret-key";
 
@@ -32,8 +32,12 @@ mod tests {
             is_admin,
             exp,
         };
-        encode(&Header::default(), &claims, &EncodingKey::from_secret(SECRET.as_bytes()))
-            .unwrap()
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(SECRET.as_bytes()),
+        )
+        .unwrap()
     }
 
     fn future_exp() -> u64 {

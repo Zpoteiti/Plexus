@@ -4,10 +4,10 @@
 #[cfg(feature = "embed-frontend")]
 mod inner {
     use axum::{
-        body::Body,
-        http::{header, Request, Response, StatusCode},
-        routing::get,
         Router,
+        body::Body,
+        http::{Request, Response, StatusCode, header},
+        routing::get,
     };
     use rust_embed::Embed;
 

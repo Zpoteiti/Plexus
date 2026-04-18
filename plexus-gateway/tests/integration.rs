@@ -1,4 +1,8 @@
-use axum::{extract::State, routing::{any, get}, Json, Router};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{any, get},
+};
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use plexus_gateway::config::{AllowedOrigins, Config};
@@ -65,20 +69,32 @@ async fn start_gateway(config: Config) -> (Arc<AppState>, u16) {
 }
 
 fn make_jwt(secret: &str, user_id: &str) -> String {
-    use jsonwebtoken::{encode, EncodingKey, Header};
+    use jsonwebtoken::{EncodingKey, Header, encode};
     use plexus_gateway::jwt::Claims;
     let exp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() + 3600;
-    let claims = Claims { sub: user_id.to_string(), is_admin: false, exp };
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes())).unwrap()
+        .as_secs()
+        + 3600;
+    let claims = Claims {
+        sub: user_id.to_string(),
+        is_admin: false,
+        exp,
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .unwrap()
 }
 
 #[tokio::test]
 async fn test_healthz() {
     let (state, port) = start_gateway(test_config()).await;
-    let resp = reqwest::get(format!("http://127.0.0.1:{port}/healthz")).await.unwrap();
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/healthz"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
@@ -90,8 +106,16 @@ async fn test_healthz() {
 #[tokio::test]
 async fn test_plexus_auth_ok() {
     let (state, port) = start_gateway(test_config()).await;
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus")).await.unwrap();
-    ws.send(Message::Text(serde_json::json!({"type":"auth","token":"test-token"}).to_string().into())).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus"))
+        .await
+        .unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({"type":"auth","token":"test-token"})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
     let resp = ws.next().await.unwrap().unwrap();
     let v: serde_json::Value = serde_json::from_str(&resp.into_text().unwrap()).unwrap();
     assert_eq!(v["type"], "auth_ok");
@@ -101,8 +125,16 @@ async fn test_plexus_auth_ok() {
 #[tokio::test]
 async fn test_plexus_bad_token() {
     let (state, port) = start_gateway(test_config()).await;
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus")).await.unwrap();
-    ws.send(Message::Text(serde_json::json!({"type":"auth","token":"wrong"}).to_string().into())).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus"))
+        .await
+        .unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({"type":"auth","token":"wrong"})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
     let resp = ws.next().await.unwrap().unwrap();
     let v: serde_json::Value = serde_json::from_str(&resp.into_text().unwrap()).unwrap();
     assert_eq!(v["type"], "auth_fail");
@@ -113,12 +145,28 @@ async fn test_plexus_bad_token() {
 async fn test_plexus_duplicate() {
     let (state, port) = start_gateway(test_config()).await;
     // First connection
-    let (mut ws1, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus")).await.unwrap();
-    ws1.send(Message::Text(serde_json::json!({"type":"auth","token":"test-token"}).to_string().into())).await.unwrap();
+    let (mut ws1, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus"))
+        .await
+        .unwrap();
+    ws1.send(Message::Text(
+        serde_json::json!({"type":"auth","token":"test-token"})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
     let _ = ws1.next().await; // auth_ok
     // Second connection — should be rejected
-    let (mut ws2, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus")).await.unwrap();
-    ws2.send(Message::Text(serde_json::json!({"type":"auth","token":"test-token"}).to_string().into())).await.unwrap();
+    let (mut ws2, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus"))
+        .await
+        .unwrap();
+    ws2.send(Message::Text(
+        serde_json::json!({"type":"auth","token":"test-token"})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
     let resp = ws2.next().await.unwrap().unwrap();
     let v: serde_json::Value = serde_json::from_str(&resp.into_text().unwrap()).unwrap();
     assert_eq!(v["type"], "auth_fail");
@@ -130,13 +178,21 @@ async fn test_plexus_duplicate() {
 async fn test_browser_no_plexus() {
     let (state, port) = start_gateway(test_config()).await;
     let jwt = make_jwt("test-secret", "user1");
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}")).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}"))
+        .await
+        .unwrap();
     // Send a message — no plexus connected
-    ws.send(Message::Text(serde_json::json!({
-        "type": "message",
-        "session_id": "gateway:user1:sess1",
-        "content": "hello",
-    }).to_string().into())).await.unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "message",
+            "session_id": "gateway:user1:sess1",
+            "content": "hello",
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
     let resp = ws.next().await.unwrap().unwrap();
     let v: serde_json::Value = serde_json::from_str(&resp.into_text().unwrap()).unwrap();
     assert_eq!(v["type"], "error");
@@ -149,20 +205,38 @@ async fn test_round_trip() {
     let (state, port) = start_gateway(test_config()).await;
 
     // Connect plexus
-    let (mut plexus_ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus")).await.unwrap();
-    plexus_ws.send(Message::Text(serde_json::json!({"type":"auth","token":"test-token"}).to_string().into())).await.unwrap();
+    let (mut plexus_ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus"))
+        .await
+        .unwrap();
+    plexus_ws
+        .send(Message::Text(
+            serde_json::json!({"type":"auth","token":"test-token"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
     let _ = plexus_ws.next().await; // auth_ok
 
     // Connect browser
     let jwt = make_jwt("test-secret", "user1");
-    let (mut browser_ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}")).await.unwrap();
+    let (mut browser_ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}"))
+        .await
+        .unwrap();
 
     // Browser sends message
-    browser_ws.send(Message::Text(serde_json::json!({
-        "type": "message",
-        "session_id": "gateway:user1:sess1",
-        "content": "hello from browser",
-    }).to_string().into())).await.unwrap();
+    browser_ws
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "message",
+                "session_id": "gateway:user1:sess1",
+                "content": "hello from browser",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
 
     // Plexus should receive it
     let plexus_msg = plexus_ws.next().await.unwrap().unwrap();
@@ -172,12 +246,19 @@ async fn test_round_trip() {
     let chat_id = v["chat_id"].as_str().unwrap().to_string();
 
     // Plexus sends reply
-    plexus_ws.send(Message::Text(serde_json::json!({
-        "type": "send",
-        "chat_id": chat_id,
-        "session_id": "gateway:user1:sess1",
-        "content": "hello from agent",
-    }).to_string().into())).await.unwrap();
+    plexus_ws
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "send",
+                "chat_id": chat_id,
+                "session_id": "gateway:user1:sess1",
+                "content": "hello from agent",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
 
     // Browser should receive it
     let browser_msg = browser_ws.next().await.unwrap().unwrap();
@@ -192,13 +273,21 @@ async fn test_round_trip() {
 async fn test_invalid_session_id() {
     let (state, port) = start_gateway(test_config()).await;
     let jwt = make_jwt("test-secret", "user1");
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}")).await.unwrap();
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}"))
+        .await
+        .unwrap();
     // Send message with wrong user_id in session_id
-    ws.send(Message::Text(serde_json::json!({
-        "type": "message",
-        "session_id": "gateway:hacker:sess1",
-        "content": "spoofed",
-    }).to_string().into())).await.unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "message",
+            "session_id": "gateway:hacker:sess1",
+            "content": "spoofed",
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
     let resp = ws.next().await.unwrap().unwrap();
     let v: serde_json::Value = serde_json::from_str(&resp.into_text().unwrap()).unwrap();
     assert_eq!(v["type"], "error");
@@ -211,33 +300,58 @@ async fn test_progress_forwarding() {
     let (state, port) = start_gateway(test_config()).await;
 
     // Connect plexus
-    let (mut plexus_ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus")).await.unwrap();
-    plexus_ws.send(Message::Text(serde_json::json!({"type":"auth","token":"test-token"}).to_string().into())).await.unwrap();
+    let (mut plexus_ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/plexus"))
+        .await
+        .unwrap();
+    plexus_ws
+        .send(Message::Text(
+            serde_json::json!({"type":"auth","token":"test-token"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
     let _ = plexus_ws.next().await; // auth_ok
 
     // Connect browser
     let jwt = make_jwt("test-secret", "user1");
-    let (mut browser_ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}")).await.unwrap();
+    let (mut browser_ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws/chat?token={jwt}"))
+        .await
+        .unwrap();
 
     // Browser sends message to get a chat_id
-    browser_ws.send(Message::Text(serde_json::json!({
-        "type": "message",
-        "session_id": "gateway:user1:sess1",
-        "content": "question",
-    }).to_string().into())).await.unwrap();
+    browser_ws
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "message",
+                "session_id": "gateway:user1:sess1",
+                "content": "question",
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
 
     let plexus_msg = plexus_ws.next().await.unwrap().unwrap();
     let v: serde_json::Value = serde_json::from_str(&plexus_msg.into_text().unwrap()).unwrap();
     let chat_id = v["chat_id"].as_str().unwrap().to_string();
 
     // Plexus sends progress hint
-    plexus_ws.send(Message::Text(serde_json::json!({
-        "type": "send",
-        "chat_id": chat_id,
-        "session_id": "gateway:user1:sess1",
-        "content": "thinking...",
-        "metadata": {"_progress": true},
-    }).to_string().into())).await.unwrap();
+    plexus_ws
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "send",
+                "chat_id": chat_id,
+                "session_id": "gateway:user1:sess1",
+                "content": "thinking...",
+                "metadata": {"_progress": true},
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
 
     // Browser should receive progress type
     let browser_msg = browser_ws.next().await.unwrap().unwrap();

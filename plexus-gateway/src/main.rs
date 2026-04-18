@@ -8,7 +8,11 @@ mod ws;
 
 use crate::config::Config;
 use crate::state::AppState;
-use axum::{extract::State, routing::{any, get}, Json, Router};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{any, get},
+};
 use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;

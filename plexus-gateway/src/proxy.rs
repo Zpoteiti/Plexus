@@ -9,26 +9,41 @@ use std::sync::Arc;
 use tracing::warn;
 
 const HOP_BY_HOP: &[&str] = &[
-    "host", "connection", "transfer-encoding", "upgrade",
-    "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
+    "host",
+    "connection",
+    "transfer-encoding",
+    "upgrade",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
 ];
 
-pub async fn proxy_handler(
-    State(state): State<Arc<AppState>>,
-    req: Request<Body>,
-) -> Response {
+pub async fn proxy_handler(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
     let path = req.uri().path().to_string();
-    let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
 
     // Path traversal check
     if path.contains("..") {
-        return (StatusCode::UNPROCESSABLE_ENTITY, "path traversal not allowed").into_response();
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "path traversal not allowed",
+        )
+            .into_response();
     }
 
     // JWT validation — skip for /api/auth/*
     let is_public = path.starts_with("/api/auth/");
     if !is_public {
-        let auth_header = req.headers().get("authorization").and_then(|v| v.to_str().ok());
+        let auth_header = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok());
         match auth_header {
             Some(h) if h.starts_with("Bearer ") => {
                 let token = &h[7..];
@@ -60,12 +75,13 @@ pub async fn proxy_handler(
         }
     }
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), state.config.upload_max_bytes).await {
-        Ok(b) => b,
-        Err(_) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
-        }
-    };
+    let body_bytes =
+        match axum::body::to_bytes(req.into_body(), state.config.upload_max_bytes).await {
+            Ok(b) => b,
+            Err(_) => {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+            }
+        };
 
     let upstream_req = state
         .http_client
@@ -84,7 +100,8 @@ pub async fn proxy_handler(
         }
     };
 
-    let status = StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let resp_headers = upstream_resp.headers().clone();
 
     let resp_bytes = match upstream_resp.bytes().await {

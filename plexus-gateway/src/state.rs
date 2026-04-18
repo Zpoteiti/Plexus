@@ -1,8 +1,7 @@
 /// Gateway application state — stateless w.r.t. sessions.
-
 use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;

@@ -235,6 +235,13 @@ mod tests {
         assert!(frame.get("content").is_none());
         assert!(frame.get("media").is_none());
     }
+
+    #[test]
+    fn test_build_kick_user_frame() {
+        let frame = build_kick_user_frame("user-42");
+        assert_eq!(frame["type"], "kick_user");
+        assert_eq!(frame["user_id"], "user-42");
+    }
 }
 
 /// Deliver an outbound event to the gateway.
@@ -265,4 +272,31 @@ fn build_deliver_frame(event: &crate::bus::OutboundEvent) -> serde_json::Value {
         "user_id": event.user_id,
         "session_id": event.session_id,
     })
+}
+
+fn build_kick_user_frame(user_id: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "kick_user", "user_id": user_id })
+}
+
+/// Send a kick_user frame to plexus-gateway. The gateway will cancel
+/// every browser WebSocket whose user_id matches. Used by the account
+/// deletion flow (AD-5) to close live browser connections for a
+/// deleted user.
+pub async fn kick_user(state: &AppState, user_id: &str) {
+    let sink_guard = state.gateway_sink.read().await;
+    let Some(sink) = sink_guard.as_ref() else {
+        warn!(user_id, "Gateway: not connected, cannot kick user");
+        return;
+    };
+    let frame = build_kick_user_frame(user_id);
+    let json = serde_json::to_string(&frame).unwrap();
+    let mut s = sink.lock().await;
+    if let Err(e) = futures_util::SinkExt::send(
+        &mut *s,
+        tokio_tungstenite::tungstenite::Message::Text(json.into()),
+    )
+    .await
+    {
+        warn!(error = %e, user_id, "Gateway: kick_user send failed");
+    }
 }

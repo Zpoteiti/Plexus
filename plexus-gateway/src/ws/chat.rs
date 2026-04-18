@@ -1,15 +1,18 @@
 use crate::state::{AppState, BrowserConnection, OutboundFrame};
 use axum::{
-    extract::{Query, State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{
+        Query, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     http::HeaderMap,
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::mpsc;
-use tracing::{info, warn, info_span, Instrument};
+use tracing::{Instrument, info, info_span, warn};
 
 #[derive(Deserialize)]
 pub struct WsChatQuery {

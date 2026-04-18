@@ -39,9 +39,9 @@ impl Config {
                 .as_str()
             {
                 "*" => AllowedOrigins::Any,
-                list => AllowedOrigins::List(
-                    list.split(',').map(|s| s.trim().to_string()).collect(),
-                ),
+                list => {
+                    AllowedOrigins::List(list.split(',').map(|s| s.trim().to_string()).collect())
+                }
             },
             upload_max_bytes: std::env::var("PLEXUS_GATEWAY_UPLOAD_MAX_BYTES")
                 .ok()
