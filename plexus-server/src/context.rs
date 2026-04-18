@@ -229,6 +229,24 @@ async fn load_channel_snapshot(state: &AppState, user_id: &str) -> ChannelSnapsh
     }
 }
 
+/// Assemble the dream Phase-2 system prompt from its components.
+///
+/// Pure function — no I/O — so it can be called directly in unit tests.
+/// `build_context` delegates to this when `mode == PromptMode::Dream`.
+pub(crate) fn assemble_dream_system_prompt(
+    phase2: &str,
+    memory: &str,
+    soul: &str,
+    skills_section: &str,
+) -> String {
+    format!(
+        "{phase2}\n\n\
+         ## Current MEMORY.md\n\n{memory}\n\n\
+         ## Current SOUL.md\n\n{soul}\n\n\
+         {skills_section}"
+    )
+}
+
 /// Build the full context for an LLM call.
 ///
 /// User-role rows may hold JSON-serialized `Content::Blocks` (written by
@@ -249,15 +267,14 @@ pub async fn build_context(
     default_soul: &Option<String>,
     chat_id: Option<&str>,
     vision_stripped: bool,
-    // D-8 will branch on `mode` for Dream; Plan E will add the Heartbeat branch.
     mode: PromptMode,
 ) -> Vec<ChatMessage> {
     let mut messages = Vec::new();
 
-    // ── Section 1: Soul ────────────────────────────────────────────────────────
-    // Read from workspace file; empty → fall back to admin default → fallback string.
+    // ── Common data: loaded for all modes ─────────────────────────────────────
     let ws_root = std::path::Path::new(&state.config.workspace_root);
     let user_root = ws_root.join(&user.user_id);
+
     let soul_from_file = tokio::fs::read_to_string(user_root.join("SOUL.md"))
         .await
         .unwrap_or_default();
@@ -268,67 +285,81 @@ pub async fn build_context(
     } else {
         "You are PLEXUS, a distributed AI agent."
     };
-    let mut system = format!("{soul}\n\n");
 
-    // ── Section 2: Identity ────────────────────────────────────────────────────
-    system += "## Identity\n";
-
-    // 2a — Account
-    let name = user
-        .display_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("(not set)");
-    system += &format!("### Account\nName: {} | Email: {}\n\n", name, user.email);
-
-    // 2b — Current Session
-    system += &identity.build_session_section(chat_id);
-    system += "\n";
-
-    // 2c — Channels
-    let snap = load_channel_snapshot(state, &user.user_id).await;
-    system += &render_channels_section(&snap);
-    system += "Reply on the current channel unless the partner asks otherwise.\n\n";
-
-    // ── Section 3: Attachments ─────────────────────────────────────────────────
-    system += "## Attachments\n";
-    system += "Files may appear as [Attachment: name → /api/files/{id}]. They live on the\n";
-    system += "server. To operate on one, use `file_transfer` to move it to a client device,\n";
-    system += "then use client tools (shell, read_file, etc.). Choose the action based on\n";
-    system += "filename and the user's intent.\n\n";
-
-    // ── Section 4: Memory ──────────────────────────────────────────────────────
-    // Read from workspace file; silently empty if missing.
     let memory = tokio::fs::read_to_string(user_root.join("MEMORY.md"))
         .await
         .unwrap_or_default();
-    if !memory.trim().is_empty() {
-        system += &format!("## Memory\n{}\n\n", memory);
-    }
 
-    // ── Always-on skills ──────────────────────────────────────────────────────
+    // ── Skills section (identical across all modes) ───────────────────────────
+    let mut skills_section = String::new();
     for skill in skills.iter().filter(|s| s.always_on) {
-        system += &format!("## Skill: {}\n{}\n\n", skill.name, skill.content);
+        skills_section += &format!("## Skill: {}\n{}\n\n", skill.name, skill.content);
     }
-
-    // ── On-demand skills ──────────────────────────────────────────────────────
     let on_demand: Vec<_> = skills.iter().filter(|s| !s.always_on).collect();
     if !on_demand.is_empty() {
-        system += "## Available Skills (use read_file on skills/{name}/SKILL.md to load)\n";
+        skills_section += "## Available Skills (use read_file on skills/{name}/SKILL.md to load)\n";
         for skill in &on_demand {
-            system += &format!("- **{}**: {}\n", skill.name, skill.description);
+            skills_section += &format!("- **{}**: {}\n", skill.name, skill.description);
         }
-        system += "\n";
+        skills_section += "\n";
     }
 
-    // ── Connected Devices ─────────────────────────────────────────────────────
-    system += &build_device_status(state, &user.user_id).await;
+    // ── Mode-specific system prompt assembly ──────────────────────────────────
+    let system = match mode {
+        PromptMode::UserTurn | PromptMode::Heartbeat => {
+            // UserTurn (and Heartbeat stub): full identity + channels + devices + time.
+            let mut s = format!("{soul}\n\n");
 
-    // ── Runtime ───────────────────────────────────────────────────────────────
-    system += &format!(
-        "Current time: {}\n",
-        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
-    );
+            // Section: Identity
+            s += "## Identity\n";
+            let name = user
+                .display_name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("(not set)");
+            s += &format!("### Account\nName: {} | Email: {}\n\n", name, user.email);
+            s += &identity.build_session_section(chat_id);
+            s += "\n";
+
+            // Channels
+            let snap = load_channel_snapshot(state, &user.user_id).await;
+            s += &render_channels_section(&snap);
+            s += "Reply on the current channel unless the partner asks otherwise.\n\n";
+
+            // Attachments
+            s += "## Attachments\n";
+            s += "Files may appear as [Attachment: name → /api/files/{id}]. They live on the\n";
+            s += "server. To operate on one, use `file_transfer` to move it to a client device,\n";
+            s += "then use client tools (shell, read_file, etc.). Choose the action based on\n";
+            s += "filename and the user's intent.\n\n";
+
+            // Memory
+            if !memory.trim().is_empty() {
+                s += &format!("## Memory\n{}\n\n", memory);
+            }
+
+            // Skills
+            s += &skills_section;
+
+            // Devices
+            s += &build_device_status(state, &user.user_id).await;
+
+            // Runtime
+            s += &format!(
+                "Current time: {}\n",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+            );
+
+            s
+        }
+        PromptMode::Dream => {
+            // Dream Phase 2: phase2 prompt + memory + soul + skills.
+            // Deliberately OMITS channel identity, device list, and current time —
+            // dream is an autonomous server-side pass, not a user-facing reply.
+            let phase2 = state.dream_phase2_prompt.read().await.clone();
+            assemble_dream_system_prompt(&phase2, &memory, soul, &skills_section)
+        }
+    };
 
     messages.push(ChatMessage::system(system));
 
@@ -807,5 +838,60 @@ mod tests {
         assert!(!section.contains("discord"));
         assert!(!section.contains("telegram"));
         assert!(section.contains("gateway"));
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::*;
+
+    #[test]
+    fn dream_mode_injects_phase2_prompt_and_workspace_files() {
+        let phase2 = "DREAM_PHASE2_MARKER";
+        let memory = "## User Facts\n- test-fact";
+        let soul = "# Soul\nhelpful-alice";
+        let skills_section = "";
+
+        let content = assemble_dream_system_prompt(phase2, memory, soul, skills_section);
+
+        assert!(
+            content.contains("DREAM_PHASE2_MARKER"),
+            "phase2 prompt marker missing: {content}"
+        );
+        assert!(content.contains("test-fact"), "MEMORY.md content missing");
+        assert!(content.contains("helpful-alice"), "SOUL.md content missing");
+
+        // Dream mode should NOT include UserTurn-only sections.
+        assert!(!content.contains("## Channels"), "Dream must omit Channels section");
+        assert!(!content.contains("## Connected Devices"), "Dream must omit Devices section");
+        assert!(!content.contains("Current time:"), "Dream must omit runtime timestamp");
+        assert!(!content.contains("## Identity"), "Dream must omit Identity section");
+    }
+
+    #[test]
+    fn dream_mode_includes_skills_section() {
+        let skills_section = "## Skill: wrap-up\nA skill for wrapping up sessions.\n\n\
+                              ## Available Skills (use read_file on skills/{name}/SKILL.md to load)\n\
+                              - **git**: Manage git repos\n\n";
+
+        let content = assemble_dream_system_prompt("PHASE2", "mem", "soul", skills_section);
+
+        assert!(content.contains("## Skill: wrap-up"), "always-on skill missing");
+        assert!(content.contains("## Available Skills"), "on-demand skills index missing");
+        assert!(content.contains("**git**"), "on-demand skill entry missing");
+    }
+
+    #[test]
+    fn dream_mode_order_phase2_then_memory_then_soul_then_skills() {
+        let content = assemble_dream_system_prompt("PHASE2", "MEM", "SOUL", "SKILLS\n");
+
+        let pos_phase2 = content.find("PHASE2").expect("PHASE2 missing");
+        let pos_mem = content.find("MEM").expect("MEM missing");
+        let pos_soul = content.find("SOUL").expect("SOUL missing");
+        let pos_skills = content.find("SKILLS").expect("SKILLS missing");
+
+        assert!(pos_phase2 < pos_mem, "phase2 must precede memory");
+        assert!(pos_mem < pos_soul, "memory must precede soul");
+        assert!(pos_soul < pos_skills, "soul must precede skills");
     }
 }

@@ -220,8 +220,15 @@ async fn handle_event(
         is_partner: event.identity.as_ref().map_or(true, |i| i.is_partner),
     };
 
-    // Resolve allowlist for this event. Dream events restrict dispatch to
-    // file-only tools; all other event kinds permit the full tool registry.
+    // Resolve PromptMode + allowlist from event.kind.
+    // Dream → restricted file-only tools + Dream context shape.
+    // Heartbeat → Plan E will flip the mode branch; allowlist is All for now.
+    // All other kinds → UserTurn (normal interactive turn).
+    let mode = match event.kind {
+        crate::bus::EventKind::Dream => crate::context::PromptMode::Dream,
+        crate::bus::EventKind::Heartbeat => crate::context::PromptMode::Heartbeat,
+        _ => crate::context::PromptMode::UserTurn,
+    };
     let allowlist = match event.kind {
         crate::bus::EventKind::Dream => crate::server_tools::ToolAllowlist::Only(
             crate::server_tools::DREAM_PHASE2_ALLOWLIST,
@@ -269,7 +276,7 @@ async fn handle_event(
             &cached_default_soul,
             event.chat_id.as_deref(),
             vision_stripped,
-            context::PromptMode::UserTurn,
+            mode,
         ).await;
 
         // Check compression
