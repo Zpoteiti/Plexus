@@ -153,7 +153,13 @@ export default function Sidebar() {
                   style={{ flexShrink: 0, color: isActive && !selectMode ? 'var(--accent)' : 'var(--muted)' }}
                 />
               )}
-              {!collapsed && <span className="truncate">{shortId}</span>}
+              {!collapsed && <span className="truncate flex-1">{shortId}</span>}
+              {!collapsed && session.hasUnread && !isActive && (
+                <span
+                  className="w-2 h-2 rounded-full shrink-0"
+                  style={{ background: 'var(--accent)' }}
+                />
+              )}
             </div>
           )
         })}

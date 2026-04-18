@@ -60,6 +60,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // Server tells us a session has new content. Re-fetch via REST so
         // the UI picks up anything the browser doesn't have yet.
         void store.refreshSession(sessionId)
+        // Mark as unread only when the user is NOT already viewing this session.
+        if (sessionId !== get().currentSessionId) {
+          set(s => ({
+            sessions: s.sessions.map(sess =>
+              sess.session_id === sessionId ? { ...sess, hasUnread: true } : sess,
+            ),
+          }))
+        }
       }
     })
 
@@ -71,7 +79,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   loadSessions: async () => {
-    const sessions = await api.get<Session[]>('/api/sessions')
+    const raw = await api.get<Omit<Session, 'hasUnread'>[]>('/api/sessions')
+    const sessions: Session[] = raw.map(s => ({ ...s, hasUnread: false }))
     set({ sessions })
   },
 
@@ -136,6 +145,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       progressBySession: s.currentSessionId
         ? { ...s.progressBySession, [s.currentSessionId]: null }
         : s.progressBySession,
+      // Clear unread badge for the session the user is now viewing
+      sessions: sessionId
+        ? s.sessions.map(sess =>
+            sess.session_id === sessionId ? { ...sess, hasUnread: false } : sess,
+          )
+        : s.sessions,
     }))
   },
 

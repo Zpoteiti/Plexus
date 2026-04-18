@@ -14,6 +14,7 @@ export interface Session {
   channel: string
   created_at: string
   updated_at: string
+  hasUnread: boolean
 }
 
 // Single chat message (user or assistant) — client-side representation
