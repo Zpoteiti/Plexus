@@ -75,11 +75,6 @@ impl QuotaCache {
         self.quota_bytes
     }
 
-    /// Alias used by the /api/workspace/quota handler.
-    pub fn total_bytes(&self) -> u64 {
-        self.quota_bytes
-    }
-
     /// Remove all quota tracking for a user. Called when the user's account is
     /// deleted. After this, subsequent `check_and_reserve_upload` for the same
     /// user_id starts fresh from zero (though the account itself should be
