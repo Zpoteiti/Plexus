@@ -579,6 +579,42 @@ async fn workspace_skills(
     Ok(Json(workspace_skills_list(&state, &claims.sub).await))
 }
 
+// -- Self-serve Account Deletion --
+
+#[derive(serde::Deserialize)]
+struct DeleteSelfRequest {
+    password: String,
+}
+
+async fn delete_self(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DeleteSelfRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let claim = claims(&headers, &state)?;
+    let user = crate::db::users::find_by_id(&state.db, &claim.sub)
+        .await
+        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "User not found"))?;
+
+    let password_ok = bcrypt::verify(&body.password, &user.password_hash).unwrap_or(false);
+    if !password_ok {
+        return Err(ApiError::new(ErrorCode::Unauthorized, "Invalid password"));
+    }
+
+    if user.is_admin {
+        tracing::warn!(
+            user_id = %user.user_id,
+            email = %user.email,
+            "Admin is deleting their own account"
+        );
+    }
+
+    crate::account::delete_user_everywhere(&state, &user.user_id).await;
+
+    Ok(Json(serde_json::json!({ "message": "Account deleted" })))
+}
+
 fn mime_from_path(p: &str) -> &'static str {
     let ext = p.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
@@ -616,6 +652,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         )
         .route("/api/workspace/upload", post(workspace_upload))
         .route("/api/workspace/skills", get(workspace_skills))
+        .route("/api/user", delete(delete_self))
 }
 
 #[cfg(test)]
