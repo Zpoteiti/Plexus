@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import { api } from '../lib/api';
 import type { WorkspaceFile, WorkspaceQuota } from '../lib/types';
 import { ConfirmModal } from '../components/ConfirmModal';
+import { useAuthStore } from '../store/auth';
 
 export default function Workspace() {
   const navigate = useNavigate();
@@ -304,7 +305,7 @@ function ContentPane({
     setError(null);
     try {
       const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
+        headers: { Authorization: `Bearer ${useAuthStore.getState().token ?? ''}` },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       const buf = await res.arrayBuffer();
@@ -340,7 +341,7 @@ function ContentPane({
     try {
       const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`, {
         method: 'PUT',
-        headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
+        headers: { Authorization: `Bearer ${useAuthStore.getState().token ?? ''}` },
         body: editBuf,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -360,7 +361,7 @@ function ContentPane({
       const url = `/api/workspace/file?path=${encodeURIComponent(path)}&recursive=true`;
       const res = await fetch(url, {
         method: 'DELETE',
-        headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
+        headers: { Authorization: `Bearer ${useAuthStore.getState().token ?? ''}` },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
       setConfirmDelete(false);
@@ -544,7 +545,7 @@ function UploadDropZone({ onUploaded }: { onUploaded: () => void }) {
       for (const f of files) form.append('files', f, f.name);
       const res = await fetch('/api/workspace/upload', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
+        headers: { Authorization: `Bearer ${useAuthStore.getState().token ?? ''}` },
         body: form,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
