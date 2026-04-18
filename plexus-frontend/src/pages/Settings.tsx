@@ -88,6 +88,11 @@ function ProfileTab() {
     })()
   }, [])
 
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deletePassword, setDeletePassword] = useState('')
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
+
   async function saveDisplayName() {
     setSaving(true)
     try {
@@ -98,6 +103,19 @@ function ProfileTab() {
       setMsg(e instanceof Error ? e.message : 'Error')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function confirmDelete() {
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      await api.delete<{ message: string }>('/api/user', { password: deletePassword })
+      useAuthStore.getState().logout()
+      navigate('/login')
+    } catch (e) {
+      setDeleteError(e instanceof Error ? e.message : 'delete failed')
+      setDeleting(false)
     }
   }
 
@@ -155,6 +173,79 @@ function ProfileTab() {
           Log Out
         </button>
       </Section>
+
+      <Section title="Danger Zone">
+        <p className="text-sm" style={{ color: 'var(--muted)' }}>
+          Permanently delete your account. This removes all sessions, messages,
+          channel configurations, files, and skills. <strong>This cannot be undone.</strong>
+        </p>
+        <button
+          onClick={() => {
+            setDeletePassword('')
+            setDeleteError(null)
+            setDeleteOpen(true)
+          }}
+          className="mt-3 px-4 py-2 rounded font-medium"
+          style={{ background: '#ef4444', color: 'white' }}
+        >
+          Delete Account
+        </button>
+      </Section>
+
+      {deleteOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.5)' }}
+          onClick={() => !deleting && setDeleteOpen(false)}
+        >
+          <div
+            className="rounded p-6 max-w-md w-full"
+            style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold mb-2" style={{ color: '#ef4444' }}>Delete Account?</h2>
+            <p className="text-sm mb-4" style={{ color: 'var(--muted)' }}>
+              This will permanently delete your account, all messages, channels,
+              files, and settings. <strong>This cannot be undone.</strong>
+            </p>
+            <input
+              type="password"
+              autoFocus
+              value={deletePassword}
+              onChange={(e) => setDeletePassword(e.target.value)}
+              placeholder="Enter your password to confirm"
+              disabled={deleting}
+              className="w-full px-3 py-2 rounded text-sm font-mono mb-3"
+              style={{
+                background: 'var(--card)',
+                color: 'var(--text)',
+                border: '1px solid var(--border)',
+              }}
+            />
+            {deleteError && (
+              <p className="text-sm mb-3" style={{ color: '#ef4444' }}>{deleteError}</p>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteOpen(false)}
+                disabled={deleting}
+                className="text-sm px-3 py-1 rounded"
+                style={{ border: '1px solid var(--border)' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deleting || !deletePassword}
+                className="text-sm px-3 py-1 rounded disabled:opacity-40"
+                style={{ background: '#ef4444', color: 'white' }}
+              >
+                {deleting ? 'Deleting…' : 'Delete Forever'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
