@@ -247,6 +247,60 @@ pub(crate) fn assemble_dream_system_prompt(
     )
 }
 
+const HEARTBEAT_BANNER: &str = "## Autonomous Wake-Up\n\
+This is an autonomous heartbeat wake-up triggered by your scheduled task list. \
+Complete the requested tasks without asking for clarifying questions — pick \
+reasonable defaults and proceed. Do not use the `message` tool to deliver a \
+reply; produce a concise final assistant message summarizing what you did. \
+The system will decide whether to notify the user through an external channel.\n";
+
+async fn build_heartbeat_system(
+    soul: &str,
+    user: &User,
+    identity: &ChannelIdentity,
+    chat_id: Option<&str>,
+    state: &AppState,
+    memory: &str,
+    skills_section: &str,
+) -> String {
+    let mut s = format!("{soul}\n\n");
+
+    // Section: Identity (identical rendering to UserTurn)
+    s += "## Identity\n";
+    let name = user
+        .display_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(not set)");
+    s += &format!("### Account\nName: {} | Email: {}\n\n", name, user.email);
+    s += &identity.build_session_section(chat_id);
+    s += "\n";
+
+    // NO ## Channels section — heartbeat never routes to an interactive channel.
+
+    // Memory
+    if !memory.trim().is_empty() {
+        s += &format!("## Memory\n{memory}\n\n");
+    }
+
+    // Skills
+    s += skills_section;
+
+    // Devices
+    s += &build_device_status(state, &user.user_id).await;
+
+    // Runtime
+    s += &format!(
+        "Current time: {}\n\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    );
+
+    // Autonomous wake-up banner (pins behavior)
+    s += HEARTBEAT_BANNER;
+
+    s
+}
+
 /// Build the full context for an LLM call.
 ///
 /// User-role rows may hold JSON-serialized `Content::Blocks` (written by
@@ -306,8 +360,8 @@ pub async fn build_context(
 
     // ── Mode-specific system prompt assembly ──────────────────────────────────
     let system = match mode {
-        PromptMode::UserTurn | PromptMode::Heartbeat => {
-            // UserTurn (and Heartbeat stub): full identity + channels + devices + time.
+        PromptMode::UserTurn => {
+            // UserTurn: full identity + channels + devices + time.
             let mut s = format!("{soul}\n\n");
 
             // Section: Identity
@@ -351,6 +405,20 @@ pub async fn build_context(
             );
 
             s
+        }
+        PromptMode::Heartbeat => {
+            // `user` and `identity` are already `&…` in build_context's
+            // signature, so pass them through without an extra borrow.
+            build_heartbeat_system(
+                soul,
+                user,
+                identity,
+                chat_id,
+                state,
+                &memory,
+                &skills_section,
+            )
+            .await
         }
         PromptMode::Dream => {
             // Dream Phase 2: phase2 prompt + memory + soul + skills.
@@ -894,4 +962,20 @@ mod mode_tests {
         assert!(pos_mem < pos_soul, "memory must precede soul");
         assert!(pos_soul < pos_skills, "soul must precede skills");
     }
+
+    #[test]
+    fn heartbeat_banner_contains_no_clarifying_question_guidance() {
+        // Pin the banner wording so future edits don't regress the
+        // "don't ask clarifying questions" contract.
+        assert!(HEARTBEAT_BANNER.contains("without asking for clarifying questions"));
+        assert!(HEARTBEAT_BANNER.contains("Do not use the `message` tool"));
+        assert!(HEARTBEAT_BANNER.contains("summarizing what you did"));
+    }
+
+    // Note: a full end-to-end `build_context(PromptMode::Heartbeat, ...)`
+    // integration test would require a real PgPool (because
+    // build_device_status and load_channel_snapshot hit the DB). That is
+    // covered as a manual smoke test + the ignore-gated test in E-9. The
+    // banner pin above plus the UserTurn/Dream regression tests below
+    // give us confidence the match arm routes correctly.
 }
