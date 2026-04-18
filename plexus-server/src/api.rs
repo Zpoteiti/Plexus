@@ -306,6 +306,85 @@ async fn workspace_file_get(
     }
 }
 
+/// Testable core: write raw bytes to `{workspace_root}/{user_id}/{rel_path}`.
+/// Creates parent dirs. Quota-checked via `check_and_reserve_upload` (delta
+/// against existing file size). Rolls back reservation on write failure.
+pub async fn workspace_file_put_bytes(
+    state: &AppState,
+    user_id: &str,
+    rel_path: &str,
+    bytes: Vec<u8>,
+) -> Result<(), crate::workspace::WorkspaceError> {
+    let root = std::path::Path::new(&state.config.workspace_root);
+    let resolved = crate::workspace::resolve_user_path_for_create(root, user_id, rel_path).await?;
+
+    // Compute delta against existing file (if any), reserve against quota.
+    let existing = tokio::fs::metadata(&resolved)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let new_size = bytes.len() as u64;
+    let delta = new_size.saturating_sub(existing);
+
+    if delta > 0 {
+        state
+            .quota
+            .check_and_reserve_upload(user_id, delta)
+            .map_err(|e| {
+                crate::workspace::WorkspaceError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("quota: {e:?}"),
+                ))
+            })?;
+    }
+
+    // Create parent dirs.
+    if let Some(parent) = resolved.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    match tokio::fs::write(&resolved, &bytes).await {
+        Ok(()) => {
+            // If we shrunk the file, release the reclaimed bytes.
+            if new_size < existing {
+                state.quota.release(user_id, existing - new_size);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            // Rollback the reservation.
+            if delta > 0 {
+                state.quota.release(user_id, delta);
+            }
+            Err(e.into())
+        }
+    }
+}
+
+async fn workspace_file_put(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<WorkspaceFileQuery>,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, ApiError> {
+    let claims = claims(&headers, &state)?;
+    workspace_file_put_bytes(&state, &claims.sub, &q.path, body.to_vec())
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|e| {
+            use crate::workspace::WorkspaceError;
+            match &e {
+                WorkspaceError::Traversal(_) => ApiError::new(ErrorCode::Forbidden, "forbidden"),
+                WorkspaceError::Io(io_err)
+                    if io_err.to_string().to_lowercase().contains("quota") =>
+                {
+                    ApiError::new(ErrorCode::ValidationFailed, format!("{e:?}"))
+                }
+                _ => ApiError::new(ErrorCode::InternalError, format!("{e:?}")),
+            }
+        })
+}
+
 fn mime_from_path(p: &str) -> &'static str {
     let ext = p.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
@@ -335,7 +414,10 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/files/{file_id}", get(download_file))
         .route("/api/workspace/quota", get(workspace_quota))
         .route("/api/workspace/tree", get(workspace_tree))
-        .route("/api/workspace/file", get(workspace_file_get))
+        .route(
+            "/api/workspace/file",
+            get(workspace_file_get).put(workspace_file_put),
+        )
 }
 
 #[cfg(test)]
@@ -391,6 +473,47 @@ mod tests {
                 || msg.contains("outside")
                 || msg.contains("io"),
             "expected traversal/not-found/io-style error; got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_file_put_writes_bytes_and_updates_quota() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_root = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_root).await.unwrap();
+
+        let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 1024 * 1024);
+
+        workspace_file_put_bytes(&state, "alice", "notes.md", b"hello".to_vec())
+            .await
+            .unwrap();
+
+        let written = tokio::fs::read(user_root.join("notes.md")).await.unwrap();
+        assert_eq!(written, b"hello");
+        assert_eq!(state.quota.current_usage("alice"), 5);
+    }
+
+    #[tokio::test]
+    async fn test_workspace_file_put_rejects_quota_overage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        tokio::fs::create_dir_all(tmp.path().join("alice"))
+            .await
+            .unwrap();
+
+        let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 10);
+
+        let err = workspace_file_put_bytes(&state, "alice", "big.bin", vec![0; 100])
+            .await
+            .unwrap_err();
+        // Accept whatever variant the actual quota enforcement returns —
+        // the string form just needs to indicate a size/quota problem.
+        let msg = format!("{err:?}").to_lowercase();
+        assert!(
+            msg.contains("quota")
+                || msg.contains("too large")
+                || msg.contains("soft")
+                || msg.contains("cap"),
+            "expected quota-related error; got: {msg}"
         );
     }
 }

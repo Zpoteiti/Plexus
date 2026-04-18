@@ -67,6 +67,15 @@ impl QuotaCache {
         });
     }
 
+    /// Release bytes previously reserved via `check_and_reserve_upload`.
+    /// Used for rollback on write failure or when overwriting a file with fewer bytes.
+    pub fn release(&self, user_id: &str, bytes: u64) {
+        let counter = self.usage_for(user_id);
+        let _ = counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+            Some(current.saturating_sub(bytes))
+        });
+    }
+
     pub fn current_usage(&self, user_id: &str) -> u64 {
         self.usage_for(user_id).load(Ordering::SeqCst)
     }
