@@ -29,7 +29,6 @@ pub const DEFAULT_SHELL_TIMEOUT_SEC: u64 = 60;
 
 // Server constants
 pub const TOOL_EXECUTION_TIMEOUT_SEC: u64 = 120;
-pub const MEMORY_TEXT_MAX_CHARS: usize = 4096;
 pub const USER_MESSAGE_MAX_CHARS: usize = 4000;
 pub const CONTEXT_COMPRESSION_THRESHOLD: usize = 16_000;
 pub const FILE_UPLOAD_MAX_BYTES: usize = 20 * 1024 * 1024;
