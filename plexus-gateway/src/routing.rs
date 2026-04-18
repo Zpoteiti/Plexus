@@ -23,8 +23,14 @@ pub fn route_send(state: &Arc<AppState>, msg: &serde_json::Value) -> RouteResult
         .and_then(|p| p.as_bool())
         .unwrap_or(false);
 
-    let content = msg.get("content").cloned().unwrap_or(serde_json::Value::Null);
-    let session_id = msg.get("session_id").cloned().unwrap_or(serde_json::Value::Null);
+    let content = msg
+        .get("content")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let session_id = msg
+        .get("session_id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
 
     let outbound = if is_progress {
         serde_json::json!({"type": "progress", "session_id": session_id, "content": content})
@@ -99,7 +105,37 @@ pub fn route_session_update(state: &Arc<AppState>, user_id: &str, session_id: &s
             fanout_count += 1;
         }
     }
-    tracing::debug!("session_update user_id={user_id} session_id={session_id} fanout={fanout_count}");
+    tracing::debug!(
+        "session_update user_id={user_id} session_id={session_id} fanout={fanout_count}"
+    );
+}
+
+/// Cancel + remove every browser whose `user_id` matches `user_id`.
+/// Used by the account-deletion flow to close all live browser WSs for
+/// a deleted user.
+pub fn route_kick_user(state: &Arc<AppState>, user_id: &str) {
+    if user_id.is_empty() {
+        tracing::warn!("route_kick_user: empty user_id, skipping");
+        return;
+    }
+    // Collect matching keys first — iterating + mutating the same DashMap
+    // is discouraged.
+    let kicked: Vec<String> = state
+        .browsers
+        .iter()
+        .filter(|entry| entry.value().user_id == user_id)
+        .map(|entry| entry.key().clone())
+        .collect();
+    for chat_id in &kicked {
+        if let Some((_, conn)) = state.browsers.remove(chat_id) {
+            conn.cancel.cancel();
+        }
+    }
+    tracing::info!(
+        user_id,
+        kicked = kicked.len(),
+        "route_kick_user: cancelled browser connections"
+    );
 }
 
 pub async fn forward_to_plexus(
@@ -118,8 +154,14 @@ pub async fn forward_to_plexus(
         return;
     };
 
-    let content = msg.get("content").cloned().unwrap_or(serde_json::Value::Null);
-    let session_id = msg.get("session_id").cloned().unwrap_or(serde_json::Value::Null);
+    let content = msg
+        .get("content")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let session_id = msg
+        .get("session_id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let media = msg.get("media").cloned();
 
     let mut forwarded = serde_json::json!({
@@ -144,10 +186,10 @@ pub async fn forward_to_plexus(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, AllowedOrigins};
+    use crate::config::{AllowedOrigins, Config};
     use crate::state::{AppState, BrowserConnection, OutboundFrame};
     use dashmap::DashMap;
-    use tokio::sync::{mpsc, RwLock};
+    use tokio::sync::{RwLock, mpsc};
     use tokio_util::sync::CancellationToken;
 
     fn test_state() -> Arc<AppState> {
@@ -232,7 +274,11 @@ mod tests {
         let cancel = CancellationToken::new();
         state.browsers.insert(
             "chat-slow".to_string(),
-            BrowserConnection { tx, user_id: "user1".into(), cancel: cancel.clone() },
+            BrowserConnection {
+                tx,
+                user_id: "user1".into(),
+                cancel: cancel.clone(),
+            },
         );
         // Fill the channel
         let fill_msg = serde_json::json!({"type":"send","chat_id":"chat-slow","content":"fill"});
@@ -251,7 +297,11 @@ mod tests {
         let (tx, _rx) = mpsc::channel(1);
         state.browsers.insert(
             "chat-full".to_string(),
-            BrowserConnection { tx, user_id: "user1".into(), cancel: CancellationToken::new() },
+            BrowserConnection {
+                tx,
+                user_id: "user1".into(),
+                cancel: CancellationToken::new(),
+            },
         );
         // Fill the channel
         let fill = serde_json::json!({"type":"send","chat_id":"chat-full","content":"fill"});
@@ -269,27 +319,36 @@ mod tests {
 
         // Browser A: user=alice
         let (tx_a, mut rx_a) = mpsc::channel::<OutboundFrame>(8);
-        state.browsers.insert("chat-a".to_string(), BrowserConnection {
-            tx: tx_a,
-            user_id: "alice".into(),
-            cancel: CancellationToken::new(),
-        });
+        state.browsers.insert(
+            "chat-a".to_string(),
+            BrowserConnection {
+                tx: tx_a,
+                user_id: "alice".into(),
+                cancel: CancellationToken::new(),
+            },
+        );
 
         // Browser B: user=bob
         let (tx_b, mut rx_b) = mpsc::channel::<OutboundFrame>(8);
-        state.browsers.insert("chat-b".to_string(), BrowserConnection {
-            tx: tx_b,
-            user_id: "bob".into(),
-            cancel: CancellationToken::new(),
-        });
+        state.browsers.insert(
+            "chat-b".to_string(),
+            BrowserConnection {
+                tx: tx_b,
+                user_id: "bob".into(),
+                cancel: CancellationToken::new(),
+            },
+        );
 
         // Browser C: user=alice, second device
         let (tx_c, mut rx_c) = mpsc::channel::<OutboundFrame>(8);
-        state.browsers.insert("chat-c".to_string(), BrowserConnection {
-            tx: tx_c,
-            user_id: "alice".into(),
-            cancel: CancellationToken::new(),
-        });
+        state.browsers.insert(
+            "chat-c".to_string(),
+            BrowserConnection {
+                tx: tx_c,
+                user_id: "alice".into(),
+                cancel: CancellationToken::new(),
+            },
+        );
 
         // Route session_update to alice
         route_session_update(&state, "alice", "session-42");
@@ -302,7 +361,10 @@ mod tests {
             }
             other => panic!("A expected SessionUpdate, got {other:?}"),
         }
-        assert!(matches!(rx_c.try_recv(), Ok(OutboundFrame::SessionUpdate(_))));
+        assert!(matches!(
+            rx_c.try_recv(),
+            Ok(OutboundFrame::SessionUpdate(_))
+        ));
         assert!(rx_b.try_recv().is_err()); // bob got nothing
     }
 
@@ -311,18 +373,93 @@ mod tests {
         let state = test_state();
         // Insert a browser that would match if the function weren't guarding.
         let (tx, mut rx) = mpsc::channel::<OutboundFrame>(8);
-        state.browsers.insert("chat-x".into(), BrowserConnection {
-            tx,
-            user_id: "".into(),
-            cancel: CancellationToken::new(),
-        });
+        state.browsers.insert(
+            "chat-x".into(),
+            BrowserConnection {
+                tx,
+                user_id: "".into(),
+                cancel: CancellationToken::new(),
+            },
+        );
 
         // Empty user_id → no fanout.
         route_session_update(&state, "", "session-42");
-        assert!(rx.try_recv().is_err(), "empty user_id should produce no fanout");
+        assert!(
+            rx.try_recv().is_err(),
+            "empty user_id should produce no fanout"
+        );
 
         // Empty session_id → no fanout.
         route_session_update(&state, "alice", "");
-        assert!(rx.try_recv().is_err(), "empty session_id should produce no fanout");
+        assert!(
+            rx.try_recv().is_err(),
+            "empty session_id should produce no fanout"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_route_kick_user_cancels_matching_browsers() {
+        let state = test_state();
+
+        // Alice has two browsers.
+        let (tx_a1, _rx_a1) = mpsc::channel::<OutboundFrame>(8);
+        let cancel_a1 = CancellationToken::new();
+        state.browsers.insert(
+            "chat-a1".into(),
+            BrowserConnection {
+                tx: tx_a1,
+                user_id: "alice".into(),
+                cancel: cancel_a1.clone(),
+            },
+        );
+        let (tx_a2, _rx_a2) = mpsc::channel::<OutboundFrame>(8);
+        let cancel_a2 = CancellationToken::new();
+        state.browsers.insert(
+            "chat-a2".into(),
+            BrowserConnection {
+                tx: tx_a2,
+                user_id: "alice".into(),
+                cancel: cancel_a2.clone(),
+            },
+        );
+
+        // Bob has one.
+        let (tx_b, _rx_b) = mpsc::channel::<OutboundFrame>(8);
+        let cancel_b = CancellationToken::new();
+        state.browsers.insert(
+            "chat-b".into(),
+            BrowserConnection {
+                tx: tx_b,
+                user_id: "bob".into(),
+                cancel: cancel_b.clone(),
+            },
+        );
+
+        route_kick_user(&state, "alice");
+
+        assert!(
+            cancel_a1.is_cancelled(),
+            "alice's first browser should be cancelled"
+        );
+        assert!(
+            cancel_a2.is_cancelled(),
+            "alice's second browser should be cancelled"
+        );
+        assert!(
+            !cancel_b.is_cancelled(),
+            "bob's browser must not be touched"
+        );
+        assert!(
+            !state.browsers.contains_key("chat-a1"),
+            "chat-a1 entry removed"
+        );
+        assert!(
+            !state.browsers.contains_key("chat-a2"),
+            "chat-a2 entry removed"
+        );
+        assert!(
+            state.browsers.contains_key("chat-b"),
+            "chat-b entry remains"
+        );
     }
 }

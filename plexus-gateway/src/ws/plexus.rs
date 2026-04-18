@@ -1,6 +1,9 @@
 use crate::state::AppState;
 use axum::{
-    extract::{State, WebSocketUpgrade, ws::{Message, WebSocket}},
+    extract::{
+        State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -9,10 +12,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-pub async fn ws_plexus(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-) -> Response {
+pub async fn ws_plexus(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
     ws.on_upgrade(move |socket| handle_plexus(socket, state))
 }
 
@@ -20,24 +20,28 @@ async fn handle_plexus(socket: WebSocket, state: Arc<AppState>) {
     let (mut sink, mut stream) = socket.split();
 
     // Wait for auth message (5s timeout)
-    let auth_msg = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        stream.next(),
-    )
-    .await;
+    let auth_msg = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await;
 
     let auth_json = match auth_msg {
         Ok(Some(Ok(Message::Text(text)))) => {
             match serde_json::from_str::<serde_json::Value>(&text) {
                 Ok(v) => v,
                 Err(_) => {
-                    let _ = send_json(&mut sink, &serde_json::json!({"type":"auth_fail","reason":"invalid JSON"})).await;
+                    let _ = send_json(
+                        &mut sink,
+                        &serde_json::json!({"type":"auth_fail","reason":"invalid JSON"}),
+                    )
+                    .await;
                     return;
                 }
             }
         }
         _ => {
-            let _ = send_json(&mut sink, &serde_json::json!({"type":"auth_fail","reason":"timeout or invalid frame"})).await;
+            let _ = send_json(
+                &mut sink,
+                &serde_json::json!({"type":"auth_fail","reason":"timeout or invalid frame"}),
+            )
+            .await;
             return;
         }
     };
@@ -45,13 +49,24 @@ async fn handle_plexus(socket: WebSocket, state: Arc<AppState>) {
     // Verify auth type and token
     let msg_type = auth_json.get("type").and_then(|t| t.as_str()).unwrap_or("");
     if msg_type != "auth" {
-        let _ = send_json(&mut sink, &serde_json::json!({"type":"auth_fail","reason":"expected auth message"})).await;
+        let _ = send_json(
+            &mut sink,
+            &serde_json::json!({"type":"auth_fail","reason":"expected auth message"}),
+        )
+        .await;
         return;
     }
 
-    let provided_token = auth_json.get("token").and_then(|t| t.as_str()).unwrap_or("");
+    let provided_token = auth_json
+        .get("token")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
     if !verify_token(provided_token, &state.config.gateway_token) {
-        let _ = send_json(&mut sink, &serde_json::json!({"type":"auth_fail","reason":"invalid token"})).await;
+        let _ = send_json(
+            &mut sink,
+            &serde_json::json!({"type":"auth_fail","reason":"invalid token"}),
+        )
+        .await;
         return;
     }
 
@@ -61,7 +76,11 @@ async fn handle_plexus(socket: WebSocket, state: Arc<AppState>) {
         let mut guard = state.plexus.write().await;
         if guard.is_some() {
             drop(guard);
-            let _ = send_json(&mut sink, &serde_json::json!({"type":"auth_fail","reason":"duplicate connection"})).await;
+            let _ = send_json(
+                &mut sink,
+                &serde_json::json!({"type":"auth_fail","reason":"duplicate connection"}),
+            )
+            .await;
             return;
         }
         *guard = Some(plexus_tx);
@@ -111,6 +130,10 @@ async fn handle_plexus(socket: WebSocket, state: Arc<AppState>) {
                                 let user_id = parsed.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
                                 let session_id = parsed.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
                                 crate::routing::route_session_update(&state, user_id, session_id);
+                            }
+                            "kick_user" => {
+                                let user_id = parsed.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+                                crate::routing::route_kick_user(&state, user_id);
                             }
                             _ => {
                                 warn!("ws_plexus: unknown message type: {msg_type}");
