@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, ChevronRight, ChevronDown, File, Folder } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
 import { api } from '../lib/api';
 import type { WorkspaceFile, WorkspaceQuota } from '../lib/types';
 
@@ -70,10 +71,7 @@ export default function Workspace() {
         </aside>
 
         <section className="flex-1 overflow-y-auto p-4">
-          {/* Content pane will land in B-10 */}
-          <div style={{ color: 'var(--muted)' }}>
-            Content pane for <code>{selectedPath || '(nothing selected)'}</code> (B-10)
-          </div>
+          <ContentPane path={selectedPath} onChanged={() => void refresh()} />
         </section>
       </main>
     </div>
@@ -232,5 +230,75 @@ function TreeItem({
         <TreeNodeList nodes={node.children} depth={depth + 1} selected={selected} onSelect={onSelect} />
       )}
     </li>
+  );
+}
+
+function ContentPane({ path, onChanged: _onChanged }: { path: string; onChanged: () => void }) {
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!path) {
+      setText(null);
+      return;
+    }
+    void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path]);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+      const buf = await res.arrayBuffer();
+      const mime = res.headers.get('Content-Type') ?? '';
+      if (mime.startsWith('text/') || mime === 'application/json') {
+        setText(new TextDecoder().decode(buf));
+      } else {
+        setText(null);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'load failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (!path) return <div style={{ color: 'var(--muted)' }}>Select a file to view its contents.</div>;
+  if (loading) return <div style={{ color: 'var(--muted)' }}>Loading…</div>;
+  if (error) return <div style={{ color: '#ef4444' }}>{error}</div>;
+
+  const isMarkdown = path.toLowerCase().endsWith('.md');
+
+  return (
+    <div className="flex flex-col gap-4 h-full">
+      <div
+        className="text-xs px-2 py-1 rounded"
+        style={{ background: 'var(--sidebar)', color: 'var(--muted)' }}
+      >
+        {path}
+      </div>
+      <div className="flex-1 overflow-y-auto">
+        {isMarkdown && text !== null ? (
+          <div className="prose prose-invert max-w-none">
+            <ReactMarkdown>{text}</ReactMarkdown>
+          </div>
+        ) : text !== null ? (
+          <pre
+            className="text-sm whitespace-pre-wrap"
+            style={{ background: 'var(--card)', padding: '1rem', borderRadius: '4px' }}
+          >
+            {text}
+          </pre>
+        ) : (
+          <div style={{ color: 'var(--muted)' }}>Non-text file (renderer B-12 will handle images/binaries).</div>
+        )}
+      </div>
+    </div>
   );
 }
