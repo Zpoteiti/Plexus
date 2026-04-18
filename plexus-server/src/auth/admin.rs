@@ -238,6 +238,13 @@ async fn delete_user_by_admin(
         "Admin deleting user"
     );
 
+    if admin.sub == user_id {
+        tracing::warn!(
+            admin_id = %admin.sub,
+            "Admin is deleting their own account via admin endpoint"
+        );
+    }
+
     crate::account::delete_user_everywhere(&state, &user.user_id).await;
 
     Ok(Json(serde_json::json!({ "message": "User deleted" })))

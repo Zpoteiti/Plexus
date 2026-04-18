@@ -85,6 +85,7 @@ fn evict_in_memory(state: &Arc<AppState>, user_id: &str) {
     state.devices_by_user.remove(user_id);
     state.rate_limiter.remove(user_id);
     state.tool_schema_cache.remove(user_id);
+    state.skills_cache.invalidate(user_id);
 }
 
 async fn wipe_workspace(state: &Arc<AppState>, user_id: &str) {
