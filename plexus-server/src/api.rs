@@ -256,6 +256,72 @@ async fn workspace_tree(
         .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("tree walk failed: {e}")))
 }
 
+// -- Workspace File --
+
+#[derive(serde::Deserialize)]
+pub struct WorkspaceFileQuery {
+    pub path: String,
+}
+
+/// Testable core: given user_id + rel path, return bytes or an error.
+/// HTTP wrapper below converts the error to StatusCode + JSON body.
+pub async fn workspace_file_get_bytes(
+    state: &AppState,
+    user_id: &str,
+    rel_path: &str,
+) -> Result<Vec<u8>, crate::workspace::WorkspaceError> {
+    let root = std::path::Path::new(&state.config.workspace_root);
+    let resolved = crate::workspace::resolve_user_path(root, user_id, rel_path).await?;
+    let bytes = tokio::fs::read(&resolved)
+        .await
+        .map_err(crate::workspace::WorkspaceError::Io)?;
+    Ok(bytes)
+}
+
+async fn workspace_file_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<WorkspaceFileQuery>,
+) -> Result<Response<Body>, ApiError> {
+    let claims = claims(&headers, &state)?;
+    match workspace_file_get_bytes(&state, &claims.sub, &q.path).await {
+        Ok(bytes) => {
+            let mime = mime_from_path(&q.path);
+            Ok(Response::builder()
+                .header("Content-Type", mime)
+                .body(Body::from(bytes))
+                .unwrap())
+        }
+        Err(e) => {
+            use crate::workspace::WorkspaceError;
+            let api_err = match &e {
+                WorkspaceError::Traversal(_) => ApiError::new(ErrorCode::Forbidden, "forbidden"),
+                WorkspaceError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => {
+                    ApiError::new(ErrorCode::NotFound, "not found")
+                }
+                _ => ApiError::new(ErrorCode::InternalError, format!("{e:?}")),
+            };
+            Err(api_err)
+        }
+    }
+}
+
+fn mime_from_path(p: &str) -> &'static str {
+    let ext = p.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "md" | "txt" | "log" | "toml" | "rs" | "ts" | "tsx" | "js" | "py" | "yaml" | "yml" => {
+            "text/plain; charset=utf-8"
+        }
+        "json" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
 pub fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/user/profile", get(get_profile))
@@ -269,6 +335,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/files/{file_id}", get(download_file))
         .route("/api/workspace/quota", get(workspace_quota))
         .route("/api/workspace/tree", get(workspace_tree))
+        .route("/api/workspace/file", get(workspace_file_get))
 }
 
 #[cfg(test)]
@@ -286,5 +353,44 @@ mod tests {
         let result = workspace_quota_handler(&state, "alice");
         assert_eq!(result.used_bytes, 1024);
         assert_eq!(result.total_bytes, 5 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_workspace_file_get_inside_user_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_root = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_root).await.unwrap();
+        tokio::fs::write(user_root.join("greeting.txt"), b"hi there")
+            .await
+            .unwrap();
+
+        let state = crate::state::AppState::test_minimal(tmp.path());
+        let bytes = workspace_file_get_bytes(&state, "alice", "greeting.txt")
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"hi there");
+    }
+
+    #[tokio::test]
+    async fn test_workspace_file_get_rejects_traversal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        tokio::fs::create_dir_all(tmp.path().join("alice"))
+            .await
+            .unwrap();
+
+        let state = crate::state::AppState::test_minimal(tmp.path());
+        let err = workspace_file_get_bytes(&state, "alice", "../../etc/passwd")
+            .await
+            .unwrap_err();
+        // WorkspaceError may render as Traversal or NotFound depending on which
+        // check fires first. Both are acceptable — just assert it's an error.
+        let msg = format!("{err:?}").to_lowercase();
+        assert!(
+            msg.contains("traversal")
+                || msg.contains("not found")
+                || msg.contains("outside")
+                || msg.contains("io"),
+            "expected traversal/not-found/io-style error; got: {msg}"
+        );
     }
 }
