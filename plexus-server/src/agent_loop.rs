@@ -220,6 +220,15 @@ async fn handle_event(
         is_partner: event.identity.as_ref().map_or(true, |i| i.is_partner),
     };
 
+    // Resolve allowlist for this event. Dream events restrict dispatch to
+    // file-only tools; all other event kinds permit the full tool registry.
+    let allowlist = match event.kind {
+        crate::bus::EventKind::Dream => crate::server_tools::ToolAllowlist::Only(
+            crate::server_tools::DREAM_PHASE2_ALLOWLIST,
+        ),
+        _ => crate::server_tools::ToolAllowlist::All,
+    };
+
     // Load skills
     let skills = load_skills(state, user_id).await;
 
@@ -384,7 +393,23 @@ async fn handle_event(
                     let count = call_counts.entry(call_key).or_insert(0);
                     *count += 1;
 
-                    let result_output = if *count >= 4 {
+                    let tool_name = &tc.function.name;
+                    let result_output = if !allowlist.allows(tool_name) {
+                        // Rejected by allowlist — return structured error so the LLM
+                        // can recover by picking a different action.
+                        match &allowlist {
+                            crate::server_tools::ToolAllowlist::Only(names) => format!(
+                                "Tool '{tool_name}' is not available in this context. \
+                                 Available tools: {}.",
+                                names.join(", ")
+                            ),
+                            crate::server_tools::ToolAllowlist::All => {
+                                // Unreachable — All.allows() is always true — but keep
+                                // the match exhaustive for future variant additions.
+                                format!("Tool '{tool_name}' is not available.")
+                            }
+                        }
+                    } else if *count >= 4 {
                         warn!(
                             "Loop detected: {} called 4+ times with same args, stopping",
                             tc.function.name
@@ -403,7 +428,7 @@ async fn handle_event(
                         let result = execute_tool_call(
                             state,
                             user_id,
-                            &tc.function.name,
+                            tool_name,
                             &tc.function.arguments,
                             &tool_ctx,
                         )

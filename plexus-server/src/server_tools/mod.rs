@@ -12,6 +12,32 @@ pub mod file_transfer;
 pub mod message;
 pub mod web_fetch;
 
+/// Allowlist for tool dispatch. Used by restricted modes (e.g. dream phase 2)
+/// to forbid tools outside a small set without touching the global registry.
+#[derive(Debug, Clone)]
+pub enum ToolAllowlist {
+    /// Every registered tool is dispatchable.
+    All,
+    /// Only tools whose names appear in the slice may dispatch.
+    Only(&'static [&'static str]),
+}
+
+impl ToolAllowlist {
+    pub fn allows(&self, tool_name: &str) -> bool {
+        match self {
+            ToolAllowlist::All => true,
+            ToolAllowlist::Only(names) => names.contains(&tool_name),
+        }
+    }
+}
+
+/// Tools available during dream Phase 2: file I/O only. No message, cron,
+/// file_transfer, or web_fetch — dream is silent and workspace-local.
+pub const DREAM_PHASE2_ALLOWLIST: &[&str] = &[
+    "read_file", "write_file", "edit_file", "delete_file",
+    "list_dir", "glob", "grep",
+];
+
 /// All server tool names.
 pub const SERVER_TOOL_NAMES: &[&str] = &[
     "message",
@@ -245,5 +271,52 @@ pub async fn execute(
         request_id,
         exit_code,
         output,
+    }
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::*;
+
+    #[test]
+    fn all_allows_every_tool_name() {
+        let a = ToolAllowlist::All;
+        assert!(a.allows("read_file"));
+        assert!(a.allows("message"));
+        assert!(a.allows("cron"));
+        assert!(a.allows("anything_else"));
+    }
+
+    #[test]
+    fn only_permits_named_tools_rejects_others() {
+        let a = ToolAllowlist::Only(DREAM_PHASE2_ALLOWLIST);
+        // Allowed — all 7 file tools.
+        assert!(a.allows("read_file"));
+        assert!(a.allows("write_file"));
+        assert!(a.allows("edit_file"));
+        assert!(a.allows("delete_file"));
+        assert!(a.allows("list_dir"));
+        assert!(a.allows("glob"));
+        assert!(a.allows("grep"));
+        // Rejected — non-file tools.
+        assert!(!a.allows("message"));
+        assert!(!a.allows("cron"));
+        assert!(!a.allows("web_fetch"));
+        assert!(!a.allows("file_transfer"));
+        assert!(!a.allows("nonexistent"));
+    }
+
+    #[test]
+    fn dream_phase2_allowlist_covers_all_file_tools_in_registry() {
+        // Sanity: every name in DREAM_PHASE2_ALLOWLIST is a registered
+        // server tool (either in SERVER_TOOL_NAMES or implemented as a
+        // server tool somewhere in the codebase). If we ever rename a
+        // file tool, this test fires.
+        for name in DREAM_PHASE2_ALLOWLIST {
+            assert!(
+                SERVER_TOOL_NAMES.contains(name),
+                "DREAM_PHASE2_ALLOWLIST contains '{name}' which is not in SERVER_TOOL_NAMES"
+            );
+        }
     }
 }
