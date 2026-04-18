@@ -61,6 +61,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
         .unwrap_or_else(|| "mention".into());
 
     let state_clone = Arc::clone(&state);
+    let state_shutdown = Arc::clone(&state);
     let bot_holder_clone = Arc::clone(&bot_holder);
 
     tokio::spawn(async move {
@@ -113,7 +114,14 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
                 info!("Telegram bot stopped for {}", &user_id_log);
             }
             _ = &mut shutdown_rx => {
-                info!("Telegram bot shutdown requested");
+                info!("Telegram bot shutdown requested for {}", &user_id_log);
+                match dispatcher.shutdown_token().shutdown() {
+                    Ok(fut) => fut.await,
+                    Err(e) => warn!("Telegram shutdown failed: {e}"),
+                }
+            }
+            _ = state_shutdown.shutdown.cancelled() => {
+                info!(user_id = %user_id_log, "Telegram bot shutting down");
                 match dispatcher.shutdown_token().shutdown() {
                     Ok(fut) => fut.await,
                     Err(e) => warn!("Telegram shutdown failed: {e}"),

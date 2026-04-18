@@ -73,6 +73,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
         .unwrap_or_default();
 
     let state_clone = Arc::clone(&state);
+    let state_shutdown = Arc::clone(&state);
     let channels_clone = Arc::clone(&channels);
     let http_clone = Arc::clone(&http);
     let user_id_clone = user_id.clone();
@@ -114,6 +115,10 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
             }
             _ = &mut shutdown_rx => {
                 info!("Discord bot shutdown for {user_id_clone}");
+                client.shard_manager.shutdown_all().await;
+            }
+            _ = state_shutdown.shutdown.cancelled() => {
+                info!(user_id = %user_id_clone, "Discord bot shutting down");
                 client.shard_manager.shutdown_all().await;
             }
         }

@@ -238,7 +238,18 @@ pub async fn run_session(
 ) {
     info!("Agent loop started for session {session_id}");
 
-    while let Some(event) = inbox.recv().await {
+    loop {
+        let event = tokio::select! {
+            _ = state.shutdown.cancelled() => {
+                info!(session_id = %session_id, "agent loop shutting down");
+                break;
+            }
+            maybe = inbox.recv() => match maybe {
+                Some(e) => e,
+                None => break,
+            },
+        };
+
         // Acquire session lock (prevent concurrent DB writes)
         let lock = {
             let handle = state.sessions.get(&session_id).unwrap();
