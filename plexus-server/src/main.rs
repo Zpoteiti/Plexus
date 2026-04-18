@@ -1,3 +1,4 @@
+pub mod account;
 mod agent_loop;
 mod api;
 mod auth;
