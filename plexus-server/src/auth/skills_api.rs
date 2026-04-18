@@ -1,13 +1,17 @@
-//! Skills CRUD API endpoints.
+//! Skills API endpoints.
+//!
+//! GET /api/skills — list skills (served from SkillsCache).
+//! POST /api/skills, POST /api/skills/install, DELETE /api/skills/{name}
+//!   — return 410 Gone (mutations now done via write_file/delete_file server tools).
 
 use crate::auth::extract_claims;
 use crate::state::AppState;
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use plexus_common::error::{ApiError, ErrorCode};
-use serde::Deserialize;
+use plexus_common::error::ApiError;
+use std::path::Path as FsPath;
 use std::sync::Arc;
 
 fn claims(headers: &HeaderMap, state: &AppState) -> Result<crate::auth::Claims, ApiError> {
@@ -19,103 +23,54 @@ async fn list_skills(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let c = claims(&headers, &state)?;
-    let skills = crate::db::skills::list_by_user(&state.db, &c.sub)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
-    Ok(Json(serde_json::json!({ "skills": skills })))
-}
-
-#[derive(Deserialize)]
-struct CreateSkillRequest {
-    name: String,
-    content: String,
+    let ws_root = FsPath::new(&state.config.workspace_root);
+    let skills = state.skills_cache.get_or_load(&c.sub, ws_root).await;
+    let list: Vec<_> = skills
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "description": s.description,
+                "always_on": s.always_on,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "skills": list })))
 }
 
 async fn create_skill(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<CreateSkillRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let c = claims(&headers, &state)?;
-
-    // Parse frontmatter from content
-    let (name, description, always_on) =
-        crate::server_tools::skills::parse_skill_frontmatter_pub(&req.content)
-            .map_err(|e| ApiError::new(ErrorCode::ValidationFailed, e))?;
-
-    // Use provided name or frontmatter name
-    let skill_name = if req.name.is_empty() { name } else { req.name };
-
-    // Write to disk
-    let skill_dir = format!("{}/{skill_name}", state.config.legacy_skills_dir_for_user(&c.sub));
-    tokio::fs::create_dir_all(&skill_dir)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("mkdir: {e}")))?;
-    tokio::fs::write(format!("{skill_dir}/SKILL.md"), &req.content)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("write: {e}")))?;
-
-    // Upsert in DB
-    let skill_id = uuid::Uuid::new_v4().to_string();
-    crate::db::skills::upsert_skill(
-        &state.db,
-        &skill_id,
-        &c.sub,
-        &skill_name,
-        &description,
-        always_on,
-        &skill_dir,
+    _headers: HeaderMap,
+    _state: State<Arc<AppState>>,
+    _body: axum::body::Bytes,
+) -> (StatusCode, &'static str) {
+    (
+        StatusCode::GONE,
+        "Skill creation via API is removed. Use write_file to create skills/{name}/SKILL.md \
+         or web_fetch + write_file to install from a URL.",
     )
-    .await
-    .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
-
-    Ok(Json(serde_json::json!({
-        "skill_id": skill_id,
-        "name": skill_name,
-        "description": description,
-        "always_on": always_on,
-    })))
-}
-
-#[derive(Deserialize)]
-struct InstallSkillRequest {
-    repo: String,
-    branch: Option<String>,
 }
 
 async fn install_skill(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<InstallSkillRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let c = claims(&headers, &state)?;
-    let args = serde_json::json!({
-        "repo": req.repo,
-        "branch": req.branch.unwrap_or_else(|| "main".into()),
-    });
-    let (code, output) = crate::server_tools::skills::install_skill(&state, &c.sub, &args).await;
-    if code != 0 {
-        return Err(ApiError::new(ErrorCode::InternalError, output));
-    }
-    Ok(Json(serde_json::json!({ "message": output })))
+    _headers: HeaderMap,
+    _state: State<Arc<AppState>>,
+    _body: axum::body::Bytes,
+) -> (StatusCode, &'static str) {
+    (
+        StatusCode::GONE,
+        "Skill install via API is removed. Use web_fetch to fetch the SKILL.md and write_file \
+         to save it to skills/{name}/SKILL.md.",
+    )
 }
 
 async fn delete_skill_handler(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let c = claims(&headers, &state)?;
-    let deleted = crate::db::skills::delete_skill(&state.db, &c.sub, &name)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
-    if !deleted {
-        return Err(ApiError::new(ErrorCode::NotFound, "Skill not found"));
-    }
-    // Remove from disk
-    let skill_dir = format!("{}/{name}", state.config.legacy_skills_dir_for_user(&c.sub));
-    let _ = tokio::fs::remove_dir_all(&skill_dir).await;
-    Ok(Json(serde_json::json!({ "message": "Skill deleted" })))
+    _headers: HeaderMap,
+    _state: State<Arc<AppState>>,
+    _name: Path<String>,
+) -> (StatusCode, &'static str) {
+    (
+        StatusCode::GONE,
+        "Skill deletion via API is removed. Use delete_file on skills/{name}/ (recursive: true).",
+    )
 }
 
 pub fn skills_api_routes() -> Router<Arc<AppState>> {

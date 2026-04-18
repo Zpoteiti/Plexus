@@ -4,10 +4,9 @@ use crate::auth::{Claims, extract_claims};
 use crate::state::AppState;
 use axum::body::Body;
 use axum::extract::{Multipart, Path, Query, State};
-use axum::http::{HeaderMap, Response};
+use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
-use plexus_common::consts::MEMORY_TEXT_MAX_CHARS;
 use plexus_common::error::{ApiError, ErrorCode};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -36,35 +35,29 @@ async fn get_profile(
     })))
 }
 
-// -- Soul --
+// -- Soul (deprecated) --
+// Soul is now a workspace file: {workspace}/{user_id}/SOUL.md
+// These endpoints return 410 Gone.
 
 async fn get_soul(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let c = claims(&headers, &state)?;
-    let user = crate::db::users::find_by_id(&state.db, &c.sub)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?
-        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "User not found"))?;
-    Ok(Json(serde_json::json!({ "soul": user.soul })))
-}
-
-#[derive(Deserialize)]
-struct SoulUpdate {
-    soul: String,
+    _headers: HeaderMap,
+    _state: State<Arc<AppState>>,
+) -> (StatusCode, &'static str) {
+    (
+        StatusCode::GONE,
+        "Soul is now a workspace file. Use read_file on SOUL.md or the workspace file API.",
+    )
 }
 
 async fn patch_soul(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<SoulUpdate>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let c = claims(&headers, &state)?;
-    crate::db::users::update_soul(&state.db, &c.sub, Some(&req.soul))
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
-    Ok(Json(serde_json::json!({ "message": "Soul updated" })))
+    _headers: HeaderMap,
+    _state: State<Arc<AppState>>,
+    _body: axum::body::Bytes,
+) -> (StatusCode, &'static str) {
+    (
+        StatusCode::GONE,
+        "Soul is now a workspace file. Use write_file/edit_file on SOUL.md or the workspace file API.",
+    )
 }
 
 // -- Display Name --
@@ -91,41 +84,29 @@ async fn patch_display_name(
     Ok(Json(serde_json::json!({ "message": "Display name updated" })))
 }
 
-// -- Memory --
+// -- Memory (deprecated) --
+// Memory is now a workspace file: {workspace}/{user_id}/MEMORY.md
+// These endpoints return 410 Gone.
 
 async fn get_memory(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let c = claims(&headers, &state)?;
-    let user = crate::db::users::find_by_id(&state.db, &c.sub)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?
-        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "User not found"))?;
-    Ok(Json(serde_json::json!({ "memory": user.memory_text })))
-}
-
-#[derive(Deserialize)]
-struct MemoryUpdate {
-    memory: String,
+    _headers: HeaderMap,
+    _state: State<Arc<AppState>>,
+) -> (StatusCode, &'static str) {
+    (
+        StatusCode::GONE,
+        "Memory is now a workspace file. Use read_file on MEMORY.md or the workspace file API.",
+    )
 }
 
 async fn patch_memory(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<MemoryUpdate>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let c = claims(&headers, &state)?;
-    if req.memory.len() > MEMORY_TEXT_MAX_CHARS {
-        return Err(ApiError::new(
-            ErrorCode::ValidationFailed,
-            format!("Memory exceeds {MEMORY_TEXT_MAX_CHARS} characters"),
-        ));
-    }
-    crate::db::users::update_memory(&state.db, &c.sub, &req.memory)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
-    Ok(Json(serde_json::json!({ "message": "Memory updated" })))
+    _headers: HeaderMap,
+    _state: State<Arc<AppState>>,
+    _body: axum::body::Bytes,
+) -> (StatusCode, &'static str) {
+    (
+        StatusCode::GONE,
+        "Memory is now a workspace file. Use write_file/edit_file on MEMORY.md or the workspace file API.",
+    )
 }
 
 // -- Sessions --

@@ -6,7 +6,6 @@ pub mod devices;
 pub mod discord;
 pub mod messages;
 pub mod sessions;
-pub mod skills;
 pub mod system_config;
 pub mod telegram;
 pub mod users;
@@ -36,8 +35,6 @@ async fn create_tables(pool: &PgPool) {
             password_hash  TEXT NOT NULL DEFAULT '',
             is_admin       BOOLEAN DEFAULT FALSE,
             display_name   TEXT,
-            soul           TEXT,
-            memory_text    TEXT NOT NULL DEFAULT '',
             timezone       TEXT NOT NULL DEFAULT 'UTC',
             created_at     TIMESTAMPTZ DEFAULT NOW()
         )",
@@ -114,16 +111,10 @@ async fn create_tables(pool: &PgPool) {
         "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS last_status TEXT",
         // Migration: add kind to distinguish system-protected jobs from user jobs
         "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'user'",
-        "CREATE TABLE IF NOT EXISTS skills (
-            skill_id       TEXT PRIMARY KEY,
-            user_id        TEXT NOT NULL REFERENCES users(user_id),
-            name           TEXT NOT NULL,
-            description    TEXT NOT NULL DEFAULT '',
-            always_on      BOOLEAN DEFAULT FALSE,
-            skill_path     TEXT NOT NULL,
-            created_at     TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(user_id, name)
-        )",
+        // A-17: drop legacy columns / table (idempotent)
+        "ALTER TABLE users DROP COLUMN IF EXISTS memory_text",
+        "ALTER TABLE users DROP COLUMN IF EXISTS soul",
+        "DROP TABLE IF EXISTS skills",
         "CREATE TABLE IF NOT EXISTS telegram_configs (
             user_id           TEXT PRIMARY KEY REFERENCES users(user_id),
             bot_token         TEXT NOT NULL,

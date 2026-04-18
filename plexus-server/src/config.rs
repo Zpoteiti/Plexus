@@ -32,12 +32,6 @@ impl ServerConfig {
             }),
         }
     }
-
-    /// TEMPORARY: returns `{workspace_root}/{user_id}/skills`.
-    /// Removed in Task A-17 once all callers have migrated.
-    pub fn legacy_skills_dir_for_user(&self, user_id: &str) -> String {
-        format!("{}/{user_id}/skills", self.workspace_root)
-    }
 }
 
 fn env_required(key: &str) -> String {

@@ -9,20 +9,14 @@ use std::sync::Arc;
 pub mod cron_tool;
 pub mod file_ops;
 pub mod file_transfer;
-pub mod memory;
 pub mod message;
-pub mod skills;
 pub mod web_fetch;
 
 /// All server tool names.
 pub const SERVER_TOOL_NAMES: &[&str] = &[
-    "save_memory",
-    "edit_memory",
     "message",
     "file_transfer",
     "cron",
-    "read_skill",
-    "install_skill",
     "web_fetch",
     "read_file",
     "write_file",
@@ -41,33 +35,6 @@ pub fn is_server_tool(name: &str) -> bool {
 /// Return JSON schemas for every registered server tool.
 pub fn tool_schemas() -> Vec<Value> {
     vec![
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "save_memory",
-                "description": "Save text to persistent memory (replaces current memory). 4K char max.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "text": { "type": "string" } },
-                    "required": ["text"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "edit_memory",
-                "description": "Edit persistent memory: append, prepend, or replace content.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "operation": { "type": "string", "enum": ["append", "prepend", "replace"] },
-                        "text": { "type": "string" }
-                    },
-                    "required": ["operation", "text"]
-                }
-            }
-        }),
         serde_json::json!({
             "type": "function",
             "function": {
@@ -124,33 +91,6 @@ pub fn tool_schemas() -> Vec<Value> {
                         "job_id": { "type": "string" }
                     },
                     "required": ["action"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "read_skill",
-                "description": "Read the full instructions of an on-demand skill.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "skill_name": { "type": "string" } },
-                    "required": ["skill_name"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "install_skill",
-                "description": "Install a skill from a GitHub repo (fetches SKILL.md).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "repo": { "type": "string", "description": "owner/repo" },
-                        "branch": { "type": "string" }
-                    },
-                    "required": ["repo"]
                 }
             }
         }),
@@ -288,14 +228,10 @@ pub async fn execute(
 ) -> ToolExecutionResult {
     let request_id = uuid::Uuid::new_v4().to_string();
     let (exit_code, output) = match tool_name {
-        "save_memory" => memory::save_memory(state, &ctx.user_id, &arguments).await,
-        "edit_memory" => memory::edit_memory(state, &ctx.user_id, &arguments).await,
         "web_fetch" => web_fetch::web_fetch(state, &ctx.user_id, &arguments).await,
         "message" => message::message_tool(state, ctx, &arguments).await,
         "file_transfer" => file_transfer::file_transfer(state, &ctx.user_id, &arguments).await,
         "cron" => cron_tool::cron(state, ctx, &arguments).await,
-        "read_skill" => skills::read_skill(state, &ctx.user_id, &arguments).await,
-        "install_skill" => skills::install_skill(state, &ctx.user_id, &arguments).await,
         "read_file" => file_ops::read_file(state, &ctx.user_id, &arguments).await,
         "write_file" => file_ops::write_file(state, &ctx.user_id, &arguments).await,
         "edit_file" => file_ops::edit_file(state, &ctx.user_id, &arguments).await,

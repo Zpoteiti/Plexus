@@ -238,13 +238,19 @@ pub async fn build_context(
     let mut messages = Vec::new();
 
     // ── Section 1: Soul ────────────────────────────────────────────────────────
-    // User soul fully overrides admin default. Empty user soul → fall back to default.
-    let soul = user
-        .soul
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .or_else(|| default_soul.as_deref().filter(|s| !s.is_empty()))
-        .unwrap_or("You are PLEXUS, a distributed AI agent.");
+    // Read from workspace file; empty → fall back to admin default → fallback string.
+    let ws_root = std::path::Path::new(&state.config.workspace_root);
+    let user_root = ws_root.join(&user.user_id);
+    let soul_from_file = tokio::fs::read_to_string(user_root.join("SOUL.md"))
+        .await
+        .unwrap_or_default();
+    let soul = if !soul_from_file.trim().is_empty() {
+        soul_from_file.as_str()
+    } else if let Some(s) = default_soul.as_deref().filter(|s| !s.is_empty()) {
+        s
+    } else {
+        "You are PLEXUS, a distributed AI agent."
+    };
     let mut system = format!("{soul}\n\n");
 
     // ── Section 2: Identity ────────────────────────────────────────────────────
@@ -275,8 +281,12 @@ pub async fn build_context(
     system += "filename and the user's intent.\n\n";
 
     // ── Section 4: Memory ──────────────────────────────────────────────────────
-    if !user.memory_text.is_empty() {
-        system += &format!("## Memory\n{}\n\n", user.memory_text);
+    // Read from workspace file; silently empty if missing.
+    let memory = tokio::fs::read_to_string(user_root.join("MEMORY.md"))
+        .await
+        .unwrap_or_default();
+    if !memory.trim().is_empty() {
+        system += &format!("## Memory\n{}\n\n", memory);
     }
 
     // ── Always-on skills ──────────────────────────────────────────────────────
@@ -287,7 +297,7 @@ pub async fn build_context(
     // ── On-demand skills ──────────────────────────────────────────────────────
     let on_demand: Vec<_> = skills.iter().filter(|s| !s.always_on).collect();
     if !on_demand.is_empty() {
-        system += "## Available Skills (use read_skill to load)\n";
+        system += "## Available Skills (use read_file on skills/{name}/SKILL.md to load)\n";
         for skill in &on_demand {
             system += &format!("- **{}**: {}\n", skill.name, skill.description);
         }

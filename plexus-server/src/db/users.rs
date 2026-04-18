@@ -8,8 +8,6 @@ pub struct User {
     pub password_hash: String,
     pub is_admin: bool,
     pub display_name: Option<String>,
-    pub soul: Option<String>,
-    pub memory_text: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -33,30 +31,21 @@ pub async fn create_user(
 }
 
 pub async fn find_by_email(pool: &PgPool, email: &str) -> Result<Option<User>, sqlx::Error> {
-    sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
-        .bind(email)
-        .fetch_optional(pool)
-        .await
+    sqlx::query_as::<_, User>(
+        "SELECT user_id, email, password_hash, is_admin, display_name, created_at FROM users WHERE email = $1"
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
 }
 
 pub async fn find_by_id(pool: &PgPool, user_id: &str) -> Result<Option<User>, sqlx::Error> {
-    sqlx::query_as::<_, User>("SELECT * FROM users WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-}
-
-pub async fn update_soul(
-    pool: &PgPool,
-    user_id: &str,
-    soul: Option<&str>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE users SET soul = $1 WHERE user_id = $2")
-        .bind(soul)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
-    Ok(())
+    sqlx::query_as::<_, User>(
+        "SELECT user_id, email, password_hash, is_admin, display_name, created_at FROM users WHERE user_id = $1"
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await
 }
 
 pub async fn update_display_name(
@@ -72,11 +61,18 @@ pub async fn update_display_name(
     Ok(())
 }
 
-pub async fn update_memory(pool: &PgPool, user_id: &str, memory: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE users SET memory_text = $1 WHERE user_id = $2")
-        .bind(memory)
+pub async fn update_timezone(pool: &PgPool, user_id: &str, tz: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE users SET timezone = $1 WHERE user_id = $2")
+        .bind(tz)
         .bind(user_id)
         .execute(pool)
-        .await?;
-    Ok(())
+        .await
+        .map(|_| ())
+}
+
+pub async fn get_timezone(pool: &PgPool, user_id: &str) -> sqlx::Result<String> {
+    sqlx::query_scalar::<_, String>("SELECT timezone FROM users WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
 }
