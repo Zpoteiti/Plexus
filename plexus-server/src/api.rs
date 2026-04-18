@@ -245,6 +245,21 @@ async fn workspace_quota(
     Ok(Json(workspace_quota_handler(&state, &c.sub)))
 }
 
+// -- Workspace Tree --
+
+/// GET /api/workspace/tree
+async fn workspace_tree(
+    headers: HeaderMap,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::workspace::WorkspaceEntry>>, ApiError> {
+    let c = claims(&headers, &state)?;
+    let root = std::path::Path::new(&state.config.workspace_root);
+    crate::workspace::walk_user_tree(root, &c.sub)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("tree walk failed: {e}")))
+}
+
 pub fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/user/profile", get(get_profile))
@@ -257,6 +272,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/files", post(upload_file))
         .route("/api/files/{file_id}", get(download_file))
         .route("/api/workspace/quota", get(workspace_quota))
+        .route("/api/workspace/tree", get(workspace_tree))
 }
 
 #[cfg(test)]

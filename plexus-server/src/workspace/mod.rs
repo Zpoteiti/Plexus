@@ -1,8 +1,10 @@
 pub mod paths;
 pub mod quota;
 pub mod registration;
+pub mod tree;
 
 pub use paths::{resolve_user_path, resolve_user_path_for_create, WorkspaceError};
 pub(crate) use paths::is_under_skills_dir;
 pub use quota::QuotaCache;
 pub use registration::initialize_user_workspace;
+pub use tree::{walk_user_tree, WorkspaceEntry};
