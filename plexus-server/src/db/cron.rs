@@ -196,6 +196,70 @@ pub async fn disable_job(pool: &PgPool, job_id: &str) -> Result<(), sqlx::Error>
     Ok(())
 }
 
+/// Create a system-owned cron job for a user. Idempotent: if a job with
+/// the same (user_id, name, kind='system') tuple already exists, this is
+/// a no-op.
+///
+/// Used by Plan D to register a per-user 'dream' cron job at workspace
+/// initialization. The resulting row has kind='system' so both the cron
+/// tool (C-3) and the HTTP endpoint (C-4) refuse to delete it.
+///
+/// `next_run_at` is precomputed from the cron expression so the poller
+/// picks the job up on its first tick. If parsing fails, `next_run_at`
+/// is left NULL — the poller will try to compute it again later.
+#[allow(clippy::too_many_arguments)]
+pub async fn ensure_system_cron_job(
+    pool: &PgPool,
+    user_id: &str,
+    name: &str,
+    cron_expr: &str,
+    timezone: &str,
+    message: &str,
+    channel: &str,
+    chat_id: &str,
+    deliver: bool,
+) -> Result<(), sqlx::Error> {
+    // Idempotency check.
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT job_id FROM cron_jobs \
+         WHERE user_id = $1 AND name = $2 AND kind = $3 \
+         LIMIT 1",
+    )
+    .bind(user_id)
+    .bind(name)
+    .bind(SYSTEM_KIND)
+    .fetch_optional(pool)
+    .await?;
+    if existing.is_some() {
+        return Ok(());
+    }
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let next_run_at =
+        crate::server_tools::cron_tool::compute_next_cron_pub(cron_expr, timezone).ok();
+
+    sqlx::query(
+        "INSERT INTO cron_jobs \
+         (job_id, user_id, name, kind, enabled, cron_expr, every_seconds, timezone, \
+          message, channel, chat_id, delete_after_run, deliver, next_run_at, run_count) \
+         VALUES ($1, $2, $3, $4, TRUE, $5, NULL, $6, $7, $8, $9, FALSE, $10, $11, 0)",
+    )
+    .bind(&job_id)
+    .bind(user_id)
+    .bind(name)
+    .bind(SYSTEM_KIND)
+    .bind(cron_expr)
+    .bind(timezone)
+    .bind(message)
+    .bind(channel)
+    .bind(chat_id)
+    .bind(deliver)
+    .bind(next_run_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +289,57 @@ mod tests {
         };
         assert!(j.claimed_at.is_none());
         assert!(j.last_status.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore] // needs DATABASE_URL
+    async fn test_ensure_system_cron_job_is_idempotent() {
+        let url = std::env::var("DATABASE_URL")
+            .expect("set DATABASE_URL to run this test");
+        let pool = crate::db::init_db(&url).await;
+
+        let user_id = format!("c5-idem-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let user_email = format!("{user_id}@test.local");
+        crate::db::users::create_user(&pool, &user_id, &user_email, "", false)
+            .await
+            .unwrap();
+
+        // First call creates.
+        ensure_system_cron_job(
+            &pool, &user_id, "dream", "0 */2 * * *", "UTC", "", "gateway", "-", false,
+        )
+        .await
+        .unwrap();
+
+        let jobs1 = list_by_user(&pool, &user_id).await.unwrap();
+        let dream_count_1 = jobs1.iter().filter(|j| j.name == "dream").count();
+        assert_eq!(dream_count_1, 1, "first call should create exactly one dream row");
+
+        // Second call is a no-op.
+        ensure_system_cron_job(
+            &pool, &user_id, "dream", "0 */2 * * *", "UTC", "", "gateway", "-", false,
+        )
+        .await
+        .unwrap();
+
+        let jobs2 = list_by_user(&pool, &user_id).await.unwrap();
+        let dream_count_2 = jobs2.iter().filter(|j| j.name == "dream").count();
+        assert_eq!(dream_count_2, 1, "second call must not duplicate the row");
+
+        // The row is kind='system'.
+        let dream = jobs2.iter().find(|j| j.name == "dream").unwrap();
+        assert_eq!(dream.kind, SYSTEM_KIND);
+
+        // Cleanup.
+        sqlx::query("DELETE FROM cron_jobs WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }
