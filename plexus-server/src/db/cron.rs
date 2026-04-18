@@ -21,6 +21,9 @@ pub struct CronJob {
     pub created_at: DateTime<Utc>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub last_status: Option<String>,
+    /// "user" (default) or "system" — system jobs are managed by the server
+    /// and cannot be removed by users.
+    pub kind: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -208,6 +211,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             claimed_at: None,
             last_status: None,
+            kind: "user".into(),
         };
         assert!(j.claimed_at.is_none());
         assert!(j.last_status.is_none());

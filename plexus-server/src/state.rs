@@ -171,6 +171,51 @@ impl AppState {
         Self::build_test_state(config, outbound_tx, quota_bytes)
     }
 
+    /// Build a minimal AppState backed by a real PgPool.
+    /// Used by DB-integrated tests that need to call tool functions against an actual
+    /// database. Requires `DATABASE_URL` — gate callers with `#[ignore]`.
+    pub fn test_with_pool(pool: sqlx::PgPool, workspace_root: &std::path::Path) -> std::sync::Arc<Self> {
+        use tokio::sync::{RwLock, Semaphore, mpsc};
+        use tokio_util::sync::CancellationToken;
+
+        let config = crate::config::ServerConfig {
+            database_url: "postgres://test".into(),
+            admin_token: "test".into(),
+            jwt_secret: "test".into(),
+            server_port: 0,
+            gateway_ws_url: "ws://invalid".into(),
+            gateway_token: "test".into(),
+            workspace_root: workspace_root.to_string_lossy().into_owned(),
+        };
+
+        let (outbound_tx, _outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(16);
+
+        std::sync::Arc::new(AppState {
+            db: pool,
+            config,
+            llm_config: std::sync::Arc::new(RwLock::new(None)),
+            devices: Default::default(),
+            devices_by_user: Default::default(),
+            pending: Default::default(),
+            tool_schema_cache: Default::default(),
+            rate_limiter: Default::default(),
+            rate_limit_config: std::sync::Arc::new(RwLock::new(0)),
+            default_soul: std::sync::Arc::new(RwLock::new(None)),
+            sessions: Default::default(),
+            web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
+            http_client: reqwest::Client::new(),
+            web_fetch_client: reqwest::Client::new(),
+            server_mcp: std::sync::Arc::new(RwLock::new(
+                crate::server_mcp::ServerMcpManager::new(),
+            )),
+            gateway_sink: RwLock::new(None),
+            outbound_tx,
+            shutdown: CancellationToken::new(),
+            quota: std::sync::Arc::new(crate::workspace::QuotaCache::new(1024 * 1024)),
+            skills_cache: crate::skills_cache::SkillsCache::new(),
+        })
+    }
+
     fn build_test_state(
         config: crate::config::ServerConfig,
         outbound_tx: tokio::sync::mpsc::Sender<crate::bus::OutboundEvent>,

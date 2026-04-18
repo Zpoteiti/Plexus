@@ -179,6 +179,7 @@ mod tests {
             created_at: Utc::now(),
             claimed_at: None,
             last_status: None,
+            kind: "user".into(),
         }
     }
 
