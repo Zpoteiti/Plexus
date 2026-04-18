@@ -29,7 +29,7 @@ This spec closes the gap with minimal new surface:
 
 - `DELETE /api/user` with password re-entry deletes the caller's account cleanly.
 - `DELETE /api/admin/users/{user_id}` lets an admin delete any user.
-- Dependent DB rows (sessions, messages, device_tokens, discord_configs, telegram_configs, cron_jobs, skills) are removed via `ON DELETE CASCADE`.
+- Dependent DB rows (sessions, messages, device_tokens, discord_configs, telegram_configs, cron_jobs) are removed via `ON DELETE CASCADE`. Note: the `skills` table was dropped by Plan A-17; skills now live on disk under `{WORKSPACE_ROOT}/{user_id}/skills/` and are wiped by `wipe_workspace` below.
 - Live in-memory state for the deleted user is evicted: sessions, rate-limit entry, devices, tool-schema cache.
 - Running Discord / Telegram bots for the deleted user are stopped.
 - On-disk workspace directory `{PLEXUS_WORKSPACE_ROOT}/{user_id}/` is recursively wiped (includes SOUL.md, MEMORY.md, HEARTBEAT.md, skills/, uploads/, and anything else the user has created).
@@ -76,7 +76,7 @@ Each step logs at `info` level on success and `warn` on failure, but **errors in
 
 ### 3.2 DB schema — CASCADE migration
 
-Six FK constraints point at `users(user_id)`, plus one at `sessions(session_id)` that transitively needs to cascade. All get `ON DELETE CASCADE`:
+Five FK constraints point at `users(user_id)`, plus one at `sessions(session_id)` that transitively needs to cascade. All get `ON DELETE CASCADE`:
 
 | Table | FK field | References | Cascade target |
 |---|---|---|---|
@@ -86,7 +86,8 @@ Six FK constraints point at `users(user_id)`, plus one at `sessions(session_id)`
 | `discord_configs` | `user_id` | `users(user_id)` | CASCADE |
 | `telegram_configs` | `user_id` | `users(user_id)` | CASCADE |
 | `cron_jobs` | `user_id` | `users(user_id)` | CASCADE |
-| `skills` | `user_id` | `users(user_id)` | CASCADE |
+
+(The `skills` table was dropped by Plan A-17 — skills are files on disk under `{WORKSPACE_ROOT}/{user_id}/skills/` and are removed by `wipe_workspace` in the service function. No DB cascade needed for skills.)
 
 The migration runs `ALTER TABLE … DROP CONSTRAINT … ADD CONSTRAINT … ON DELETE CASCADE` for each. Idempotent — wrapped in `DO $$ BEGIN … EXCEPTION WHEN undefined_object THEN NULL; END $$` so re-running on a clean DB (where `CREATE TABLE IF NOT EXISTS` already creates CASCADE versions after this migration) is a no-op.
 
@@ -148,7 +149,7 @@ No password re-entry — admin's own JWT is sufficient. Logs `info!("Admin {admi
 
 ### 3.6 Frontend — minimal delete UI
 
-In `plexus-frontend/src/pages/Settings.tsx` (or wherever account controls live — grep for the profile/soul editor):
+In `plexus-frontend/src/pages/Settings.tsx`'s `ProfileTab` function. Plan B-15 removed the Soul/Memory textareas; the current ProfileTab has display-name / email / timezone and a "Soul & Memory" pointer paragraph to the Workspace page. Append the Danger Zone section at the bottom of ProfileTab, below everything else.
 
 - Section titled "Danger Zone" at the bottom.
 - A red "Delete Account" button.
@@ -194,7 +195,7 @@ The `api.delete` helper currently doesn't accept a body; `plexus-frontend/src/li
 
 ## 5. Testing strategy
 
-- **DB migration**: a unit test that creates a test user + dependent rows in all 7 tables, calls `delete_user`, asserts the user row is gone and all dependent rows are gone. Also asserts that without CASCADE the delete would fail (negative test — delete a user that has a row in a non-cascade table to catch regressions). Run against a fresh Postgres instance or the ephemeral sqlx test pool.
+- **DB migration**: a unit test that creates a test user + dependent rows across the cascaded tables (sessions, messages, device_tokens, cron_jobs — plus optionally discord/telegram_configs), calls `delete_user`, asserts the user row is gone and all dependent rows are gone. Also asserts that without CASCADE the delete would fail (negative test — delete a user that has a row in a non-cascade table to catch regressions). Run against a fresh Postgres instance or the ephemeral sqlx test pool.
 - **Service function**: unit test with in-memory state (populated `state.sessions`, `state.devices`, a mocked file_store). Assert each step runs; assert the final state is clean.
 - **Gateway kick_user**: unit test parallel to `test_route_session_update_fans_out_by_user_id` — insert 3 browsers (2 alice, 1 bob), call `route_kick_user(state, "alice")`, assert only alice browsers get cancelled / removed.
 - **Endpoints**: integration tests via the existing test harness. Self-serve: wrong password → 401, right password → 204 + user gone. Admin: non-admin caller → 403, admin caller → 204.
@@ -231,12 +232,11 @@ user_id           TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
 -- cron_jobs
 user_id         TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
 
--- skills
-user_id        TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-
 -- telegram_configs
 user_id           TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
 ```
+
+Note: the `skills` table was dropped by Plan A-17 (see the `DROP TABLE IF EXISTS skills` migration in `db/mod.rs`). Skip it — no CREATE TABLE entry to update.
 
 - [ ] **Step 2: Add an idempotent migration block**
 
@@ -253,9 +253,9 @@ let cascade_migrations = [
     ("messages", "messages_session_id_fkey", "session_id", "sessions(session_id)"),
     ("discord_configs", "discord_configs_user_id_fkey", "user_id", "users(user_id)"),
     ("cron_jobs", "cron_jobs_user_id_fkey", "user_id", "users(user_id)"),
-    ("skills", "skills_user_id_fkey", "user_id", "users(user_id)"),
     ("telegram_configs", "telegram_configs_user_id_fkey", "user_id", "users(user_id)"),
 ];
+// Note: skills is gone (Plan A-17 DROP TABLE); no cascade needed.
 for (table, constraint, col, refs) in cascade_migrations {
     let sql = format!(
         "DO $$ BEGIN \
@@ -277,7 +277,7 @@ cargo build -p plexus-server
 cargo test -p plexus-server
 ```
 
-All 49 existing tests still pass (this task has no new tests; the migration correctness is covered by Task AD-2's delete test).
+All 152 existing tests still pass (this task has no new tests; the migration correctness is covered by Task AD-2's delete test). If you see a different count, note it in your report — tests may have grown further between plan authoring and execution.
 
 - [ ] **Step 4: Commit**
 
@@ -339,9 +339,15 @@ mod tests {
             .bind(format!("msg-{uid}")).bind(format!("sess-{uid}")).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO device_tokens (token, user_id, device_name) VALUES ($1, $2, 'dev')")
             .bind(format!("tok-{uid}")).bind(&uid).execute(&pool).await.unwrap();
-        // … similar for discord_configs, telegram_configs, cron_jobs, skills as needed
-        //   adapt to the actual required columns — run `\d discord_configs` in psql
-        //   if unsure.
+        // cron_jobs: covers the Plan D system-cron case (dream job per user) too.
+        sqlx::query(
+            "INSERT INTO cron_jobs (job_id, user_id, name, kind, message, channel, chat_id) \
+             VALUES ($1, $2, 'test-job', 'user', 'hi', 'gateway', '-')"
+        ).bind(format!("cron-{uid}")).bind(&uid).execute(&pool).await.unwrap();
+        // … similar for discord_configs, telegram_configs if you want extra coverage —
+        //   adapt to the actual required columns. The assertions below cover the
+        //   critical cascade paths (sessions, messages via sessions, device_tokens,
+        //   cron_jobs); adding more is defensive but not strictly required.
 
         // Delete
         let affected = delete_user(&pool, &uid).await.unwrap();
@@ -365,6 +371,11 @@ mod tests {
             "SELECT COUNT(*) FROM device_tokens WHERE user_id = $1"
         ).bind(&uid).fetch_one(&pool).await.unwrap();
         assert_eq!(remaining_tokens, 0);
+
+        let remaining_cron: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cron_jobs WHERE user_id = $1"
+        ).bind(&uid).fetch_one(&pool).await.unwrap();
+        assert_eq!(remaining_cron, 0, "cron_jobs should cascade");
     }
 }
 ```
@@ -959,13 +970,9 @@ export const api = {
 
 - [ ] **Step 2: Add Danger Zone to Settings page**
 
-Find the Settings page:
+Open `plexus-frontend/src/pages/Settings.tsx` and locate the `ProfileTab` function. Plan B-15 removed Soul/Memory textareas; ProfileTab now has display-name / email / timezone / a "Soul & Memory" pointer section. Append the Danger Zone section AFTER all existing sections in ProfileTab, as the last child of its returned JSX. Imports at the top of Settings.tsx (e.g. `useAuthStore`, `useNavigate`) — check whether these are already imported before re-adding.
 
-```bash
-grep -rn "Settings\|soul\|display.name" plexus-frontend/src/pages/
-```
-
-In that component, at the bottom of the form, add:
+Add:
 
 ```tsx
 import { useState } from 'react'
