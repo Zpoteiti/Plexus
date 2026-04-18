@@ -94,8 +94,10 @@ async fn handle_event(
     // If the inbound event carries media, build the canonical multimodal
     // `Content::Blocks` now and persist it as JSON in `messages.content`.
     // `reconstruct_history` will rehydrate it on each subsequent iteration,
-    // so images survive both mid-turn reloads and the 24 h file-store TTL.
-    // When there's no media, we store the plain text as today.
+    // so images survive mid-turn reloads. Workspace uploads are persistent
+    // (bounded by per-user quota, not a TTL), so the historical 24 h concern
+    // no longer applies, but the base64 inline also protects against user-driven
+    // deletes. When there's no media, we store the plain text as today.
     let content_to_store = if event.media.is_empty() {
         content.clone()
     } else {

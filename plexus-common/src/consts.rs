@@ -32,7 +32,6 @@ pub const TOOL_EXECUTION_TIMEOUT_SEC: u64 = 120;
 pub const USER_MESSAGE_MAX_CHARS: usize = 4000;
 pub const CONTEXT_COMPRESSION_THRESHOLD: usize = 16_000;
 pub const FILE_UPLOAD_MAX_BYTES: usize = 20 * 1024 * 1024;
-pub const FILE_CLEANUP_AGE_HOURS: u64 = 24;
 pub const WEB_FETCH_MAX_BODY_BYTES: usize = 1_048_576;
 pub const WEB_FETCH_MAX_OUTPUT_CHARS: usize = 50_000;
 pub const WEB_FETCH_TIMEOUT_SEC: u64 = 15;

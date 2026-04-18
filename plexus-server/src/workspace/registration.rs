@@ -73,6 +73,14 @@ pub async fn initialize_user_workspace(
 
     // Create uploads/
     tokio::fs::create_dir_all(user_root.join("uploads")).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(
+            user_root.join("uploads"),
+            std::fs::Permissions::from_mode(0o700),
+        ).await.ok();
+    }
 
     Ok(())
 }

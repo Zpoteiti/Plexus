@@ -53,7 +53,9 @@ pub async fn save_upload(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await;
+        if let Err(e) = fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await {
+            tracing::warn!(error = %e, path = %path.display(), "failed to set 0600 perms on uploaded file");
+        }
     }
 
     Ok(file_id)
