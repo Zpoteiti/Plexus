@@ -355,26 +355,50 @@ async fn workspace_file_get(
     Query(q): Query<WorkspaceFileQuery>,
 ) -> Result<Response<Body>, ApiError> {
     let claims = claims(&headers, &state)?;
-    match workspace_file_get_bytes(&state, &claims.sub, &q.path).await {
-        Ok(bytes) => {
-            let mime = mime_from_path(&q.path);
-            Ok(Response::builder()
-                .header("Content-Type", mime)
-                .body(Body::from(bytes))
-                .unwrap())
-        }
-        Err(e) => {
-            use crate::workspace::WorkspaceError;
-            let api_err = match &e {
-                WorkspaceError::Traversal(_) => ApiError::new(ErrorCode::Forbidden, "forbidden"),
-                WorkspaceError::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => {
-                    ApiError::new(ErrorCode::NotFound, "not found")
-                }
-                _ => ApiError::new(ErrorCode::InternalError, format!("{e:?}")),
-            };
-            Err(api_err)
-        }
-    }
+    let root = std::path::Path::new(&state.config.workspace_root);
+    let resolved = crate::workspace::resolve_user_path(root, &claims.sub, &q.path)
+        .await
+        .map_err(|e| match &e {
+            crate::workspace::WorkspaceError::Traversal(_) => {
+                ApiError::new(ErrorCode::Forbidden, "forbidden")
+            }
+            _ => ApiError::new(ErrorCode::NotFound, "not found"),
+        })?;
+
+    let meta = tokio::fs::metadata(&resolved)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::NotFound, "not found"))?;
+    let size = meta.len();
+
+    let file = tokio::fs::File::open(&resolved)
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::NotFound, "not found"))?;
+
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
+    let mime = mime_from_path(&q.path);
+    let mut resp = Response::new(body);
+    let resp_headers = resp.headers_mut();
+    resp_headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        mime.parse().unwrap_or_else(|_| {
+            "application/octet-stream"
+                .parse()
+                .expect("static str parses")
+        }),
+    );
+    resp_headers.insert(
+        axum::http::header::CONTENT_LENGTH,
+        size.to_string()
+            .parse()
+            .expect("u64 to string always parses as header value"),
+    );
+    resp_headers.insert(
+        "X-Content-Type-Options",
+        "nosniff".parse().expect("static str parses"),
+    );
+    Ok(resp)
 }
 
 /// Testable core: write raw bytes to `{workspace_root}/{user_id}/{rel_path}`.
@@ -401,12 +425,7 @@ pub async fn workspace_file_put_bytes(
         state
             .quota
             .check_and_reserve_upload(user_id, delta)
-            .map_err(|e| {
-                crate::workspace::WorkspaceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("quota: {e:?}"),
-                ))
-            })?;
+            .map_err(crate::workspace::WorkspaceError::Quota)?;
     }
 
     // Create parent dirs.
@@ -446,9 +465,7 @@ async fn workspace_file_put(
             use crate::workspace::WorkspaceError;
             match &e {
                 WorkspaceError::Traversal(_) => ApiError::new(ErrorCode::Forbidden, "forbidden"),
-                WorkspaceError::Io(io_err)
-                    if io_err.to_string().to_lowercase().contains("quota") =>
-                {
+                WorkspaceError::Quota(_) => {
                     ApiError::new(ErrorCode::ValidationFailed, format!("{e:?}"))
                 }
                 _ => ApiError::new(ErrorCode::InternalError, format!("{e:?}")),
