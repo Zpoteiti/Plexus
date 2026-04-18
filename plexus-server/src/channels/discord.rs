@@ -3,7 +3,7 @@
 //! Group policy: only respond when @mentioned or replied to.
 //! Access control: owner + allowed_users list.
 
-use crate::bus::{self, InboundEvent, OutboundEvent};
+use crate::bus::{self, EventKind, InboundEvent, OutboundEvent};
 use crate::state::AppState;
 use dashmap::DashMap;
 use plexus_common::consts::CHANNEL_DISCORD;
@@ -340,6 +340,7 @@ impl EventHandler for DiscordHandler {
         let event = InboundEvent {
             session_id,
             user_id: self.plexus_user_id.clone(),
+            kind: EventKind::UserTurn,
             content,
             channel: CHANNEL_DISCORD.to_string(),
             chat_id: Some(chat_id),

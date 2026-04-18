@@ -2,7 +2,7 @@
 //! Connects to plexus-gateway, authenticates, forwards messages.
 //! Stub for now — full implementation in M4 when gateway exists.
 
-use crate::bus::{self, InboundEvent, OutboundEvent};
+use crate::bus::{self, EventKind, InboundEvent, OutboundEvent};
 use crate::state::AppState;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -145,6 +145,7 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
         let event = InboundEvent {
             session_id,
             user_id: user_id.clone(),
+            kind: EventKind::UserTurn,
             content,
             channel: plexus_common::consts::CHANNEL_GATEWAY.to_string(),
             chat_id,

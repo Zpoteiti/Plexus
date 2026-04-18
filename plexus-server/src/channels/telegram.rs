@@ -1,7 +1,7 @@
 //! Telegram per-user bot channel via teloxide.
 //! Long polling. Group @mention detection. Access control via allowed_users.
 
-use crate::bus::{self, InboundEvent, OutboundEvent};
+use crate::bus::{self, EventKind, InboundEvent, OutboundEvent};
 use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -285,6 +285,7 @@ async fn handle_message(
     let event = InboundEvent {
         session_id,
         user_id: plexus_user_id.to_string(),
+        kind: EventKind::UserTurn,
         content,
         channel: crate::channels::CHANNEL_TELEGRAM.to_string(),
         chat_id: Some(chat_id),

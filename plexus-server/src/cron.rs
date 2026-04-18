@@ -8,7 +8,7 @@
 //! Crash recovery: if a server dies after claiming but before rescheduling,
 //! recover_stuck_jobs() resets the job after 30 minutes.
 
-use crate::bus::{self, InboundEvent};
+use crate::bus::{self, EventKind, InboundEvent};
 use crate::state::AppState;
 use plexus_common::consts::CRON_POLL_INTERVAL_SEC;
 use std::sync::Arc;
@@ -57,6 +57,7 @@ async fn poll_and_execute(state: &Arc<AppState>) -> Result<(), String> {
         let event = InboundEvent {
             session_id: format!("cron:{}", job.job_id),
             user_id: job.user_id.clone(),
+            kind: EventKind::Cron,
             content: job.message.clone(),
             channel: job.channel.clone(),
             chat_id: Some(job.chat_id.clone()),

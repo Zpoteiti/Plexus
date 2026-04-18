@@ -9,10 +9,19 @@ use std::time::Instant;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum EventKind {
+    UserTurn,
+    Cron,
+    Dream,
+    Heartbeat,
+}
+
 #[derive(Debug, Clone)]
 pub struct InboundEvent {
     pub session_id: String,
     pub user_id: String,
+    pub kind: EventKind,
     pub content: String,
     pub channel: String,
     pub chat_id: Option<String>,
@@ -34,8 +43,8 @@ pub struct OutboundEvent {
 /// Publish an inbound event: rate limit check → find/create session → send to inbox.
 /// If the session doesn't exist yet, spawns a new agent loop.
 pub async fn publish_inbound(state: &Arc<AppState>, event: InboundEvent) -> Result<(), String> {
-    // Rate limit check (cron events exempt)
-    if event.cron_job_id.is_none() {
+    // Rate limit check (only UserTurn events are subject to rate limiting)
+    if event.kind == EventKind::UserTurn {
         check_rate_limit(state, &event.user_id).await?;
     }
 

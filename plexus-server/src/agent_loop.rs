@@ -216,7 +216,7 @@ async fn handle_event(
         session_id: session_id.to_string(),
         channel: event.channel.clone(),
         chat_id: event.chat_id.clone(),
-        is_cron: event.cron_job_id.is_some(),
+        is_cron: event.kind == crate::bus::EventKind::Cron,
         is_partner: event.identity.as_ref().map_or(true, |i| i.is_partner),
     };
 
