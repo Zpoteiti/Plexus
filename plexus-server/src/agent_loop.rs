@@ -49,68 +49,52 @@ pub(crate) async fn publish_final(
         job_deliver,
     } = params;
 
-    // Decide whether to publish.
-    let should_publish = match &cron_job_id {
-        None => true, // user turn — always publishes
-        Some(job_id) => {
-            // Resolve the deliver flag (caller-provided, else load from DB).
-            let deliver = match job_deliver {
-                Some(d) => d,
-                None => match crate::db::cron::find_by_id(&state.db, job_id).await {
-                    Ok(Some(job)) => job.deliver,
-                    Ok(None) => {
-                        tracing::warn!(
-                            job_id,
-                            "publish_final: cron job not found, skipping publish"
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            job_id,
-                            "publish_final: cron job lookup failed, skipping publish"
-                        );
-                        return;
-                    }
-                },
-            };
+    if let Some(job_id) = cron_job_id {
+        let deliver = match job_deliver {
+            Some(d) => d,
+            None => match crate::db::cron::find_by_id(&state.db, &job_id).await {
+                Ok(Some(job)) => job.deliver,
+                Ok(None) => {
+                    // Cron job was deleted mid-turn — benign race, skip publish.
+                    warn!(job_id, "publish_final: cron job not found, skipping publish");
+                    return;
+                }
+                Err(e) => {
+                    warn!(error = %e, job_id, "publish_final: cron job lookup failed, skipping publish");
+                    return;
+                }
+            },
+        };
 
-            if !deliver {
-                tracing::info!(job_id, "cron deliver=false; skipping OutboundEvent publish");
-                return;
-            }
-
-            // deliver == true: gate through the evaluator.
-            let purpose = format!("cron job '{job_id}'");
-            let eval =
-                crate::evaluator::evaluate_notification(state, &user_id, &content, &purpose)
-                    .await;
-            if !eval.should_notify {
-                tracing::info!(
-                    job_id,
-                    reason = %eval.reason,
-                    "evaluator suppressed cron delivery"
-                );
-                return;
-            }
-            true
+        if !deliver {
+            info!(job_id, "cron deliver=false; skipping OutboundEvent publish");
+            return;
         }
-    };
 
-    if should_publish {
-        let _ = state
-            .outbound_tx
-            .send(crate::bus::OutboundEvent {
-                channel,
-                chat_id,
-                session_id,
-                user_id,
-                content,
-                media: vec![],
-            })
-            .await;
+        let purpose = format!("cron job '{job_id}'");
+        let eval = crate::evaluator::evaluate_notification(state, &user_id, &content, &purpose).await;
+        if !eval.should_notify {
+            info!(
+                job_id,
+                reason = %eval.reason,
+                "evaluator suppressed cron delivery"
+            );
+            return;
+        }
     }
+
+    // Reached only if: user turn, or cron with deliver=true + evaluator approved.
+    let _ = state
+        .outbound_tx
+        .send(crate::bus::OutboundEvent {
+            channel,
+            chat_id,
+            session_id,
+            user_id,
+            content,
+            media: vec![],
+        })
+        .await;
 }
 
 pub async fn run_session(
