@@ -1,49 +1,77 @@
-//! File upload/download with user-isolated paths. Hourly cleanup of old files.
+//! File upload/download with user-isolated paths in the workspace.
+//! Persistent storage — the ephemeral 24h cleanup from the old /tmp-based
+//! file store was dropped in A-18 since the workspace quota system
+//! handles size bounds and files are durable until the user deletes them.
 
-use plexus_common::consts::{FILE_CLEANUP_AGE_HOURS, FILE_UPLOAD_MAX_BYTES};
+use crate::state::AppState;
 use plexus_common::error::{ApiError, ErrorCode};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::fs;
-use tracing::{info, warn};
+use tracing::warn;
 
-const UPLOAD_BASE: &str = "/tmp/plexus-uploads";
-
-pub fn user_upload_dir(user_id: &str) -> PathBuf {
-    PathBuf::from(UPLOAD_BASE).join(user_id)
+pub fn user_upload_dir(workspace_root: &std::path::Path, user_id: &str) -> PathBuf {
+    workspace_root.join(user_id).join("uploads")
 }
 
-pub async fn save_upload(user_id: &str, filename: &str, data: &[u8]) -> Result<String, ApiError> {
-    if data.len() > FILE_UPLOAD_MAX_BYTES {
+pub async fn save_upload(
+    state: &Arc<AppState>,
+    user_id: &str,
+    filename: &str,
+    data: &[u8],
+) -> Result<String, ApiError> {
+    let size = data.len() as u64;
+
+    // Quota check via the central QuotaCache (per-upload cap + soft-lock).
+    state
+        .quota
+        .check_and_reserve_upload(user_id, size)
+        .map_err(|e| ApiError::new(ErrorCode::ValidationFailed, format!("{e}")))?;
+
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let ws_root = std::path::Path::new(&state.config.workspace_root);
+    let dir = user_upload_dir(ws_root, user_id);
+
+    if let Err(e) = fs::create_dir_all(&dir).await {
+        state.quota.record_delete(user_id, size); // rollback
         return Err(ApiError::new(
-            ErrorCode::ValidationFailed,
-            format!(
-                "File exceeds {}MB limit",
-                FILE_UPLOAD_MAX_BYTES / 1024 / 1024
-            ),
+            ErrorCode::InternalError,
+            format!("mkdir: {e}"),
         ));
     }
-    let file_id = uuid::Uuid::new_v4().to_string();
-    let dir = user_upload_dir(user_id);
-    fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("mkdir: {e}")))?;
 
     let safe_name = sanitize_filename(filename);
     let path = dir.join(format!("{file_id}_{safe_name}"));
-    fs::write(&path, data)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("write: {e}")))?;
+    if let Err(e) = fs::write(&path, data).await {
+        state.quota.record_delete(user_id, size); // rollback
+        return Err(ApiError::new(
+            ErrorCode::InternalError,
+            format!("write: {e}"),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await;
+    }
+
     Ok(file_id)
 }
 
-pub async fn load_file(user_id: &str, file_id: &str) -> Result<(Vec<u8>, String), ApiError> {
+pub async fn load_file(
+    state: &Arc<AppState>,
+    user_id: &str,
+    file_id: &str,
+) -> Result<(Vec<u8>, String), ApiError> {
     if file_id.contains("..") || file_id.contains('/') || file_id.contains('\\') {
         return Err(ApiError::new(
             ErrorCode::ValidationFailed,
             "Invalid file ID",
         ));
     }
-    let dir = user_upload_dir(user_id);
+    let ws_root = std::path::Path::new(&state.config.workspace_root);
+    let dir = user_upload_dir(ws_root, user_id);
     let mut entries = fs::read_dir(&dir)
         .await
         .map_err(|_| ApiError::new(ErrorCode::NotFound, "No files found"))?;
@@ -73,13 +101,18 @@ pub enum ResolvedMedia {
 
 /// Resolve media paths for channel delivery. Loads all `/api/files/{id}` entries
 /// in parallel; passes through anything else as a raw URL.
-pub async fn resolve_media(user_id: &str, media_paths: &[String]) -> Vec<ResolvedMedia> {
+pub async fn resolve_media(
+    state: &Arc<AppState>,
+    user_id: &str,
+    media_paths: &[String],
+) -> Vec<ResolvedMedia> {
     let futures = media_paths.iter().map(|path| {
         let path = path.clone();
         let user_id = user_id.to_string();
+        let state = state.clone();
         async move {
             if let Some(file_id) = path.strip_prefix("/api/files/") {
-                match load_file(&user_id, file_id).await {
+                match load_file(&state, &user_id, file_id).await {
                     Ok((bytes, filename)) => ResolvedMedia::File { bytes, filename },
                     Err(e) => {
                         warn!("resolve_media: failed to load {file_id}: {}", e.message);
@@ -104,54 +137,4 @@ fn sanitize_filename(name: &str) -> String {
             }
         })
         .collect()
-}
-
-pub fn spawn_cleanup_task(shutdown: tokio_util::sync::CancellationToken) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => {
-                    info!("file_store cleanup task shutting down");
-                    break;
-                }
-                _ = interval.tick() => {
-                    if let Err(e) = cleanup_old_files().await {
-                        warn!("File cleanup error: {e}");
-                    }
-                }
-            }
-        }
-    });
-}
-
-async fn cleanup_old_files() -> Result<(), std::io::Error> {
-    let base = Path::new(UPLOAD_BASE);
-    if !base.exists() {
-        return Ok(());
-    }
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(FILE_CLEANUP_AGE_HOURS * 3600);
-    let mut count = 0u32;
-    let mut dirs = fs::read_dir(base).await?;
-    while let Some(user_dir) = dirs.next_entry().await? {
-        if !user_dir.file_type().await?.is_dir() {
-            continue;
-        }
-        let mut files = fs::read_dir(user_dir.path()).await?;
-        while let Some(file) = files.next_entry().await? {
-            if let Ok(meta) = file.metadata().await {
-                if let Ok(modified) = meta.modified() {
-                    if modified < cutoff {
-                        let _ = fs::remove_file(file.path()).await;
-                        count += 1;
-                    }
-                }
-            }
-        }
-    }
-    if count > 0 {
-        info!("Cleaned up {count} old files");
-    }
-    Ok(())
 }

@@ -126,7 +126,7 @@ pub async fn stop_bot(user_id: &str) {
 }
 
 /// Deliver an outbound event via Discord.
-pub async fn deliver(_state: &AppState, event: &OutboundEvent) {
+pub async fn deliver(state: &Arc<AppState>, event: &OutboundEvent) {
     let registry = BOT_REGISTRY.read().await;
     let handle = match registry.get(&event.user_id) {
         Some(h) => h,
@@ -194,7 +194,7 @@ pub async fn deliver(_state: &AppState, event: &OutboundEvent) {
     }
 
     // Send media as file attachments (or raw URLs for non-file-store paths)
-    for item in crate::file_store::resolve_media(&event.user_id, &event.media).await {
+    for item in crate::file_store::resolve_media(state, &event.user_id, &event.media).await {
         let msg = match item {
             crate::file_store::ResolvedMedia::File { bytes, filename } => {
                 CreateMessage::new().add_file(CreateAttachment::bytes(bytes, filename))
@@ -311,7 +311,7 @@ impl EventHandler for DiscordHandler {
                     continue;
                 }
             };
-            match crate::file_store::save_upload(&self.plexus_user_id, &att.filename, &bytes)
+            match crate::file_store::save_upload(&self.state, &self.plexus_user_id, &att.filename, &bytes)
                 .await
             {
                 Ok(file_id) => media_urls.push(format!("/api/files/{file_id}")),

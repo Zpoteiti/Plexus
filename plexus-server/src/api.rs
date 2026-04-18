@@ -188,7 +188,7 @@ async fn upload_file(
         .bytes()
         .await
         .map_err(|e| ApiError::new(ErrorCode::ValidationFailed, format!("read: {e}")))?;
-    let file_id = crate::file_store::save_upload(&c.sub, &filename, &data).await?;
+    let file_id = crate::file_store::save_upload(&state, &c.sub, &filename, &data).await?;
     Ok(Json(serde_json::json!({
         "file_id": file_id,
         "file_name": filename,
@@ -201,7 +201,7 @@ async fn download_file(
     Path(file_id): Path<String>,
 ) -> Result<Response<Body>, ApiError> {
     let c = claims(&headers, &state)?;
-    let (data, filename) = crate::file_store::load_file(&c.sub, &file_id).await?;
+    let (data, filename) = crate::file_store::load_file(&state, &c.sub, &file_id).await?;
     let mime = plexus_common::mime::detect_mime_from_extension(&filename)
         .unwrap_or("application/octet-stream");
     Ok(Response::builder()

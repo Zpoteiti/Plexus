@@ -73,15 +73,18 @@ use base64::Engine;
 /// `providers::openai::strip_images_in_place`, so the canonical form stored
 /// in the DB remains unstripped.
 pub async fn build_user_content(
+    state: &std::sync::Arc<AppState>,
     user_id: &str,
     content: &str,
     media: &[String],
 ) -> Vec<ContentBlock> {
     let uid = user_id.to_string();
+    let state = state.clone();
     build_user_content_inner(content, media, move |fid| {
         let uid = uid.clone();
         let fid = fid.to_string();
-        async move { file_store::load_file(&uid, &fid).await.map_err(|e| e.message) }
+        let state = state.clone();
+        async move { file_store::load_file(&state, &uid, &fid).await.map_err(|e| e.message) }
     })
     .await
 }

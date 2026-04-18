@@ -261,7 +261,7 @@ async fn handle_message(
             }
         };
 
-        match crate::file_store::save_upload(plexus_user_id, &filename, &bytes).await {
+        match crate::file_store::save_upload(state, plexus_user_id, &filename, &bytes).await {
             Ok(fid) => media_urls.push(format!("/api/files/{fid}")),
             Err(e) => {
                 warn!("telegram save_upload failed ({filename}): {e:?}");
@@ -309,7 +309,7 @@ pub async fn stop_bot(user_id: &str) {
 }
 
 /// Deliver an outbound event via Telegram.
-pub async fn deliver(_state: &AppState, event: &OutboundEvent) {
+pub async fn deliver(state: &Arc<AppState>, event: &OutboundEvent) {
     let registry = BOT_REGISTRY.read().await;
     let handle = match registry.get(&event.user_id) {
         Some(h) => h,
@@ -351,7 +351,7 @@ pub async fn deliver(_state: &AppState, event: &OutboundEvent) {
     }
 
     // Send media as file attachments (or raw URLs for non-file-store paths)
-    for item in crate::file_store::resolve_media(&event.user_id, &event.media).await {
+    for item in crate::file_store::resolve_media(state, &event.user_id, &event.media).await {
         match item {
             crate::file_store::ResolvedMedia::File { bytes, filename } => {
                 let input = teloxide::types::InputFile::memory(bytes).file_name(filename);

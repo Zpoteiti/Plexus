@@ -80,8 +80,17 @@ async fn main() {
         skills_cache: crate::skills_cache::SkillsCache::new(),
     });
 
+    // Prime quota cache from existing workspace files before spawning any background tasks.
+    if let Err(e) = state
+        .quota
+        .initialize_from_disk(std::path::Path::new(&state.config.workspace_root))
+        .await
+    {
+        tracing::warn!(error = %e, "quota initialize_from_disk failed");
+        // Non-fatal — usage starts from 0 and converges as writes happen.
+    }
+
     // Background tasks
-    file_store::spawn_cleanup_task(state.shutdown.clone());
     ws::spawn_heartbeat_reaper(Arc::clone(&state));
     bus::spawn_rate_limit_refresh(Arc::clone(&state));
     cron::spawn_cron_poller(Arc::clone(&state));

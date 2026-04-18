@@ -69,7 +69,7 @@ async fn handle_event(
     // Large message conversion: >4K chars → save full to file, inline first 4K
     let content = if event.content.len() > USER_MESSAGE_MAX_CHARS {
         let file_id =
-            crate::file_store::save_upload(user_id, "large_message.txt", event.content.as_bytes())
+            crate::file_store::save_upload(state, user_id, "large_message.txt", event.content.as_bytes())
                 .await
                 .map_err(|e| format!("Save large message: {}", e.message))?;
         format!(
@@ -99,7 +99,7 @@ async fn handle_event(
     let content_to_store = if event.media.is_empty() {
         content.clone()
     } else {
-        let blocks = crate::context::build_user_content(user_id, &content, &event.media).await;
+        let blocks = crate::context::build_user_content(state, user_id, &content, &event.media).await;
         // Serialize Content::Blocks(blocks) → JSON array of blocks.
         // On serde failure (should be impossible for owned data), fall back
         // to plain text so the turn still proceeds.

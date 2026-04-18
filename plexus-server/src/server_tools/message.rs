@@ -120,7 +120,7 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
                 }
             };
 
-            match crate::file_store::save_upload(&ctx.user_id, &filename, &bytes).await {
+            match crate::file_store::save_upload(state, &ctx.user_id, &filename, &bytes).await {
                 Ok(file_id) => media_urls.push(format!("/api/files/{file_id}")),
                 Err(e) => return (1, format!("Save media failed: {}", e.message)),
             }
