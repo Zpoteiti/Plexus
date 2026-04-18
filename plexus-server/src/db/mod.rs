@@ -42,6 +42,8 @@ async fn create_tables(pool: &PgPool) {
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT",
         // Migration: add timezone to existing installs
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT NOT NULL DEFAULT 'UTC'",
+        // Migration: add last_dream_at to existing installs
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_dream_at TIMESTAMPTZ",
         "CREATE TABLE IF NOT EXISTS device_tokens (
             token          TEXT PRIMARY KEY,
             user_id        TEXT NOT NULL REFERENCES users(user_id),

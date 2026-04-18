@@ -76,3 +76,70 @@ pub async fn get_timezone(pool: &PgPool, user_id: &str) -> sqlx::Result<String> 
         .fetch_one(pool)
         .await
 }
+
+pub async fn get_last_dream_at(
+    pool: &PgPool,
+    user_id: &str,
+) -> sqlx::Result<Option<DateTime<Utc>>> {
+    let row: Option<(Option<DateTime<Utc>>,)> =
+        sqlx::query_as("SELECT last_dream_at FROM users WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.and_then(|(v,)| v))
+}
+
+pub async fn update_last_dream_at(
+    pool: &PgPool,
+    user_id: &str,
+    at: DateTime<Utc>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE users SET last_dream_at = $1 WHERE user_id = $2")
+        .bind(at)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore] // needs DATABASE_URL
+    async fn test_last_dream_at_roundtrip() {
+        let url = std::env::var("DATABASE_URL")
+            .expect("set DATABASE_URL to run this test");
+        let pool = crate::db::init_db(&url).await;
+
+        let user_id = format!("d3-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let user_email = format!("{user_id}@test.local");
+        crate::db::users::create_user(
+            &pool, &user_id, &user_email, "", false,
+        ).await.unwrap();
+
+        // Initial state: None (column default NULL).
+        let initial = get_last_dream_at(&pool, &user_id).await.unwrap();
+        assert!(initial.is_none(), "freshly-created user should have last_dream_at=NULL");
+
+        // Write a timestamp.
+        let now = chrono::Utc::now();
+        update_last_dream_at(&pool, &user_id, now).await.unwrap();
+
+        // Read it back.
+        let after = get_last_dream_at(&pool, &user_id).await.unwrap()
+            .expect("timestamp should be present after update");
+
+        // Postgres TIMESTAMPTZ stores microsecond precision; allow a 5ms tolerance.
+        let delta = (after - now).num_milliseconds().abs();
+        assert!(delta < 5, "expected roundtrip within 5ms; got {delta}ms delta");
+
+        // Cleanup.
+        sqlx::query("DELETE FROM users WHERE user_id = $1")
+            .bind(&user_id)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+}
