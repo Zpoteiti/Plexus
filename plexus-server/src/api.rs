@@ -201,8 +201,7 @@ async fn download_file(
 ) -> Result<Response<Body>, ApiError> {
     let c = claims(&headers, &state)?;
     let (data, filename) = crate::file_store::load_file(&state, &c.sub, &file_id).await?;
-    let mime = plexus_common::mime::detect_mime_from_extension(&filename)
-        .unwrap_or("application/octet-stream");
+    let mime = plexus_common::mime::detect_mime_from_extension(&filename);
     Ok(Response::builder()
         .header("Content-Type", mime)
         .header(
@@ -615,6 +614,8 @@ async fn delete_self(
     Ok(Json(serde_json::json!({ "message": "Account deleted" })))
 }
 
+// TODO(cleanup): delete this helper; use plexus_common::mime::detect_mime_from_extension.
+// Removed in P3.7/P4.4.
 fn mime_from_path(p: &str) -> &'static str {
     let ext = p.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {

@@ -167,6 +167,8 @@ where
     blocks
 }
 
+// TODO(cleanup): delete this helper; use plexus_common::mime::detect_mime_from_extension.
+// Removed in P3.7/P4.4.
 fn mime_from_filename(name: &str) -> String {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
