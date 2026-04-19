@@ -6,9 +6,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use plexus_common::errors::workspace::WorkspaceError;
-use tracing::warn;
+use tracing::{debug, warn};
 
 // ── Supporting types ──────────────────────────────────────────────────────────
 
@@ -26,6 +27,7 @@ pub struct DirEntry {
     pub size: u64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum EntryKind {
     File,
     Dir,
@@ -302,27 +304,163 @@ impl WorkspaceFs {
 
     // ── Deletes ───────────────────────────────────────────────────────────────
 
-    pub async fn delete(&self, _user_id: &str, _path: &str) -> Result<(), WorkspaceError> {
-        unimplemented!()
+    pub async fn delete(&self, user_id: &str, path: &str) -> Result<(), WorkspaceError> {
+        let resolved = self.resolve_path(user_id, path).await?;
+
+        // Fetch size before deletion so quota can be decremented accurately.
+        let meta = tokio::fs::metadata(&resolved).await?;
+        let bytes_freed = meta.len();
+
+        tokio::fs::remove_file(&resolved).await?;
+
+        self.quota.record_delete(user_id, bytes_freed);
+
+        if crate::workspace::paths::is_under_skills_dir(&resolved, &self.root, user_id) {
+            self.skills_cache.invalidate(user_id);
+        }
+
+        Ok(())
     }
 
     pub async fn delete_prefix(
         &self,
-        _user_id: &str,
-        _prefix: &str,
-        _older_than: Option<std::time::Duration>,
+        user_id: &str,
+        prefix: &str,
+        older_than: Option<std::time::Duration>,
     ) -> Result<u64, WorkspaceError> {
-        unimplemented!()
+        // Resolve prefix — if it doesn't exist, treat as no-op.
+        let resolved = match self.resolve_path(user_id, prefix).await {
+            Ok(p) => p,
+            Err(WorkspaceError::Io(_)) => return Ok(0),
+            Err(e) => return Err(e),
+        };
+
+        // If the resolved path isn't a directory, no-op.
+        let meta = tokio::fs::metadata(&resolved).await;
+        match meta {
+            Ok(m) if m.is_dir() => {}
+            _ => return Ok(0),
+        }
+
+        let invalidate_skills =
+            crate::workspace::paths::is_under_skills_dir(&resolved, &self.root, user_id)
+                || resolved == self.root.join(user_id).join("skills");
+
+        let mut total_reclaimed: u64 = 0;
+
+        // Async directory walk via an explicit stack (avoids sync walkdir).
+        let mut dir_stack = vec![resolved.clone()];
+        while let Some(dir) = dir_stack.pop() {
+            let mut read_dir = match tokio::fs::read_dir(&dir).await {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+
+            while let Some(entry) = read_dir.next_entry().await? {
+                let file_type = entry.file_type().await?;
+                if file_type.is_dir() {
+                    dir_stack.push(entry.path());
+                } else if file_type.is_file() {
+                    let entry_meta = entry.metadata().await?;
+                    // Apply TTL filter if requested.
+                    if let Some(dur) = older_than {
+                        let mtime = entry_meta.modified()?;
+                        let age = SystemTime::now()
+                            .duration_since(mtime)
+                            .unwrap_or_default();
+                        if age < dur {
+                            continue; // file is too recent — skip
+                        }
+                    }
+                    let size = entry_meta.len();
+                    if let Err(e) = tokio::fs::remove_file(entry.path()).await {
+                        debug!("delete_prefix: failed to remove {:?}: {e}", entry.path());
+                    } else {
+                        total_reclaimed += size;
+                    }
+                }
+            }
+        }
+
+        // Remove empty directories left behind under the prefix.
+        // Walk depth-first: collect all subdirs, sort deepest first, remove if empty.
+        let mut dirs_to_clean: Vec<PathBuf> = Vec::new();
+        let mut scan_stack = vec![resolved.clone()];
+        while let Some(dir) = scan_stack.pop() {
+            let mut rd = match tokio::fs::read_dir(&dir).await {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            while let Some(entry) = rd.next_entry().await? {
+                if entry.file_type().await?.is_dir() {
+                    scan_stack.push(entry.path());
+                    dirs_to_clean.push(entry.path());
+                }
+            }
+        }
+        // Sort longest path first so we remove leaf dirs before parents.
+        dirs_to_clean.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+        for dir in dirs_to_clean {
+            // Ignore errors — directory may not be empty or already removed.
+            let _ = tokio::fs::remove_dir(&dir).await;
+        }
+
+        if total_reclaimed > 0 {
+            self.quota.record_delete(user_id, total_reclaimed);
+        }
+
+        if invalidate_skills {
+            self.skills_cache.invalidate(user_id);
+        }
+
+        Ok(total_reclaimed)
     }
 
     // ── Directory / search ────────────────────────────────────────────────────
 
     pub async fn list(
         &self,
-        _user_id: &str,
-        _path: &str,
+        user_id: &str,
+        path: &str,
     ) -> Result<Vec<DirEntry>, WorkspaceError> {
-        unimplemented!()
+        let resolved = self.resolve_path(user_id, path).await?;
+
+        let meta = tokio::fs::metadata(&resolved).await?;
+        if !meta.is_dir() {
+            return Err(WorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{path} is not a directory"),
+            )));
+        }
+
+        let mut read_dir = tokio::fs::read_dir(&resolved).await?;
+        let mut entries = Vec::new();
+
+        while let Some(entry) = read_dir.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // If metadata fails (stale symlink, race), skip the entry and log at
+            // debug level — one bad entry should not abort the entire listing.
+            let entry_meta = match entry.metadata().await {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("list: skipping entry {name:?}: {e}");
+                    continue;
+                }
+            };
+            let kind = if entry_meta.is_dir() {
+                EntryKind::Dir
+            } else {
+                EntryKind::File
+            };
+            let size = if entry_meta.is_dir() {
+                0
+            } else {
+                entry_meta.len()
+            };
+            entries.push(DirEntry { name, kind, size });
+        }
+
+        Ok(entries)
     }
 
     pub async fn glob(
@@ -353,8 +491,18 @@ impl WorkspaceFs {
         }
     }
 
-    pub async fn wipe_user(&self, _user_id: &str) -> Result<(), WorkspaceError> {
-        unimplemented!()
+    pub async fn wipe_user(&self, user_id: &str) -> Result<(), WorkspaceError> {
+        let user_dir = self.root.join(user_id);
+        match tokio::fs::remove_dir_all(&user_dir).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Already wiped — treat as success (idempotent).
+            }
+            Err(e) => return Err(WorkspaceError::Io(e)),
+        }
+        self.quota.forget_user(user_id);
+        self.skills_cache.invalidate(user_id);
+        Ok(())
     }
 }
 
@@ -376,6 +524,8 @@ fn new_for_test_with_quota(root: PathBuf, quota_bytes: u64) -> WorkspaceFs {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    #[cfg(unix)]
+    use filetime;
 
     #[tokio::test]
     async fn read_relative_path_succeeds() {
@@ -512,5 +662,145 @@ mod tests {
 
         let snap = fs.quota("alice");
         assert_eq!(snap.used_bytes, 8);
+    }
+
+    // ── P3.4 delete/delete_prefix/list/wipe_user tests ───────────────────────
+
+    #[tokio::test]
+    async fn delete_single_file_decrements_quota() {
+        let tmp = tempdir().unwrap();
+        let alice_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&alice_dir).await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+        fs.write("alice", "a.txt", &[0u8; 100]).await.unwrap();
+        assert_eq!(fs.quota("alice").used_bytes, 100);
+
+        fs.delete("alice", "a.txt").await.unwrap();
+
+        assert_eq!(fs.quota("alice").used_bytes, 0);
+        assert!(!alice_dir.join("a.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_skills_file_invalidates_cache() {
+        let tmp = tempdir().unwrap();
+        let alice_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&alice_dir).await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+
+        // Write a skills file first so cache has something to load.
+        fs.write(
+            "alice",
+            "skills/git/SKILL.md",
+            b"---\nname: git\ndescription: git tool\nalways_on: false\n---\nbody",
+        )
+        .await
+        .unwrap();
+
+        // Prime the cache.
+        let before = fs.skills_cache.get_or_load("alice", &fs.root).await;
+
+        // Delete the skills file — should invalidate cache.
+        fs.delete("alice", "skills/git/SKILL.md").await.unwrap();
+
+        // Fresh load must yield a different Arc.
+        let after = fs.skills_cache.get_or_load("alice", &fs.root).await;
+        assert!(
+            !std::sync::Arc::ptr_eq(&before, &after),
+            "expected cache invalidation after skills file deletion"
+        );
+        drop(alice_dir);
+    }
+
+    #[tokio::test]
+    async fn delete_prefix_with_ttl_reclaims_old_files() {
+        let tmp = tempdir().unwrap();
+        let alice_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&alice_dir).await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+
+        // Write two files.
+        fs.write("alice", ".attachments/old/a.bin", &[1u8; 50])
+            .await
+            .unwrap();
+        fs.write("alice", ".attachments/new/b.bin", &[2u8; 30])
+            .await
+            .unwrap();
+        assert_eq!(fs.quota("alice").used_bytes, 80);
+
+        // Set mtime of old/a.bin to 60 days ago.
+        let old_path = alice_dir.join(".attachments/old/a.bin");
+        let sixty_days_ago = filetime::FileTime::from_unix_time(
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64)
+                - 60 * 86400,
+            0,
+        );
+        filetime::set_file_mtime(&old_path, sixty_days_ago).unwrap();
+
+        // Delete files older than 30 days.
+        let reclaimed = fs
+            .delete_prefix(
+                "alice",
+                ".attachments",
+                Some(std::time::Duration::from_secs(30 * 86400)),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(reclaimed, 50, "should reclaim only the old file");
+        assert!(!old_path.exists(), "old file must be gone");
+        assert!(
+            alice_dir.join(".attachments/new/b.bin").exists(),
+            "new file must remain"
+        );
+        assert_eq!(fs.quota("alice").used_bytes, 30);
+    }
+
+    #[tokio::test]
+    async fn list_returns_top_level_entries() {
+        let tmp = tempdir().unwrap();
+        let alice_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&alice_dir).await.unwrap();
+        tokio::fs::write(alice_dir.join("a.txt"), b"hello").await.unwrap();
+        tokio::fs::create_dir_all(alice_dir.join("sub")).await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+        let mut entries = fs.list("alice", ".").await.unwrap();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "a.txt");
+        assert_eq!(entries[0].kind, EntryKind::File);
+        assert_eq!(entries[1].name, "sub");
+        assert_eq!(entries[1].kind, EntryKind::Dir);
+    }
+
+    #[tokio::test]
+    async fn wipe_user_clears_tree_and_quota() {
+        let tmp = tempdir().unwrap();
+        let alice_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&alice_dir).await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+        fs.write("alice", "file1.txt", &[0u8; 500]).await.unwrap();
+        assert_eq!(fs.quota("alice").used_bytes, 500);
+
+        fs.wipe_user("alice").await.unwrap();
+
+        assert!(!alice_dir.exists(), "alice dir must be removed");
+        assert_eq!(
+            fs.quota("alice").used_bytes,
+            0,
+            "quota must be reset after wipe"
+        );
+
+        // Calling again should be idempotent (no error).
+        fs.wipe_user("alice").await.unwrap();
     }
 }

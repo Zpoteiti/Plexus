@@ -40,6 +40,7 @@ walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
+filetime = "0.2"
 
 [lints.rust]
 unsafe_code = "forbid"
