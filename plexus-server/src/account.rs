@@ -81,6 +81,7 @@ fn evict_in_memory(state: &Arc<AppState>, user_id: &str) {
     for key in &device_keys {
         state.devices.remove(key);
         state.pending.remove(key);
+        state.streams.remove(key);
     }
     state.devices_by_user.remove(user_id);
     state.rate_limiter.remove(user_id);

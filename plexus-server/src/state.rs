@@ -44,6 +44,12 @@ pub struct AppState {
     // Tool request/response matching: device_key -> { request_id -> sender }
     pub pending: DashMap<String, DashMap<String, oneshot::Sender<ToolExecutionResult>>>,
 
+    // Device-origin streaming (ReadStream/StreamChunk/StreamEnd/StreamError):
+    // device_key -> { request_id -> chunk sender }. Populated by
+    // `device_stream::device_stream` handler, drained by `ws::handle_device_session`
+    // via `device_stream::dispatch_frame`.
+    pub streams: DashMap<String, DashMap<String, mpsc::Sender<crate::device_stream::StreamFrame>>>,
+
     // Per-user tool schema cache (Arc to avoid deep-cloning JSON on cache hits)
     pub tool_schema_cache: DashMap<String, Arc<Vec<Value>>>,
 
@@ -229,6 +235,7 @@ impl AppState {
             devices: Default::default(),
             devices_by_user: Default::default(),
             pending: Default::default(),
+            streams: Default::default(),
             tool_schema_cache: Default::default(),
             rate_limiter: Default::default(),
             rate_limit_config: std::sync::Arc::new(RwLock::new(0)),
@@ -277,6 +284,7 @@ impl AppState {
             devices: Default::default(),
             devices_by_user: Default::default(),
             pending: Default::default(),
+            streams: Default::default(),
             tool_schema_cache: Default::default(),
             rate_limiter: Default::default(),
             rate_limit_config: std::sync::Arc::new(RwLock::new(0)),

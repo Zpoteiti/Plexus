@@ -9,6 +9,7 @@ mod consts;
 mod context;
 mod cron;
 mod db;
+mod device_stream;
 pub mod dream;
 pub mod evaluator;
 pub mod heartbeat;
@@ -82,6 +83,7 @@ async fn main() {
         devices: Default::default(),
         devices_by_user: Default::default(),
         pending: Default::default(),
+        streams: Default::default(),
         tool_schema_cache: Default::default(),
         rate_limiter: Default::default(),
         rate_limit_config: Arc::new(RwLock::new(0)),

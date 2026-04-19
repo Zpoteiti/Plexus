@@ -180,6 +180,32 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
                 };
                 resolve_pending(&state, &device_key, result);
             }
+            ClientToServer::StreamChunk {
+                request_id, data, ..
+            } => {
+                crate::device_stream::dispatch_frame(
+                    &state,
+                    &device_key,
+                    &request_id,
+                    crate::device_stream::StreamFrame::Chunk(data),
+                );
+            }
+            ClientToServer::StreamEnd { request_id, .. } => {
+                crate::device_stream::dispatch_frame(
+                    &state,
+                    &device_key,
+                    &request_id,
+                    crate::device_stream::StreamFrame::End,
+                );
+            }
+            ClientToServer::StreamError { request_id, error } => {
+                crate::device_stream::dispatch_frame(
+                    &state,
+                    &device_key,
+                    &request_id,
+                    crate::device_stream::StreamFrame::Error(error),
+                );
+            }
             _ => {}
         }
     }
@@ -195,6 +221,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
         }
     }
     state.pending.remove(&device_key);
+    state.streams.remove(&device_key);
     state.tool_schema_cache.remove(&user_id);
 }
 
@@ -259,6 +286,7 @@ pub fn spawn_heartbeat_reaper(state: Arc<AppState>) {
                                 }
                             }
                             state.pending.remove(&key);
+                            state.streams.remove(&key);
                             state.tool_schema_cache.remove(&conn.user_id);
                         }
                     }

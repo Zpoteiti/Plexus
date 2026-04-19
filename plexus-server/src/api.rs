@@ -437,6 +437,10 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         )
         .route("/api/workspace/upload", post(workspace_upload))
         .route("/api/workspace/skills", get(workspace_skills))
+        .route(
+            "/api/device-stream/{device_name}/{*path}",
+            get(crate::device_stream::device_stream),
+        )
         .route("/api/user", delete(delete_self))
 }
 
