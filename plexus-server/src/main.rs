@@ -85,9 +85,9 @@ async fn main() {
         rate_limiter: Default::default(),
         rate_limit_config: Arc::new(RwLock::new(0)),
         default_soul: Arc::new(RwLock::new(None)),
-        dream_phase1_prompt: Arc::new(RwLock::new(dream_phase1_prompt)),
-        dream_phase2_prompt: Arc::new(RwLock::new(dream_phase2_prompt)),
-        heartbeat_phase1_prompt: Arc::new(RwLock::new(heartbeat_phase1_prompt)),
+        dream_phase1_prompt: Arc::from(dream_phase1_prompt.as_str()),
+        dream_phase2_prompt: Arc::from(dream_phase2_prompt.as_str()),
+        heartbeat_phase1_prompt: Arc::from(heartbeat_phase1_prompt.as_str()),
         sessions: Default::default(),
         web_fetch_semaphore: Arc::new(Semaphore::new(
             plexus_common::consts::WEB_FETCH_CONCURRENT_MAX,

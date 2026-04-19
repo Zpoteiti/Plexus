@@ -106,7 +106,7 @@ pub async fn run_phase1(state: &Arc<AppState>, user_id: &str) -> Phase1Result {
     let local_now = chrono::Utc::now().with_timezone(&tz);
 
     // 3. Build messages.
-    let system_prompt = state.heartbeat_phase1_prompt.read().await.clone();
+    let system_prompt = state.heartbeat_phase1_prompt.as_ref();
     let user_body = format!(
         "## Current local time ({tz_string})\n{}\n\n## HEARTBEAT.md\n{heartbeat_md}",
         local_now.format("%A %H:%M %Z"),

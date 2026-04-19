@@ -185,7 +185,7 @@ async fn run_phase1(
             .join("\n")
     };
 
-    let system_prompt = state.dream_phase1_prompt.read().await.clone();
+    let system_prompt = state.dream_phase1_prompt.as_ref();
     let user_body = format!(
         "## Current MEMORY.md\n\n{memory}\n\n\
          ## Current SOUL.md\n\n{soul}\n\n\

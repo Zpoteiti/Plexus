@@ -392,7 +392,7 @@ pub async fn build_context(
             // Dream Phase 2: phase2 prompt + memory + soul + skills.
             // Deliberately OMITS channel identity, device list, and current time —
             // dream is an autonomous server-side pass, not a user-facing reply.
-            let phase2 = state.dream_phase2_prompt.read().await.clone();
+            let phase2 = state.dream_phase2_prompt.as_ref();
             assemble_dream_system_prompt(&phase2, &memory, soul, &skills_section)
         }
     };
