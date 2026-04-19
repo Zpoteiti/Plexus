@@ -82,35 +82,25 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
         };
 
         for path in &media_paths {
-            let (bytes, filename) = if device_name == "server" {
-                // Read from the user's server workspace.
-                let ws_root = std::path::Path::new(&state.config.workspace_root);
-                let resolved =
-                    match crate::workspace::resolve_user_path(ws_root, &ctx.user_id, path).await {
-                        Ok(p) => p,
-                        Err(crate::workspace::WorkspaceError::Traversal(_)) => {
-                            return (1, "Path escapes user workspace".into());
-                        }
-                        Err(crate::workspace::WorkspaceError::Io(e))
-                            if e.kind() == std::io::ErrorKind::NotFound =>
-                        {
-                            return (1, format!("File not found: {path}"));
-                        }
-                        Err(e) => return (1, format!("Resolve error on {path}: {e}")),
-                    };
-                let bytes = match tokio::fs::read(&resolved).await {
-                    Ok(b) => b,
-                    Err(e) => return (1, format!("Read error on {path}: {e}")),
-                };
-                let filename = resolved
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                (bytes, filename)
+            if device_name == "server" {
+                // Validate via workspace_fs.stat — covers traversal check + existence.
+                use plexus_common::errors::workspace::WorkspaceError;
+                match state.workspace_fs.stat(&ctx.user_id, path).await {
+                    Ok(_) => {}
+                    Err(WorkspaceError::Traversal(_)) => {
+                        return (1, "Path escapes user workspace".into());
+                    }
+                    Err(WorkspaceError::Io(e))
+                        if e.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        return (1, format!("File not found: {path}"));
+                    }
+                    Err(e) => return (1, format!("Resolve error on {path}: {e}")),
+                }
+                media_urls.push(path.clone());
             } else {
                 // Request from a client device.
-                match super::file_transfer::request_file_from_device(
+                let (bytes, filename) = match super::file_transfer::request_file_from_device(
                     state,
                     &ctx.user_id,
                     device_name,
@@ -120,12 +110,12 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
                 {
                     Ok(pair) => pair,
                     Err(e) => return (1, e),
+                };
+                let rel = format!(".attachments/tool-{}/{}", uuid::Uuid::new_v4(), filename);
+                if let Err(e) = state.workspace_fs.write(&ctx.user_id, &rel, &bytes).await {
+                    return (1, format!("Save device media: {e}"));
                 }
-            };
-
-            match crate::file_store::save_upload(state, &ctx.user_id, &filename, &bytes).await {
-                Ok(file_id) => media_urls.push(format!("/api/files/{file_id}")),
-                Err(e) => return (1, format!("Save media failed: {}", e.message)),
+                media_urls.push(rel);
             }
         }
     }
@@ -185,10 +175,10 @@ mod tests {
 
         let event = outbound_rx.recv().await.expect("outbound event published");
         assert_eq!(event.content, "Here's the report");
-        assert_eq!(event.media.len(), 1, "expected 1 media URL");
-        assert!(
-            event.media[0].starts_with("/api/files/"),
-            "expected /api/files URL, got: {}",
+        assert_eq!(event.media.len(), 1, "expected 1 media path");
+        assert_eq!(
+            event.media[0], "uploads/report.pdf",
+            "expected workspace path, got: {}",
             event.media[0]
         );
     }
@@ -300,13 +290,11 @@ mod tests {
 
         let event = outbound_rx.recv().await.expect("outbound event published");
         assert_eq!(event.content, "two files");
-        assert_eq!(event.media.len(), 2, "expected 2 media URLs");
-        for url in &event.media {
-            assert!(
-                url.starts_with("/api/files/"),
-                "expected /api/files URL, got: {url}"
-            );
-        }
+        assert_eq!(event.media.len(), 2, "expected 2 media paths");
+        let paths: std::collections::HashSet<&str> =
+            event.media.iter().map(|s| s.as_str()).collect();
+        assert!(paths.contains("uploads/a.txt"), "missing uploads/a.txt");
+        assert!(paths.contains("uploads/b.txt"), "missing uploads/b.txt");
     }
 
     // Note: "mixed media" (one server file + one client device file in a single call) is not
