@@ -1,3 +1,4 @@
+pub mod fs;
 pub mod paths;
 pub mod quota;
 pub mod registration;
