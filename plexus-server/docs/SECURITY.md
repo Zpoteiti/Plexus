@@ -106,9 +106,11 @@ IPv6 blocked ranges:
 
 After hostname validation, the hostname is resolved and all resulting IPs are checked against the same blocked ranges. This prevents DNS rebinding attacks where a hostname initially resolves to a public IP during validation but later resolves to a private IP.
 
-### Per-User SSRF Whitelist
+### SSRF Policy
 
-Users can whitelist specific CIDR ranges via the web UI (e.g., `10.180.0.0/16`) to allow `web_fetch` to access internal services. Stored per-user in DB. Admin can also set a global whitelist for company-wide internal ranges. This is separate from the per-device client SSRF whitelist (see client security docs). Responsibility for whitelisted ranges is on the user.
+The server-side `web_fetch` tool has a **hardcoded, unconditional RFC-1918 block** — there is no per-user whitelist on the server. All private/loopback ranges are always blocked regardless of user.
+
+Per-device SSRF whitelists (CIDR ranges) are stored in `device_tokens.ssrf_whitelist` and apply only to client-side tool execution (shell, file ops). This is separate from the server `web_fetch` block above.
 
 ### Resource Limits
 
@@ -148,15 +150,16 @@ When messages arrive from Discord, the system injects security context based on 
 
 This is enforced at the prompt level via `build_sender_identity_section` in `context.rs`.
 
-## File Upload/Download Security
+## File Security
+
+All user files live in the **workspace** at `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`. Paths are resolved via `WorkspaceFs` which enforces that every access stays within the user's own workspace root (no path traversal).
+
+Per-message attachments are stored under `.attachments/` within the workspace with a 30-day TTL.
 
 - Max upload size: 25MB
-- File IDs are UUIDs (no user-controlled paths)
-- Download endpoint validates `file_id`: rejects `..`, `/`, `\`, non-alphanumeric-hyphen characters
-- Files stored in `/tmp/plexus-uploads/{user_id}/` (user-isolated) and `/tmp/plexus-media/` (shared)
-- Cleanup task runs hourly, deletes files older than 24 hours
 - `X-Content-Type-Options: nosniff` header on all downloads
 - `Content-Disposition: attachment` forces download (no inline rendering)
+- File tool operations routed to `device_name`: `"server"` targets the user's workspace; client device names target the device's bwrap jail
 
 ## Tool Execution Security
 
