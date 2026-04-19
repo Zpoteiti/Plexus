@@ -20,37 +20,6 @@ fn admin_claims(headers: &HeaderMap, state: &AppState) -> Result<crate::auth::Cl
     Ok(c)
 }
 
-// -- Default Soul --
-
-async fn get_default_soul(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    admin_claims(&headers, &state)?;
-    let soul = state.default_soul.read().await.clone();
-    Ok(Json(serde_json::json!({ "default_soul": soul })))
-}
-
-#[derive(Deserialize)]
-struct SoulUpdate {
-    soul: String,
-}
-
-async fn put_default_soul(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<SoulUpdate>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    admin_claims(&headers, &state)?;
-    crate::db::system_config::set(&state.db, "default_soul", &req.soul)
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
-    *state.default_soul.write().await = Some(req.soul);
-    Ok(Json(
-        serde_json::json!({ "message": "Default soul updated" }),
-    ))
-}
-
 // -- Rate Limit --
 
 async fn get_rate_limit(
@@ -280,10 +249,6 @@ async fn delete_user_by_admin(
 
 pub fn admin_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route(
-            "/api/admin/default-soul",
-            get(get_default_soul).put(put_default_soul),
-        )
         .route(
             "/api/admin/rate-limit",
             get(get_rate_limit).put(put_rate_limit),

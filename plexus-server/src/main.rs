@@ -178,7 +178,6 @@ async fn main() {
         .merge(auth::device::device_routes())
         .merge(auth::admin::admin_routes())
         .merge(auth::cron_api::cron_api_routes())
-        .merge(auth::skills_api::skills_api_routes())
         .merge(auth::discord_api::discord_api_routes())
         .merge(auth::telegram_api::telegram_api_routes())
         .merge(api::api_routes())
