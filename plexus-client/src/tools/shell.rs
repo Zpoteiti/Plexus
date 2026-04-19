@@ -16,15 +16,6 @@ impl Tool for ShellTool {
     fn name(&self) -> &str {
         "shell"
     }
-    fn description(&self) -> &str {
-        "Execute a shell command. Working directory defaults to workspace root."
-    }
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{
-            "command":{"type":"string"}, "timeout_sec":{"type":"integer"},
-            "working_dir":{"type":"string"}
-        },"required":["command"]})
-    }
     fn execute(
         &self,
         args: Value,

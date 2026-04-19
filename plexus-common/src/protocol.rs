@@ -112,7 +112,7 @@ pub enum ClientToServer {
         protocol_version: String,
     },
     RegisterTools {
-        schemas: Vec<Value>,
+        tool_names: Vec<String>,
     },
     Heartbeat {
         status: DeviceStatus,

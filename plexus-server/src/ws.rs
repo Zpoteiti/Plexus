@@ -135,9 +135,9 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             ClientToServer::Heartbeat { .. } => {
                 let _ = send_msg_arc(&sink, &ServerToClient::HeartbeatAck).await;
             }
-            ClientToServer::RegisterTools { schemas } => {
+            ClientToServer::RegisterTools { tool_names } => {
                 if let Some(mut conn) = state.devices.get_mut(&device_key) {
-                    conn.tools = schemas;
+                    conn.tools = tool_names;
                 }
                 state.tool_schema_cache.remove(&user_id);
                 info!("Tools registered for {device_key}");

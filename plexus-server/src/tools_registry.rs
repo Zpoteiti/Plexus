@@ -29,8 +29,8 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
     // 1. Native server tools — no device_name, emitted as-is.
     schemas.extend(crate::server_tools::tool_schemas());
 
-    // 2. Collect all client device tools: (device_name, tool_schema)
-    let mut device_tools: Vec<(String, Vec<Value>)> = Vec::new();
+    // 2. Collect all client device tools: (device_name, tool_names)
+    let mut device_tools: Vec<(String, Vec<String>)> = Vec::new();
     if let Some(keys) = state.devices_by_user.get(user_id) {
         for key in keys.value() {
             if let Some(conn) = state.devices.get(key) {
@@ -39,10 +39,10 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
         }
     }
 
-    // 3. Build two accumulation maps keyed by tool name:
+    // 3. Build accumulation maps keyed by tool name:
     //    - mcp_sources: mcp_* tools → ordered list of device names (may include "server")
-    //    - native_sources: non-mcp client tools → ordered list of device names
-    //    - representative: first schema seen for each key (used as template)
+    //    - native_sources: non-mcp client tools → ordered list of device names (names only)
+    //    - representatives: first MCP schema seen for each key (used as emit template)
     let mut mcp_sources: HashMap<String, Vec<String>> = HashMap::new();
     let mut native_sources: HashMap<String, Vec<String>> = HashMap::new();
     let mut representatives: HashMap<String, Value> = HashMap::new();
@@ -69,8 +69,7 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
 
     // 3b. Accumulate client tools into mcp_sources or native_sources.
     for (device_name, tools) in &device_tools {
-        for schema in tools {
-            let name = tool_name(schema).to_string();
+        for name in tools {
             if name.is_empty() {
                 continue;
             }
@@ -85,9 +84,6 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
                     .or_default()
                     .push(device_name.clone());
             }
-            representatives
-                .entry(name)
-                .or_insert_with(|| schema.clone());
         }
     }
 
@@ -111,9 +107,7 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
             // device_name enum = "server" + any client device that reports this tool.
             let mut devices: Vec<String> = vec!["server".to_string()];
             for (device_name, tools) in &device_tools {
-                let has_tool = tools
-                    .iter()
-                    .any(|t| tool_name(t) == tool_name_str);
+                let has_tool = tools.iter().any(|t| t == &tool_name_str);
                 if has_tool {
                     devices.push(device_name.clone());
                 }
@@ -135,22 +129,9 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
         }
     }
 
-    // 5. Emit client native tools — one schema per unique name, device_name enum = all devices.
-    //    File tools are already emitted in step 1.5 above — skip them here.
-    let mut native_keys: Vec<String> = native_sources.keys().cloned().collect();
-    native_keys.sort();
-    for name in native_keys {
-        // Skip file tools — unified schema already emitted in step 1.5.
-        if crate::server_tools::dispatch::is_file_tool(&name) {
-            continue;
-        }
-        let devices = &native_sources[&name];
-        if let Some(template) = representatives.get(&name) {
-            let mut schema = template.clone();
-            inject_device_name_enum(&mut schema, devices);
-            schemas.push(schema);
-        }
-    }
+    // 5. (Client native tools are all file tools, already emitted in step 1.5.
+    //     non-file native tools from clients no longer carry schemas — nothing to emit.)
+    let _ = native_sources; // suppress unused warning
 
     // Cache result
     state

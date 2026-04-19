@@ -22,7 +22,7 @@ pub struct DeviceConnection {
     pub device_name: String,
     pub sink: Arc<Mutex<WsSink>>,
     pub last_seen: Arc<AtomicI64>,
-    pub tools: Vec<Value>,
+    pub tools: Vec<String>,
 }
 
 pub struct AppState {

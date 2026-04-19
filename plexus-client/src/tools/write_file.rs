@@ -11,14 +11,6 @@ impl Tool for WriteFileTool {
     fn name(&self) -> &str {
         "write_file"
     }
-    fn description(&self) -> &str {
-        "Write content to a file. Relative paths resolve from workspace. Creates parent directories."
-    }
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{
-            "path":{"type":"string"}, "content":{"type":"string"}
-        },"required":["path","content"]})
-    }
     fn execute(
         &self,
         args: Value,

@@ -13,16 +13,6 @@ impl Tool for GrepTool {
     fn name(&self) -> &str {
         "grep"
     }
-    fn description(&self) -> &str {
-        "Search file contents with regex. Searches from workspace root by default."
-    }
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{
-            "pattern":{"type":"string"}, "path":{"type":"string"},
-            "include":{"type":"string","description":"Glob filter"},
-            "context":{"type":"integer","default":0}
-        },"required":["pattern"]})
-    }
     fn execute(
         &self,
         args: Value,

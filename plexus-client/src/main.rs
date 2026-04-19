@@ -83,11 +83,23 @@ async fn run_session(ws_url: &str, token: &str) -> Result<(), PlexusError> {
     tools::register_builtin_tools(&mut registry);
     let registry = Arc::new(registry);
 
-    // Collect and send tool schemas (built-in + MCP)
+    // Collect and send tool names (built-in + MCP)
     {
-        let mut schemas = registry.schemas();
-        schemas.extend(mcp_manager.lock().await.all_tool_schemas());
-        let msg = ClientToServer::RegisterTools { schemas };
+        let mut tool_names = registry.tool_names();
+        let mcp_names: Vec<String> = mcp_manager
+            .lock()
+            .await
+            .all_tool_schemas()
+            .into_iter()
+            .filter_map(|s| {
+                s.get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        tool_names.extend(mcp_names);
+        let msg = ClientToServer::RegisterTools { tool_names };
         let mut s = sink.lock().await;
         send_message(&mut s, &msg).await?;
         info!(
@@ -187,10 +199,20 @@ async fn message_loop(
                 if mcp_changed && let Some(new_servers) = mcp_servers {
                     let mut mgr = mcp_manager.lock().await;
                     mgr.apply_config(&new_servers).await;
-                    // Re-register tools with updated MCP schemas
-                    let mut schemas = registry.schemas();
-                    schemas.extend(mgr.all_tool_schemas());
-                    let msg = ClientToServer::RegisterTools { schemas };
+                    // Re-register tools with updated MCP names
+                    let mut tool_names = registry.tool_names();
+                    let mcp_names: Vec<String> = mgr
+                        .all_tool_schemas()
+                        .into_iter()
+                        .filter_map(|s| {
+                            s.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect();
+                    tool_names.extend(mcp_names);
+                    let msg = ClientToServer::RegisterTools { tool_names };
                     let _ = send_message(&mut *sink.lock().await, &msg).await;
                 }
             }

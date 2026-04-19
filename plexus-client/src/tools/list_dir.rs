@@ -13,15 +13,6 @@ impl Tool for ListDirTool {
     fn name(&self) -> &str {
         "list_dir"
     }
-    fn description(&self) -> &str {
-        "List directory contents. Use '.' for workspace root. Relative paths resolve from workspace."
-    }
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{
-            "path":{"type":"string"}, "recursive":{"type":"boolean","default":false},
-            "max_entries":{"type":"integer","default":200}
-        },"required":["path"]})
-    }
     fn execute(
         &self,
         args: Value,

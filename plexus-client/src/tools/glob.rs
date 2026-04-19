@@ -11,15 +11,6 @@ impl Tool for GlobTool {
     fn name(&self) -> &str {
         "glob"
     }
-    fn description(&self) -> &str {
-        "Find files matching a glob pattern, sorted by mtime (newest first). Searches from workspace root by default."
-    }
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{
-            "pattern":{"type":"string"},
-            "path":{"type":"string","description":"Base dir (default: workspace)"}
-        },"required":["pattern"]})
-    }
     fn execute(
         &self,
         args: Value,
