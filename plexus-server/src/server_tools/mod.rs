@@ -7,7 +7,9 @@ use serde_json::Value;
 use std::sync::Arc;
 
 pub mod cron_tool;
+pub mod dispatch;
 pub mod file_ops;
+pub mod file_ops_schemas;
 pub mod file_transfer;
 pub mod message;
 pub mod web_fetch;
@@ -33,6 +35,8 @@ impl ToolAllowlist {
 
 /// Tools available during dream Phase 2: file I/O only. No message, cron,
 /// file_transfer, or web_fetch — dream is silent and workspace-local.
+/// Dream agent MUST pass `device_name="server"` for all of these (post-unification
+/// they route through dispatch::dispatch_file_tool, not server_tools::execute).
 pub const DREAM_PHASE2_ALLOWLIST: &[&str] = &[
     "read_file",
     "write_file",
@@ -43,27 +47,20 @@ pub const DREAM_PHASE2_ALLOWLIST: &[&str] = &[
     "grep",
 ];
 
-/// All server tool names.
-pub const SERVER_TOOL_NAMES: &[&str] = &[
-    "message",
-    "file_transfer",
-    "cron",
-    "web_fetch",
-    "read_file",
-    "write_file",
-    "edit_file",
-    "delete_file",
-    "list_dir",
-    "glob",
-    "grep",
-];
+/// Server-only tool names (message, file_transfer, cron, web_fetch).
+/// File tools (read_file/write_file/etc.) are no longer listed here —
+/// they are dispatched via `dispatch::dispatch_file_tool` with a unified
+/// `device_name` enum covering "server" + all applicable client devices.
+pub const SERVER_TOOL_NAMES: &[&str] = &["message", "file_transfer", "cron", "web_fetch"];
 
 /// Check if a tool name is a server-native tool.
 pub fn is_server_tool(name: &str) -> bool {
     SERVER_TOOL_NAMES.contains(&name)
 }
 
-/// Return JSON schemas for every registered server tool.
+/// Return JSON schemas for the 4 server-only tools (message, file_transfer, cron, web_fetch).
+/// File tool schemas (read_file/write_file/etc.) are emitted by
+/// `tools_registry::build_tool_schemas` with a unified `device_name` enum.
 pub fn tool_schemas() -> Vec<Value> {
     vec![
         serde_json::json!({
@@ -137,103 +134,6 @@ pub fn tool_schemas() -> Vec<Value> {
                 }
             }
         }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read a text file from your server workspace (relative path). Returns UTF-8 content for text files; for binary/non-UTF-8 files or files larger than 256 KiB, returns a size hint prompting you to use file_transfer instead.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "path": { "type": "string" } },
-                    "required": ["path"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Write or overwrite a text file in your server workspace (relative path). Creates parent directories as needed. Counted against your per-user quota; rejected if the upload exceeds the per-upload cap or the workspace is soft-locked.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "content": { "type": "string" }
-                    },
-                    "required": ["path", "content"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "edit_file",
-                "description": "Surgical edit of a text file in your server workspace (relative path). Replaces exactly one occurrence of old_string with new_string. Matches are non-overlapping (e.g., 'aaa' matches once in 'aaaa'). Errors if old_string is missing or appears more than once — include surrounding context to disambiguate. Files must be ≤ 256 KiB and valid UTF-8.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "old_string": { "type": "string" },
-                        "new_string": { "type": "string" }
-                    },
-                    "required": ["path", "old_string", "new_string"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "delete_file",
-                "description": "Delete a file or directory from your server workspace (relative path). Directories require recursive: true. Frees the reclaimed bytes against your quota. Refuses to delete the workspace root itself.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string" },
-                        "recursive": { "type": "boolean" }
-                    },
-                    "required": ["path"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "list_dir",
-                "description": "List the entries (files and subdirectories) in a directory within your server workspace. Returns JSON rows with name, is_dir, and size_bytes. Path defaults to '.' (workspace root). Directories are listed first, then files, alphabetically within each group.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "path": { "type": "string" } }
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "glob",
-                "description": "Match files in your server workspace against a glob pattern (relative to workspace root). Supports * (any chars except /), ** (any depth), ?, and character classes. Returns up to 500 matching relative paths, one per line. Example patterns: 'skills/*/SKILL.md', '**/*.md', 'uploads/2026-*.png'.",
-                "parameters": {
-                    "type": "object",
-                    "properties": { "pattern": { "type": "string" } },
-                    "required": ["pattern"]
-                }
-            }
-        }),
-        serde_json::json!({
-            "type": "function",
-            "function": {
-                "name": "grep",
-                "description": "Search file content in your server workspace. Matches either a literal substring (default) or a regular expression (regex: true). Optional path_prefix narrows the search to a subdirectory. Returns at most 200 matching lines in `{path}:{line}: {content}` format.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": { "type": "string" },
-                        "path_prefix": { "type": "string" },
-                        "regex": { "type": "boolean" }
-                    },
-                    "required": ["pattern"]
-                }
-            }
-        }),
     ]
 }
 
@@ -250,7 +150,9 @@ pub struct ToolContext {
     pub is_partner: bool,
 }
 
-/// Dispatch a server tool call. Returns exit_code + output.
+/// Dispatch a server-only tool call (message, file_transfer, cron, web_fetch).
+/// File tools (read_file/write_file/etc.) are NOT dispatched here — they go
+/// through `dispatch::dispatch_file_tool` in the agent loop.
 pub async fn execute(
     state: &Arc<AppState>,
     ctx: &ToolContext,
@@ -263,13 +165,6 @@ pub async fn execute(
         "message" => message::message_tool(state, ctx, &arguments).await,
         "file_transfer" => file_transfer::file_transfer(state, &ctx.user_id, &arguments).await,
         "cron" => cron_tool::cron(state, ctx, &arguments).await,
-        "read_file" => file_ops::read_file(state, &ctx.user_id, &arguments).await,
-        "write_file" => file_ops::write_file(state, &ctx.user_id, &arguments).await,
-        "edit_file" => file_ops::edit_file(state, &ctx.user_id, &arguments).await,
-        "delete_file" => file_ops::delete_file(state, &ctx.user_id, &arguments).await,
-        "list_dir" => file_ops::list_dir(state, &ctx.user_id, &arguments).await,
-        "glob" => file_ops::glob(state, &ctx.user_id, &arguments).await,
-        "grep" => file_ops::grep(state, &ctx.user_id, &arguments).await,
         _ => (1, format!("Unknown server tool: {tool_name}")),
     };
     ToolExecutionResult {
@@ -312,15 +207,15 @@ mod allowlist_tests {
     }
 
     #[test]
-    fn dream_phase2_allowlist_covers_all_file_tools_in_registry() {
-        // Sanity: every name in DREAM_PHASE2_ALLOWLIST is a registered
-        // server tool (either in SERVER_TOOL_NAMES or implemented as a
-        // server tool somewhere in the codebase). If we ever rename a
-        // file tool, this test fires.
+    fn dream_phase2_allowlist_covers_all_file_tools_in_dispatch() {
+        // Sanity: every name in DREAM_PHASE2_ALLOWLIST is a recognized
+        // file tool in dispatch::FILE_TOOL_NAMES. If we rename a file tool,
+        // this test fires (post-unification, file tools are no longer in
+        // SERVER_TOOL_NAMES — they route through dispatch::dispatch_file_tool).
         for name in DREAM_PHASE2_ALLOWLIST {
             assert!(
-                SERVER_TOOL_NAMES.contains(name),
-                "DREAM_PHASE2_ALLOWLIST contains '{name}' which is not in SERVER_TOOL_NAMES"
+                crate::server_tools::dispatch::FILE_TOOL_NAMES.contains(name),
+                "DREAM_PHASE2_ALLOWLIST contains '{name}' which is not in dispatch::FILE_TOOL_NAMES"
             );
         }
     }
