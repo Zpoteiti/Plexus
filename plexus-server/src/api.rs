@@ -217,8 +217,29 @@ async fn download_file(
 
 #[derive(serde::Serialize)]
 pub struct WorkspaceUploadResult {
+    pub filename: String,
+    pub outcome: UploadOutcome,
+}
+
+#[derive(serde::Serialize, Debug)]
+pub struct Uploaded {
     pub path: String,
     pub size_bytes: u64,
+}
+
+#[derive(serde::Serialize, Debug)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UploadError {
+    Quota { remaining: u64 },
+    TooLarge,
+    Io(String),
+}
+
+#[derive(serde::Serialize, Debug)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum UploadOutcome {
+    Success(Uploaded),
+    Error(UploadError),
 }
 
 /// Save a single uploaded file under {user_root}/uploads/, using the same
@@ -229,7 +250,9 @@ pub async fn workspace_upload_save_one(
     user_id: &str,
     original_filename: &str,
     bytes: Vec<u8>,
-) -> Result<WorkspaceUploadResult, plexus_common::errors::workspace::WorkspaceError> {
+) -> WorkspaceUploadResult {
+    use plexus_common::errors::workspace::WorkspaceError;
+
     let size = bytes.len() as u64;
 
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -245,11 +268,17 @@ pub async fn workspace_upload_save_one(
         .replace("..", "_");
     let rel = format!("uploads/{date}-{hash}-{safe_name}");
 
-    state.workspace_fs.write(user_id, &rel, &bytes).await?;
-    Ok(WorkspaceUploadResult {
-        path: rel,
-        size_bytes: size,
-    })
+    let outcome = match state.workspace_fs.write(user_id, &rel, &bytes).await {
+        Ok(()) => UploadOutcome::Success(Uploaded { path: rel, size_bytes: size }),
+        Err(WorkspaceError::UploadTooLarge { .. }) => UploadOutcome::Error(UploadError::TooLarge),
+        Err(WorkspaceError::SoftLocked) => {
+            let snap = state.workspace_fs.quota(user_id);
+            let remaining = snap.limit_bytes.saturating_sub(snap.used_bytes);
+            UploadOutcome::Error(UploadError::Quota { remaining })
+        }
+        Err(e) => UploadOutcome::Error(UploadError::Io(format!("{e}"))),
+    };
+    WorkspaceUploadResult { filename: original_filename.to_string(), outcome }
 }
 
 async fn workspace_upload(
@@ -268,14 +297,7 @@ async fn workspace_upload(
         let bytes = field.bytes().await.map_err(|e| {
             ApiError::new(ErrorCode::ValidationFailed, format!("multipart read: {e}"))
         })?;
-        match workspace_upload_save_one(&state, &claims.sub, &filename, bytes.to_vec()).await {
-            Ok(r) => results.push(r),
-            Err(_) => results.push(WorkspaceUploadResult {
-                // Sentinel: "ERROR:{filename}" so the client can surface per-file failures.
-                path: format!("ERROR:{filename}"),
-                size_bytes: 0,
-            }),
-        }
+        results.push(workspace_upload_save_one(&state, &claims.sub, &filename, bytes.to_vec()).await);
     }
     Ok(Json(results))
 }
@@ -511,21 +533,43 @@ mod tests {
             .unwrap();
 
         let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 1024 * 1024);
-        let saved = workspace_upload_save_one(&state, "alice", "photo.jpg", b"fakedata".to_vec())
-            .await
-            .unwrap();
+        let result = workspace_upload_save_one(&state, "alice", "photo.jpg", b"fakedata".to_vec())
+            .await;
+
+        let u = match result.outcome {
+            UploadOutcome::Success(u) => u,
+            other => panic!("expected Success, got {:?}", other),
+        };
 
         assert!(
-            saved.path.starts_with("uploads/"),
+            u.path.starts_with("uploads/"),
             "expected uploads/ prefix; got {}",
-            saved.path
+            u.path
         );
-        assert!(saved.path.ends_with("photo.jpg"));
-        assert_eq!(saved.size_bytes, 8);
+        assert!(u.path.ends_with("photo.jpg"));
+        assert_eq!(u.size_bytes, 8);
 
         // File actually exists on disk.
-        let full = tmp.path().join("alice").join(&saved.path);
+        let full = tmp.path().join("alice").join(&u.path);
         assert!(full.exists());
+    }
+
+    #[tokio::test]
+    async fn test_workspace_upload_returns_typed_error_on_oversized() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        // 1 MB quota → 800 KB per-upload cap. Push 900 KB.
+        let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 1024 * 1024);
+        let big = vec![0u8; 900 * 1024];
+
+        let result = workspace_upload_save_one(&state, "alice", "big.bin", big).await;
+        assert_eq!(result.filename, "big.bin");
+        match result.outcome {
+            UploadOutcome::Error(UploadError::TooLarge) => {}
+            other => panic!("expected TooLarge, got {:?}", other),
+        }
     }
 
     #[tokio::test]
