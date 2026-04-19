@@ -2,7 +2,7 @@
 
 use crate::session::SessionHandle;
 use crate::state::AppState;
-use plexus_common::consts::RATE_LIMIT_CACHE_TTL_SEC;
+use crate::consts::RATE_LIMIT_CACHE_TTL_SEC;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;

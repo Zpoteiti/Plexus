@@ -1,7 +1,7 @@
 //! web_fetch server tool: SSRF-protected URL fetching with clean text extraction.
 
 use crate::state::AppState;
-use plexus_common::consts::{WEB_FETCH_MAX_BODY_BYTES, WEB_FETCH_MAX_OUTPUT_CHARS};
+use crate::consts::{WEB_FETCH_MAX_BODY_BYTES, WEB_FETCH_MAX_OUTPUT_CHARS};
 use regex::Regex;
 use serde_json::Value;
 use std::sync::{Arc, LazyLock};

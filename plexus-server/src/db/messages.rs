@@ -49,7 +49,7 @@ pub async fn list_uncompressed(
         "SELECT * FROM messages WHERE session_id = $1 AND compressed = FALSE ORDER BY created_at ASC LIMIT $2",
     )
     .bind(session_id)
-    .bind(plexus_common::consts::MAX_UNCOMPRESSED_MESSAGES)
+    .bind(crate::consts::MAX_UNCOMPRESSED_MESSAGES)
     .fetch_all(pool)
     .await
 }

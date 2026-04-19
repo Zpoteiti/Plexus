@@ -16,7 +16,7 @@ use tracing::info;
 
 pub async fn init_db(database_url: &str) -> PgPool {
     let pool = PgPoolOptions::new()
-        .max_connections(plexus_common::consts::DB_POOL_MAX_CONNECTIONS)
+        .max_connections(crate::consts::DB_POOL_MAX_CONNECTIONS)
         .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(database_url)
         .await

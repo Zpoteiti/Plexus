@@ -10,7 +10,7 @@
 
 use crate::bus::{self, EventKind, InboundEvent};
 use crate::state::AppState;
-use plexus_common::consts::CRON_POLL_INTERVAL_SEC;
+use crate::consts::CRON_POLL_INTERVAL_SEC;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 

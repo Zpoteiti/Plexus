@@ -10,7 +10,8 @@
 
 use crate::state::AppState;
 use futures_util::SinkExt;
-use plexus_common::consts::{SERVER_DEVICE_NAME, TOOL_EXECUTION_TIMEOUT_SEC};
+use crate::consts::TOOL_EXECUTION_TIMEOUT_SEC;
+use plexus_common::consts::SERVER_DEVICE_NAME;
 use plexus_common::protocol::{ExecuteToolRequest, ServerToClient, ToolExecutionResult};
 use serde_json::Value;
 use std::collections::HashMap;

@@ -5,7 +5,8 @@ use crate::context::{self, ChannelIdentity, SkillInfo};
 use crate::providers::openai::{self, LlmResponse};
 use crate::server_tools::{self, ToolContext};
 use crate::state::AppState;
-use plexus_common::consts::{MAX_AGENT_ITERATIONS, USER_MESSAGE_MAX_CHARS};
+use crate::consts::USER_MESSAGE_MAX_CHARS;
+use plexus_common::consts::MAX_AGENT_ITERATIONS;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -445,7 +446,7 @@ async fn handle_event(
 
         let token_estimate = context::estimate_tokens(&messages);
         if (config.context_window as usize).saturating_sub(token_estimate)
-            < plexus_common::consts::CONTEXT_COMPRESSION_THRESHOLD
+            < crate::consts::CONTEXT_COMPRESSION_THRESHOLD
         {
             // Compress history — next iteration will reload from DB automatically
             crate::memory::compress(state, session_id, &history, &config).await;

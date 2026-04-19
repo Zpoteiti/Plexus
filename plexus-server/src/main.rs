@@ -5,6 +5,7 @@ mod auth;
 mod bus;
 mod channels;
 mod config;
+mod consts;
 mod context;
 mod cron;
 mod db;
@@ -90,20 +91,20 @@ async fn main() {
         heartbeat_phase1_prompt: Arc::from(heartbeat_phase1_prompt.as_str()),
         sessions: Default::default(),
         web_fetch_semaphore: Arc::new(Semaphore::new(
-            plexus_common::consts::WEB_FETCH_CONCURRENT_MAX,
+            crate::consts::WEB_FETCH_CONCURRENT_MAX,
         )),
         http_client: reqwest::Client::new(),
         server_mcp: Arc::new(RwLock::new(server_mcp::ServerMcpManager::new())),
         gateway_sink: RwLock::new(None),
         web_fetch_client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(
-                plexus_common::consts::WEB_FETCH_TIMEOUT_SEC,
+                crate::consts::WEB_FETCH_TIMEOUT_SEC,
             ))
             .connect_timeout(std::time::Duration::from_secs(
-                plexus_common::consts::WEB_FETCH_CONNECT_TIMEOUT_SEC,
+                crate::consts::WEB_FETCH_CONNECT_TIMEOUT_SEC,
             ))
             .redirect(reqwest::redirect::Policy::limited(
-                plexus_common::consts::WEB_FETCH_MAX_REDIRECTS,
+                crate::consts::WEB_FETCH_MAX_REDIRECTS,
             ))
             .build()
             .expect("Failed to create web_fetch client"),

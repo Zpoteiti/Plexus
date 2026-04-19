@@ -5,7 +5,8 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
-use plexus_common::consts::{HEARTBEAT_REAPER_INTERVAL_SEC, PROTOCOL_VERSION};
+use crate::consts::HEARTBEAT_REAPER_INTERVAL_SEC;
+use plexus_common::consts::PROTOCOL_VERSION;
 use plexus_common::protocol::{
     ClientToServer, FsPolicy, McpServerEntry, ServerToClient, ToolExecutionResult,
 };
