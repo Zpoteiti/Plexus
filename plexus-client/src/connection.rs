@@ -95,7 +95,7 @@ pub async fn connect_and_auth(
             fs_policy,
             mcp_servers,
             workspace_path,
-            shell_timeout,
+            shell_timeout_max,
             ssrf_whitelist,
         } => {
             info!("Login success: user={user_id}, device={device_name}");
@@ -105,7 +105,7 @@ pub async fn connect_and_auth(
                 ClientConfig::from_login(
                     workspace_path,
                     fs_policy,
-                    shell_timeout,
+                    shell_timeout_max,
                     ssrf_whitelist,
                     mcp_servers,
                 ),

@@ -106,7 +106,7 @@ mod tests {
         ClientConfig {
             workspace: PathBuf::from(ws),
             fs_policy: FsPolicy::Sandbox,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         }
@@ -163,7 +163,7 @@ mod tests {
         let c = ClientConfig {
             workspace: PathBuf::from("/tmp"),
             fs_policy: FsPolicy::Unrestricted,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         };

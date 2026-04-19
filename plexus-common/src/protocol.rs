@@ -62,7 +62,7 @@ pub enum ServerToClient {
         fs_policy: FsPolicy,
         mcp_servers: Vec<McpServerEntry>,
         workspace_path: String,
-        shell_timeout: u64,
+        shell_timeout_max: u64,
         ssrf_whitelist: Vec<String>,
     },
     LoginFailed {
@@ -73,7 +73,7 @@ pub enum ServerToClient {
         fs_policy: Option<FsPolicy>,
         mcp_servers: Option<Vec<McpServerEntry>>,
         workspace_path: Option<String>,
-        shell_timeout: Option<u64>,
+        shell_timeout_max: Option<u64>,
         ssrf_whitelist: Option<Vec<String>>,
     },
     FileRequest {
@@ -185,7 +185,7 @@ mod tests {
             fs_policy: FsPolicy::Sandbox,
             mcp_servers: vec![],
             workspace_path: "/home/dev".into(),
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec!["10.0.0.0/8".into()],
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -193,12 +193,12 @@ mod tests {
         match de {
             ServerToClient::LoginSuccess {
                 workspace_path,
-                shell_timeout,
+                shell_timeout_max,
                 ssrf_whitelist,
                 ..
             } => {
                 assert_eq!(workspace_path, "/home/dev");
-                assert_eq!(shell_timeout, 60);
+                assert_eq!(shell_timeout_max, 60);
                 assert_eq!(ssrf_whitelist, vec!["10.0.0.0/8"]);
             }
             _ => panic!("wrong variant"),
@@ -211,7 +211,7 @@ mod tests {
             fs_policy: Some(FsPolicy::Unrestricted),
             mcp_servers: None,
             workspace_path: None,
-            shell_timeout: Some(120),
+            shell_timeout_max: Some(120),
             ssrf_whitelist: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -267,7 +267,7 @@ mod cleanup_pass_tests {
             fs_policy: Some(FsPolicy::Sandbox),
             mcp_servers: Some(vec![]),
             workspace_path: Some("/home/zou".into()),
-            shell_timeout: Some(600),
+            shell_timeout_max: Some(600),
             ssrf_whitelist: Some(vec!["10.180.0.0/16".into()]),
         };
         let s = serde_json::to_string(&v).unwrap();

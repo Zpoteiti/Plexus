@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub struct ClientConfig {
     pub workspace: PathBuf,
     pub fs_policy: FsPolicy,
-    pub shell_timeout: u64,
+    pub shell_timeout_max: u64,
     pub ssrf_whitelist: Vec<String>,
     pub mcp_servers: Vec<McpServerEntry>,
 }
@@ -38,14 +38,14 @@ impl ClientConfig {
     pub fn from_login(
         workspace_path: String,
         fs_policy: FsPolicy,
-        shell_timeout: u64,
+        shell_timeout_max: u64,
         ssrf_whitelist: Vec<String>,
         mcp_servers: Vec<McpServerEntry>,
     ) -> Self {
         Self {
             workspace: resolve_workspace(&workspace_path),
             fs_policy,
-            shell_timeout,
+            shell_timeout_max,
             ssrf_whitelist,
             mcp_servers,
         }
@@ -57,7 +57,7 @@ impl ClientConfig {
         fs_policy: Option<FsPolicy>,
         mcp_servers: Option<Vec<McpServerEntry>>,
         workspace_path: Option<String>,
-        shell_timeout: Option<u64>,
+        shell_timeout_max: Option<u64>,
         ssrf_whitelist: Option<Vec<String>>,
     ) -> bool {
         if let Some(v) = fs_policy {
@@ -66,8 +66,8 @@ impl ClientConfig {
         if let Some(v) = workspace_path {
             self.workspace = resolve_workspace(&v);
         }
-        if let Some(v) = shell_timeout {
-            self.shell_timeout = v;
+        if let Some(v) = shell_timeout_max {
+            self.shell_timeout_max = v;
         }
         if let Some(v) = ssrf_whitelist {
             self.ssrf_whitelist = v;
@@ -101,7 +101,7 @@ mod tests {
         let mcp = c.merge_update(Some(FsPolicy::Unrestricted), None, None, Some(120), None);
         assert!(!mcp);
         assert_eq!(c.fs_policy, FsPolicy::Unrestricted);
-        assert_eq!(c.shell_timeout, 120);
+        assert_eq!(c.shell_timeout_max, 120);
     }
 
     #[test]

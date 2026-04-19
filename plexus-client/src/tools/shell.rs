@@ -43,7 +43,7 @@ async fn exec(args: Value, config: &ClientConfig) -> ToolResult {
     let timeout_sec = args
         .get("timeout_sec")
         .and_then(Value::as_u64)
-        .unwrap_or(config.shell_timeout);
+        .unwrap_or(config.shell_timeout_max);
     let wd = args
         .get("working_dir")
         .and_then(Value::as_str)
@@ -113,7 +113,7 @@ mod tests {
         ClientConfig {
             workspace: d.to_path_buf(),
             fs_policy: FsPolicy::Unrestricted,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         }
@@ -122,7 +122,7 @@ mod tests {
         ClientConfig {
             workspace: d.to_path_buf(),
             fs_policy: FsPolicy::Sandbox,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         }

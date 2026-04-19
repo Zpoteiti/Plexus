@@ -153,7 +153,7 @@ async fn patch_policy(
             fs_policy: Some(fs_policy),
             mcp_servers: None,
             workspace_path: None,
-            shell_timeout: None,
+            shell_timeout_max: None,
             ssrf_whitelist: None,
         };
     })
@@ -208,7 +208,7 @@ async fn put_mcp(
             fs_policy: None,
             mcp_servers: Some(mcp_servers),
             workspace_path: None,
-            shell_timeout: None,
+            shell_timeout_max: None,
             ssrf_whitelist: None,
         };
     })

@@ -173,7 +173,7 @@ async fn message_loop(
                 fs_policy,
                 mcp_servers,
                 workspace_path,
-                shell_timeout,
+                shell_timeout_max,
                 ssrf_whitelist,
             } => {
                 let mut cfg = config.write().await;
@@ -181,7 +181,7 @@ async fn message_loop(
                     fs_policy,
                     mcp_servers.clone(),
                     workspace_path,
-                    shell_timeout,
+                    shell_timeout_max,
                     ssrf_whitelist,
                 );
                 if mcp_changed && let Some(new_servers) = mcp_servers {

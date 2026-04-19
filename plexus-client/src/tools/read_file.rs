@@ -105,7 +105,7 @@ mod tests {
         ClientConfig {
             workspace: dir.to_path_buf(),
             fs_policy: FsPolicy::Unrestricted,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         }

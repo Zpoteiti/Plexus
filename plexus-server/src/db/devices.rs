@@ -9,7 +9,7 @@ pub struct DeviceToken {
     pub fs_policy: serde_json::Value,
     pub mcp_config: serde_json::Value,
     pub workspace_path: String,
-    pub shell_timeout: i64,
+    pub shell_timeout_max: i64,
     pub ssrf_whitelist: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }

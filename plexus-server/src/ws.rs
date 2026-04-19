@@ -86,7 +86,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             fs_policy,
             mcp_servers,
             workspace_path: device_token.workspace_path.clone(),
-            shell_timeout: device_token.shell_timeout as u64,
+            shell_timeout_max: device_token.shell_timeout_max as u64,
             ssrf_whitelist,
         },
     )
