@@ -84,5 +84,4 @@ mod tests {
     fn test_shell_timeout_default() {
         assert_eq!(DEFAULT_SHELL_TIMEOUT_SEC, 60);
     }
-
 }
