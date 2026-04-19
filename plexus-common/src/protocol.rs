@@ -86,6 +86,13 @@ pub enum ServerToClient {
         content_base64: String,
         destination: String,
     },
+    /// Request the client to stream a file back to the server in chunks
+    /// via `ClientToServer::StreamChunk` / `StreamEnd` / `StreamError`.
+    /// Additive variant introduced for P1.5; consumers wired in later phases.
+    ReadStream {
+        request_id: String,
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +126,24 @@ pub enum ClientToServer {
     FileSendAck {
         request_id: String,
         error: Option<String>,
+    },
+    /// A single chunk of streamed file data (response to `ServerToClient::ReadStream`).
+    /// Additive variant introduced for P1.5; consumers wired in later phases.
+    StreamChunk {
+        request_id: String,
+        /// Plain `Vec<u8>` — serializes as a JSON array of ints. No extra dep added.
+        data: Vec<u8>,
+        offset: u64,
+    },
+    /// Signals the end of a stream; `total_size` is the cumulative bytes transferred.
+    StreamEnd {
+        request_id: String,
+        total_size: u64,
+    },
+    /// Reports a stream failure (e.g. file not found, permission denied, disk error).
+    StreamError {
+        request_id: String,
+        error: String,
     },
 }
 
@@ -217,5 +242,81 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         let _: ClientToServer = serde_json::from_str(&json).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cleanup_pass_tests {
+    //! P1.5 — additive protocol frames for push-based config propagation
+    //! and device-file streaming. `ConfigUpdate` already existed on
+    //! `ServerToClient` prior to this task (with `Option<T>` partial-update
+    //! semantics) and is exercised by `test_config_update_partial` above,
+    //! so we only cover the streaming frames here. The enums do not derive
+    //! `PartialEq`, so roundtrip equality is compared via `serde_json::Value`.
+
+    use super::*;
+
+    fn to_value<T: Serialize>(v: &T) -> serde_json::Value {
+        serde_json::to_value(v).unwrap()
+    }
+
+    #[test]
+    fn config_update_roundtrip() {
+        // Uses the existing Option<T> fields already present on ConfigUpdate.
+        let v = ServerToClient::ConfigUpdate {
+            fs_policy: Some(FsPolicy::Sandbox),
+            mcp_servers: Some(vec![]),
+            workspace_path: Some("/home/zou".into()),
+            shell_timeout: Some(600),
+            ssrf_whitelist: Some(vec!["10.180.0.0/16".into()]),
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: ServerToClient = serde_json::from_str(&s).unwrap();
+        assert_eq!(to_value(&v), to_value(&back));
+    }
+
+    #[test]
+    fn read_stream_roundtrip() {
+        let v = ServerToClient::ReadStream {
+            request_id: "req-1".into(),
+            path: "/foo/bar".into(),
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: ServerToClient = serde_json::from_str(&s).unwrap();
+        assert_eq!(to_value(&v), to_value(&back));
+    }
+
+    #[test]
+    fn stream_chunk_roundtrip() {
+        let v = ClientToServer::StreamChunk {
+            request_id: "req-1".into(),
+            data: vec![1, 2, 3, 4],
+            offset: 0,
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: ClientToServer = serde_json::from_str(&s).unwrap();
+        assert_eq!(to_value(&v), to_value(&back));
+    }
+
+    #[test]
+    fn stream_end_roundtrip() {
+        let v = ClientToServer::StreamEnd {
+            request_id: "req-1".into(),
+            total_size: 1024,
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: ClientToServer = serde_json::from_str(&s).unwrap();
+        assert_eq!(to_value(&v), to_value(&back));
+    }
+
+    #[test]
+    fn stream_error_roundtrip() {
+        let v = ClientToServer::StreamError {
+            request_id: "req-1".into(),
+            error: "disk full".into(),
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: ClientToServer = serde_json::from_str(&s).unwrap();
+        assert_eq!(to_value(&v), to_value(&back));
     }
 }
