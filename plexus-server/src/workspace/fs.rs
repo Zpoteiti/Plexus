@@ -4,13 +4,15 @@
 //! It enforces path traversal checks, quota, and skills-cache invalidation.
 //! Method bodies are stubbed — implementations land in P3.2–P3.5.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use plexus_common::errors::workspace::WorkspaceError;
+use tracing::warn;
 
 // ── Supporting types ──────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct FileStat {
     pub path: String,
     pub size: u64,
@@ -70,22 +72,80 @@ impl WorkspaceFs {
         }
     }
 
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
+    /// Resolve `path` (absolute or relative) to a canonical `PathBuf` that is
+    /// guaranteed to be inside `<root>/<user_id>/`. Returns
+    /// `WorkspaceError::Traversal` on any escape attempt, with a `warn!` log.
+    async fn resolve_path(&self, user_id: &str, path: &str) -> Result<PathBuf, WorkspaceError> {
+        if Path::new(path).is_absolute() {
+            // Canonicalize both sides and do a prefix check.
+            let canonical = tokio::fs::canonicalize(path).await.map_err(|e| {
+                // A missing file or escape via non-existent path — treat as IO.
+                WorkspaceError::Io(e)
+            })?;
+            let user_root_canonical =
+                tokio::fs::canonicalize(self.root.join(user_id)).await?;
+            if !canonical.starts_with(&user_root_canonical) {
+                warn!(
+                    user_id,
+                    path,
+                    "absolute path escapes user workspace root"
+                );
+                return Err(WorkspaceError::Traversal(path.into()));
+            }
+            Ok(canonical)
+        } else {
+            // Delegate to the existing relative-path helper, mapping its error type.
+            crate::workspace::paths::resolve_user_path(&self.root, user_id, path)
+                .await
+                .map_err(|e| match e {
+                    crate::workspace::paths::WorkspaceError::Traversal(s) => {
+                        warn!(user_id, path = s.as_str(), "relative path escapes user workspace root");
+                        WorkspaceError::Traversal(s)
+                    }
+                    crate::workspace::paths::WorkspaceError::Io(io) => WorkspaceError::Io(io),
+                    crate::workspace::paths::WorkspaceError::Quota(_) => {
+                        // paths.rs only returns Traversal or Io; this arm is exhaustive.
+                        WorkspaceError::Traversal(path.into())
+                    }
+                })
+        }
+    }
+
     // ── Reads ─────────────────────────────────────────────────────────────────
 
-    pub async fn read(&self, _user_id: &str, _path: &str) -> Result<Vec<u8>, WorkspaceError> {
-        unimplemented!()
+    pub async fn read(&self, user_id: &str, path: &str) -> Result<Vec<u8>, WorkspaceError> {
+        let resolved = self.resolve_path(user_id, path).await?;
+        let bytes = tokio::fs::read(&resolved).await?;
+        Ok(bytes)
     }
 
     pub async fn read_stream(
         &self,
-        _user_id: &str,
-        _path: &str,
+        user_id: &str,
+        path: &str,
     ) -> Result<tokio_util::io::ReaderStream<tokio::fs::File>, WorkspaceError> {
-        unimplemented!()
+        let resolved = self.resolve_path(user_id, path).await?;
+        let file = tokio::fs::File::open(&resolved).await?;
+        Ok(tokio_util::io::ReaderStream::new(file))
     }
 
-    pub async fn stat(&self, _user_id: &str, _path: &str) -> Result<FileStat, WorkspaceError> {
-        unimplemented!()
+    pub async fn stat(&self, user_id: &str, path: &str) -> Result<FileStat, WorkspaceError> {
+        let resolved = self.resolve_path(user_id, path).await?;
+        let meta = tokio::fs::metadata(&resolved).await?;
+        let size = meta.len();
+        let mtime = meta.modified()?;
+        let mime = plexus_common::mime::detect_mime_from_extension(
+            resolved.to_str().unwrap_or(""),
+        )
+        .to_owned();
+        Ok(FileStat {
+            path: path.to_owned(),
+            size,
+            mime,
+            mtime,
+        })
     }
 
     // ── Writes ────────────────────────────────────────────────────────────────
@@ -161,5 +221,73 @@ impl WorkspaceFs {
 
     pub async fn wipe_user(&self, _user_id: &str) -> Result<(), WorkspaceError> {
         unimplemented!()
+    }
+}
+
+#[cfg(test)]
+fn new_for_test(root: PathBuf) -> WorkspaceFs {
+    WorkspaceFs::new(
+        root,
+        std::sync::Arc::new(crate::workspace::quota::QuotaCache::new(10 * 1024 * 1024)),
+        std::sync::Arc::new(crate::skills_cache::SkillsCache::new()),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn read_relative_path_succeeds() {
+        let tmp = tempdir().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("hello.txt"), b"hi").await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+        let bytes = fs.read("alice", "hello.txt").await.unwrap();
+        assert_eq!(bytes, b"hi");
+    }
+
+    #[tokio::test]
+    async fn read_absolute_path_succeeds() {
+        let tmp = tempdir().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("hello.txt"), b"hi").await.unwrap();
+
+        let root = tmp.path().to_str().unwrap().to_string();
+        let fs = new_for_test(tmp.path().to_path_buf());
+        let abs_path = format!("{}/alice/hello.txt", root);
+        let bytes = fs.read("alice", &abs_path).await.unwrap();
+        assert_eq!(bytes, b"hi");
+    }
+
+    #[tokio::test]
+    async fn read_dotdot_escape_rejected() {
+        let tmp = tempdir().unwrap();
+        let alice_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&alice_dir).await.unwrap();
+        let bob_dir = tmp.path().join("bob");
+        tokio::fs::create_dir_all(&bob_dir).await.unwrap();
+        tokio::fs::write(bob_dir.join("secret"), b"secrets").await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+        let result = fs.read("alice", "../bob/secret").await;
+        assert!(matches!(result, Err(WorkspaceError::Traversal(_))));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_symlink_escape_rejected() {
+        let tmp = tempdir().unwrap();
+        let alice_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&alice_dir).await.unwrap();
+        tokio::fs::symlink("/etc/passwd", alice_dir.join("pw")).await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+        let result = fs.read("alice", "pw").await;
+        assert!(matches!(result, Err(WorkspaceError::Traversal(_))));
     }
 }
