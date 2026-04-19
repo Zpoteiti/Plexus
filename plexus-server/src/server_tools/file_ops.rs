@@ -144,22 +144,111 @@ pub async fn edit_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i
         Some(p) => p,
         None => return (1, "Missing required parameter: path".into()),
     };
-    let old_string = match args.get("old_string").and_then(Value::as_str) {
+    // Accept both the spec §4.3 canonical names (`old_text`/`new_text`) and
+    // the legacy names (`old_string`/`new_string`) already in the registered
+    // JSON schema. Schema itself is untouched by BF2.
+    let old_text = match args
+        .get("old_text")
+        .or_else(|| args.get("old_string"))
+        .and_then(Value::as_str)
+    {
         Some(s) => s,
         None => return (1, "Missing required parameter: old_string".into()),
     };
-    let new_string = match args.get("new_string").and_then(Value::as_str) {
+    let new_text = match args
+        .get("new_text")
+        .or_else(|| args.get("new_string"))
+        .and_then(Value::as_str)
+    {
         Some(s) => s,
         None => return (1, "Missing required parameter: new_string".into()),
     };
-
-    if old_string.is_empty() {
-        return (1, "old_string must not be empty".into());
-    }
+    let replace_all = args
+        .get("replace_all")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
     let ws_root = std::path::Path::new(&state.config.workspace_root);
 
-    // File must already exist to edit.
+    // --- Create-file shortcut (spec §4.3 rule 5) ---
+    // When old_text is empty AND the file doesn't exist, create it with new_text.
+    // Resolve via `resolve_user_path_for_create` so traversal is still enforced.
+    if old_text.is_empty() {
+        let exists_resolved = resolve_user_path(ws_root, user_id, path).await;
+        match exists_resolved {
+            Ok(_) => {
+                // File exists — empty old_text on an existing file is an error.
+                return (
+                    1,
+                    format!(
+                        "old_text is empty but {path} already exists. Pass non-empty old_text to edit, or use write_file to overwrite."
+                    ),
+                );
+            }
+            Err(WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Good — file doesn't exist, proceed to create.
+            }
+            Err(WorkspaceError::Traversal(_)) => {
+                return (1, "Path escapes user workspace".into());
+            }
+            Err(e) => return (1, format!("Resolve error: {e}")),
+        }
+
+        let bytes = new_text.as_bytes();
+        let new_size = bytes.len() as u64;
+
+        let resolved_create = match resolve_user_path_for_create(ws_root, user_id, path).await {
+            Ok(p) => p,
+            Err(WorkspaceError::Traversal(_)) => {
+                return (1, "Path escapes user workspace".into());
+            }
+            Err(WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return (1, format!("Parent path not found: {path}"));
+            }
+            Err(e) => return (1, format!("Resolve error: {e}")),
+        };
+
+        // Reserve the full new_size; nothing existed before.
+        if new_size > 0
+            && let Err(e) = state.quota.check_and_reserve_upload(user_id, new_size)
+        {
+            return (1, format!("Quota: {e}"));
+        }
+
+        if let Some(parent) = resolved_create.parent()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            if new_size > 0 {
+                state.quota.record_delete(user_id, new_size);
+            }
+            return (1, format!("Create dir: {e}"));
+        }
+
+        if let Err(e) = tokio::fs::write(&resolved_create, bytes).await {
+            if new_size > 0 {
+                state.quota.record_delete(user_id, new_size);
+            }
+            return (1, format!("Write error: {e}"));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = tokio::fs::set_permissions(
+                &resolved_create,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .await;
+        }
+
+        if is_under_skills_dir(&resolved_create, ws_root, user_id) {
+            state.skills_cache.invalidate(user_id);
+        }
+
+        return (0, format!("Created {path} ({new_size} bytes)"));
+    }
+
+    // --- Normal edit path: file must already exist ---
     let resolved = match resolve_user_path(ws_root, user_id, path).await {
         Ok(p) => p,
         Err(WorkspaceError::Traversal(_)) => return (1, "Path escapes user workspace".into()),
@@ -194,26 +283,41 @@ pub async fn edit_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i
         Err(e) => return (1, format!("Read error: {e}")),
     };
 
-    // Unique-match check.
-    let match_count = current.matches(old_string).count();
-    if match_count == 0 {
+    // Spec §4.3 levels 1-3: exact → line-trimmed → smart-quote. Shared matcher.
+    use plexus_common::fuzzy_match::find_match;
+    let m = match find_match(&current, old_text) {
+        Ok(m) => m,
+        Err(failure) => {
+            let hint = if failure.hints.is_empty() {
+                format!(" (best similarity: {:.0}%)", failure.best_ratio * 100.0)
+            } else {
+                format!(" ({})", failure.hints.join(", "))
+            };
+            return (
+                1,
+                format!(
+                    "old_string not found in {path}{hint}. Include surrounding context to disambiguate if the target appears elsewhere."
+                ),
+            );
+        }
+    };
+
+    // Spec §4.3 rule 4: multi-match → error unless replace_all=true.
+    if m.count > 1 && !replace_all {
         return (
             1,
             format!(
-                "old_string not found in {path}. Include surrounding context to disambiguate if the target appears elsewhere."
-            ),
-        );
-    }
-    if match_count > 1 {
-        return (
-            1,
-            format!(
-                "old_string appears {match_count} times in {path}. Include more surrounding context to make the match unique."
+                "old_string appears {} times in {path}. Include more surrounding context to make the match unique, or set replace_all=true.",
+                m.count
             ),
         );
     }
 
-    let updated = current.replacen(old_string, new_string, 1);
+    let updated = if replace_all {
+        current.replace(m.matched_text.as_str(), new_text)
+    } else {
+        current.replacen(m.matched_text.as_str(), new_text, 1)
+    };
     let new_size = updated.len() as u64;
 
     // Net-delta quota accounting (A-8 pattern).
@@ -875,6 +979,173 @@ mod tests {
         let (code, out) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
         assert!(out.contains("too large"), "got: {out}");
+    }
+
+    // --- fuzzy-match / replace_all / create-shortcut tests (spec §4.3) ---
+
+    #[tokio::test]
+    async fn edit_file_line_trimmed_fuzzy_match_works_on_server() {
+        // File has 4-space indent; old_text has different (no) indentation.
+        // Shared matcher's level-2 line-trimmed window should still hit.
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        let content = "    fn f() {\n        x();\n    }\n";
+        tokio::fs::write(user_dir.join("m.rs"), content)
+            .await
+            .unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({
+            "path": "m.rs",
+            "old_text": "fn f() {\n    x();\n}",
+            "new_text": "fn f() { y(); }"
+        });
+        let (code, out) = edit_file(&state, "alice", &args).await;
+        assert_eq!(code, 0, "expected fuzzy match to succeed; got: {out}");
+        let after = tokio::fs::read_to_string(user_dir.join("m.rs"))
+            .await
+            .unwrap();
+        assert!(
+            after.contains("fn f() { y(); }"),
+            "new_text not applied; file now: {after:?}"
+        );
+        assert!(!after.contains("x();"), "old body still present: {after:?}");
+    }
+
+    #[tokio::test]
+    async fn edit_file_smart_quote_fuzzy_match_works_on_server() {
+        // File has curly quotes; caller supplies straight quotes.
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        let content = "say \u{201C}hi\u{201D}\n";
+        tokio::fs::write(user_dir.join("q.txt"), content)
+            .await
+            .unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({
+            "path": "q.txt",
+            "old_text": "say \"hi\"",
+            "new_text": "say 'bye'"
+        });
+        let (code, out) = edit_file(&state, "alice", &args).await;
+        assert_eq!(code, 0, "smart-quote fuzzy should succeed; got: {out}");
+    }
+
+    #[tokio::test]
+    async fn edit_file_multi_match_requires_replace_all() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("m.txt"), "aa\naa\naa\n")
+            .await
+            .unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+
+        // Without replace_all → error.
+        let args = serde_json::json!({
+            "path": "m.txt",
+            "old_text": "aa",
+            "new_text": "bb"
+        });
+        let (code, out) = edit_file(&state, "alice", &args).await;
+        assert_eq!(code, 1, "multi-match without replace_all should fail");
+        assert!(
+            out.contains("3 times") && out.contains("replace_all"),
+            "expected count + replace_all hint, got: {out}"
+        );
+
+        // With replace_all=true → all three replaced.
+        let args = serde_json::json!({
+            "path": "m.txt",
+            "old_text": "aa",
+            "new_text": "bb",
+            "replace_all": true
+        });
+        let (code, out) = edit_file(&state, "alice", &args).await;
+        assert_eq!(code, 0, "replace_all should succeed; got: {out}");
+        let after = tokio::fs::read_to_string(user_dir.join("m.txt"))
+            .await
+            .unwrap();
+        assert_eq!(after, "bb\nbb\nbb\n");
+    }
+
+    #[tokio::test]
+    async fn edit_file_create_shortcut_when_old_empty_and_file_missing() {
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({
+            "path": "new_file.md",
+            "old_text": "",
+            "new_text": "# fresh content\n"
+        });
+        let (code, out) = edit_file(&state, "alice", &args).await;
+        assert_eq!(code, 0, "create shortcut should succeed; got: {out}");
+        let body = tokio::fs::read_to_string(user_dir.join("new_file.md"))
+            .await
+            .unwrap();
+        assert_eq!(body, "# fresh content\n");
+        // Quota reflects the new file.
+        assert_eq!(state.quota.current_usage("alice"), body.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn edit_file_create_shortcut_refuses_when_file_exists() {
+        // old_text="" on an existing file should error — use write_file instead.
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("existing.md"), "keep me")
+            .await
+            .unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({
+            "path": "existing.md",
+            "old_text": "",
+            "new_text": "overwrite"
+        });
+        let (code, out) = edit_file(&state, "alice", &args).await;
+        assert_eq!(code, 1);
+        assert!(
+            out.contains("already exists"),
+            "expected guard against clobber, got: {out}"
+        );
+        // Original content untouched.
+        let after = tokio::fs::read_to_string(user_dir.join("existing.md"))
+            .await
+            .unwrap();
+        assert_eq!(after, "keep me");
+    }
+
+    #[tokio::test]
+    async fn edit_file_accepts_canonical_old_text_new_text_names() {
+        // Spec §4.3 canonical arg names; runtime must accept both.
+        let tmp = TempDir::new().unwrap();
+        let user_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&user_dir).await.unwrap();
+        tokio::fs::write(user_dir.join("m.txt"), "hello\n")
+            .await
+            .unwrap();
+
+        let state = AppState::test_minimal(tmp.path());
+        let args = serde_json::json!({
+            "path": "m.txt",
+            "old_text": "hello",
+            "new_text": "goodbye"
+        });
+        let (code, _) = edit_file(&state, "alice", &args).await;
+        assert_eq!(code, 0);
+        let after = tokio::fs::read_to_string(user_dir.join("m.txt"))
+            .await
+            .unwrap();
+        assert_eq!(after, "goodbye\n");
     }
 
     // --- delete_file tests ---
