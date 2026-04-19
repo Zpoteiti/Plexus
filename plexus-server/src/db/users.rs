@@ -61,14 +61,6 @@ pub async fn update_display_name(
     Ok(())
 }
 
-pub async fn update_timezone(pool: &PgPool, user_id: &str, tz: &str) -> sqlx::Result<()> {
-    sqlx::query("UPDATE users SET timezone = $1 WHERE user_id = $2")
-        .bind(tz)
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map(|_| ())
-}
 
 pub async fn get_timezone(pool: &PgPool, user_id: &str) -> sqlx::Result<String> {
     sqlx::query_scalar::<_, String>("SELECT timezone FROM users WHERE user_id = $1")
