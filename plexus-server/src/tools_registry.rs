@@ -129,9 +129,16 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
         }
     }
 
-    // 5. (Client native tools are all file tools, already emitted in step 1.5.
-    //     non-file native tools from clients no longer carry schemas — nothing to emit.)
-    let _ = native_sources; // suppress unused warning
+    // 5. Shell tool — client-only (server has no bwrap jail). Emit once with
+    //    device_name enum = every client device that reports shell capability.
+    //    Not emitted at all if no client reports it.
+    if let Some(shell_devices) = native_sources.get("shell") {
+        let mut schema = crate::server_tools::shell_schema::shell_schema();
+        inject_device_name_enum(&mut schema, shell_devices);
+        schemas.push(schema);
+    }
+    // Any OTHER entry in native_sources (future client-only tool capability names we don't
+    // have a canonical schema for) is silently dropped. Add them here as they arise.
 
     // Cache result
     state
@@ -260,5 +267,52 @@ pub async fn route_to_device(
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_schema_emitted_with_client_device_enum() {
+        // Verify shell_schema() returns a valid base schema with device_name in
+        // properties and required, and that inject_device_name_enum populates the enum.
+        let mut schema = crate::server_tools::shell_schema::shell_schema();
+
+        // Check name is "shell"
+        let name = schema
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("");
+        assert_eq!(name, "shell");
+
+        // Inject a device and verify enum appears
+        let devices = vec!["laptop".to_string(), "desktop".to_string()];
+        inject_device_name_enum(&mut schema, &devices);
+
+        let enum_values = schema
+            .get("function")
+            .and_then(|f| f.get("parameters"))
+            .and_then(|p| p.get("properties"))
+            .and_then(|props| props.get("device_name"))
+            .and_then(|dn| dn.get("enum"))
+            .and_then(|e| e.as_array())
+            .expect("device_name enum should be present after injection");
+
+        assert_eq!(enum_values.len(), 2);
+        assert!(enum_values.contains(&serde_json::json!("laptop")));
+        assert!(enum_values.contains(&serde_json::json!("desktop")));
+
+        // Verify device_name is in required
+        let required = schema
+            .get("function")
+            .and_then(|f| f.get("parameters"))
+            .and_then(|p| p.get("required"))
+            .and_then(|r| r.as_array())
+            .expect("required array should exist");
+        assert!(required.contains(&serde_json::json!("device_name")));
+        assert!(required.contains(&serde_json::json!("command")));
     }
 }
