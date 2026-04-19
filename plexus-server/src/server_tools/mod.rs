@@ -9,7 +9,6 @@ use std::sync::Arc;
 pub mod cron_tool;
 pub mod dispatch;
 pub mod file_ops;
-pub mod file_ops_schemas;
 pub mod file_transfer;
 pub mod message;
 pub mod shell_schema;

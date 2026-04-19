@@ -144,24 +144,14 @@ pub async fn edit_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i
         Some(p) => p,
         None => return (1, "Missing required parameter: path".into()),
     };
-    // Accept both the spec §4.3 canonical names (`old_text`/`new_text`) and
-    // the legacy names (`old_string`/`new_string`) already in the registered
-    // JSON schema. Schema itself is untouched by BF2.
-    let old_text = match args
-        .get("old_text")
-        .or_else(|| args.get("old_string"))
-        .and_then(Value::as_str)
-    {
+    // Canonical spec §4.3 names: `old_text` / `new_text`.
+    let old_text = match args.get("old_text").and_then(Value::as_str) {
         Some(s) => s,
-        None => return (1, "Missing required parameter: old_string".into()),
+        None => return (1, "Missing required parameter: old_text".into()),
     };
-    let new_text = match args
-        .get("new_text")
-        .or_else(|| args.get("new_string"))
-        .and_then(Value::as_str)
-    {
+    let new_text = match args.get("new_text").and_then(Value::as_str) {
         Some(s) => s,
-        None => return (1, "Missing required parameter: new_string".into()),
+        None => return (1, "Missing required parameter: new_text".into()),
     };
     let replace_all = args
         .get("replace_all")
@@ -296,7 +286,7 @@ pub async fn edit_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i
             return (
                 1,
                 format!(
-                    "old_string not found in {path}{hint}. Include surrounding context to disambiguate if the target appears elsewhere."
+                    "old_text not found in {path}{hint}. Include surrounding context to disambiguate if the target appears elsewhere."
                 ),
             );
         }
@@ -307,7 +297,7 @@ pub async fn edit_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i
         return (
             1,
             format!(
-                "old_string appears {} times in {path}. Include more surrounding context to make the match unique, or set replace_all=true.",
+                "old_text appears {} times in {path}. Include more surrounding context to make the match unique, or set replace_all=true.",
                 m.count
             ),
         );
@@ -848,8 +838,8 @@ mod tests {
 
         let args = serde_json::json!({
             "path": "m.txt",
-            "old_string": "foo bar",
-            "new_string": "foo baz"
+            "old_text": "foo bar",
+            "new_text": "foo baz"
         });
         let (code, _) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 0);
@@ -874,8 +864,8 @@ mod tests {
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({
             "path": "m.txt",
-            "old_string": "missing",
-            "new_string": "replaced"
+            "old_text": "missing",
+            "new_text": "replaced"
         });
         let (code, out) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
@@ -892,7 +882,7 @@ mod tests {
             .unwrap();
 
         let state = AppState::test_minimal(tmp.path());
-        let args = serde_json::json!({"path": "m.txt", "old_string": "abc", "new_string": "xyz"});
+        let args = serde_json::json!({"path": "m.txt", "old_text": "abc", "new_text": "xyz"});
         let (code, out) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
         assert!(
@@ -908,7 +898,7 @@ mod tests {
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
 
         let state = AppState::test_minimal(tmp.path());
-        let args = serde_json::json!({"path": "ghost.txt", "old_string": "x", "new_string": "y"});
+        let args = serde_json::json!({"path": "ghost.txt", "old_text": "x", "new_text": "y"});
         let (code, out) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
         assert!(out.contains("File not found"), "got: {out}");
@@ -930,8 +920,8 @@ mod tests {
 
         let args = serde_json::json!({
             "path": "f.txt",
-            "old_string": "hi",
-            "new_string": "hello world"  // 11 bytes; grow by 9
+            "old_text": "hi",
+            "new_text": "hello world"  // 11 bytes; grow by 9
         });
         let (code, _) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 0);
@@ -952,8 +942,8 @@ mod tests {
 
         let args = serde_json::json!({
             "path": "f.txt",
-            "old_string": "hello world",
-            "new_string": "hi"  // 2 bytes; shrink by 9
+            "old_text": "hello world",
+            "new_text": "hi"  // 2 bytes; shrink by 9
         });
         let (code, _) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 0);
@@ -973,8 +963,8 @@ mod tests {
         let state = AppState::test_minimal(tmp.path());
         let args = serde_json::json!({
             "path": "big.txt",
-            "old_string": "xxx",
-            "new_string": "yyy",
+            "old_text": "xxx",
+            "new_text": "yyy",
         });
         let (code, out) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 1);
@@ -1552,8 +1542,8 @@ mod tests {
         // Attempt an edit that would grow the file by 9 bytes.
         let args = serde_json::json!({
             "path": "f.txt",
-            "old_string": "hi",
-            "new_string": "hello world"
+            "old_text": "hi",
+            "new_text": "hello world"
         });
         let (code, out) = edit_file(&state, "alice", &args).await;
         assert_eq!(code, 1, "expected failure, got: {out}");

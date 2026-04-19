@@ -50,16 +50,16 @@ pub fn edit_file_schema() -> Value {
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Surgical edit of a text file. Replaces exactly one occurrence of old_string with new_string. Errors if old_string is missing or appears more than once — include surrounding context to disambiguate. When device_name is \"server\", path is relative to your server workspace. When device_name is a client device, path is that device's path.",
+            "description": "Surgical edit of a text file. Replaces exactly one occurrence of old_text with new_text. Errors if old_text is missing or appears more than once — include surrounding context to disambiguate. When device_name is \"server\", path is relative to your server workspace. When device_name is a client device, path is that device's path.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "device_name": { "type": "string" },
                     "path": { "type": "string" },
-                    "old_string": { "type": "string" },
-                    "new_string": { "type": "string" }
+                    "old_text": { "type": "string" },
+                    "new_text": { "type": "string" }
                 },
-                "required": ["device_name", "path", "old_string", "new_string"]
+                "required": ["device_name", "path", "old_text", "new_text"]
             }
         }
     })

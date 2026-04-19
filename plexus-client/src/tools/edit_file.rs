@@ -32,13 +32,13 @@ async fn exec(args: Value, config: &ClientConfig) -> ToolResult {
         Some(p) => p,
         None => return ToolResult::error(tool_error("missing: path")),
     };
-    let old = match args.get("old_string").and_then(Value::as_str) {
+    let old = match args.get("old_text").and_then(Value::as_str) {
         Some(s) if !s.is_empty() => s,
-        _ => return ToolResult::error(tool_error("old_string must be non-empty")),
+        _ => return ToolResult::error(tool_error("old_text must be non-empty")),
     };
-    let new = match args.get("new_string").and_then(Value::as_str) {
+    let new = match args.get("new_text").and_then(Value::as_str) {
         Some(s) => s,
-        None => return ToolResult::error(tool_error("missing: new_string")),
+        None => return ToolResult::error(tool_error("missing: new_text")),
     };
 
     let path = match sanitize_path(p, config, true) {
@@ -57,7 +57,7 @@ async fn exec(args: Value, config: &ClientConfig) -> ToolResult {
             } else {
                 format!(" ({})", failure.hints.join(", "))
             };
-            ToolResult::error(tool_error(&format!("old_string not found in {p}{hint}")))
+            ToolResult::error(tool_error(&format!("old_text not found in {p}{hint}")))
         }
         Ok(m) if m.count > 1 => ToolResult::error(tool_error(&format!(
             "{} matches in {p} — must be exactly 1",
@@ -94,7 +94,7 @@ mod tests {
         let f = d.path().join("t.rs");
         std::fs::write(&f, "fn main() { old() }").unwrap();
         let r = exec(
-            serde_json::json!({"path": f.to_str().unwrap(), "old_string": "old()", "new_string": "new()"}),
+            serde_json::json!({"path": f.to_str().unwrap(), "old_text": "old()", "new_text": "new()"}),
             &cfg(d.path()),
         )
         .await;
@@ -108,7 +108,7 @@ mod tests {
         let f = d.path().join("t.rs");
         std::fs::write(&f, "fn main() { old() }").unwrap();
         let r = exec(
-            serde_json::json!({"file_path": f.to_str().unwrap(), "old_string": "old()", "new_string": "new()"}),
+            serde_json::json!({"file_path": f.to_str().unwrap(), "old_text": "old()", "new_text": "new()"}),
             &cfg(d.path()),
         )
         .await;
@@ -121,7 +121,7 @@ mod tests {
         let f = d.path().join("t.txt");
         std::fs::write(&f, "hello").unwrap();
         let r = exec(
-            serde_json::json!({"path": f.to_str().unwrap(), "old_string": "bye", "new_string": "x"}),
+            serde_json::json!({"path": f.to_str().unwrap(), "old_text": "bye", "new_text": "x"}),
             &cfg(d.path()),
         )
         .await;
@@ -134,7 +134,7 @@ mod tests {
         let f = d.path().join("t.txt");
         std::fs::write(&f, "aa bb aa").unwrap();
         let r = exec(
-            serde_json::json!({"path": f.to_str().unwrap(), "old_string": "aa", "new_string": "cc"}),
+            serde_json::json!({"path": f.to_str().unwrap(), "old_text": "aa", "new_text": "cc"}),
             &cfg(d.path()),
         )
         .await;
@@ -149,8 +149,8 @@ mod tests {
         let r = exec(
             serde_json::json!({
                 "path": f.to_str().unwrap(),
-                "old_string": "fn f() {\n    x();\n}",
-                "new_string": "fn f() { y(); }"
+                "old_text": "fn f() {\n    x();\n}",
+                "new_text": "fn f() { y(); }"
             }),
             &cfg(d.path()),
         )

@@ -92,7 +92,7 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
     //      client device that reports the capability. Always emitted (even when no client
     //      is online) with enum = ["server"] as the minimum.
     {
-        use crate::server_tools::file_ops_schemas;
+        use plexus_common::file_ops_schemas;
 
         for schema_fn in &[
             file_ops_schemas::read_file_schema as fn() -> Value,
