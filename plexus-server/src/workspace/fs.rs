@@ -470,7 +470,9 @@ impl WorkspaceFs {
         pattern: &str,
         root: &str,
     ) -> Result<Vec<String>, WorkspaceError> {
-        let user_root = self.root.join(user_id);
+        let user_root = tokio::fs::canonicalize(self.root.join(user_id))
+            .await
+            .map_err(WorkspaceError::Io)?;
 
         let search_root = if root.is_empty() {
             user_root.clone()
@@ -497,10 +499,10 @@ impl WorkspaceFs {
                 if entry.path() == search_root {
                     continue;
                 }
-                let rel = entry
-                    .path()
-                    .strip_prefix(&user_root_clone)
-                    .unwrap_or(entry.path());
+                let rel = match entry.path().strip_prefix(&user_root_clone) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
                 if matcher.is_match(rel) {
                     out.push(rel.display().to_string());
                 }
@@ -528,7 +530,9 @@ impl WorkspaceFs {
         root: &str,
         opts: GrepOpts,
     ) -> Result<Vec<GrepHit>, WorkspaceError> {
-        let user_root = self.root.join(user_id);
+        let user_root = tokio::fs::canonicalize(self.root.join(user_id))
+            .await
+            .map_err(WorkspaceError::Io)?;
 
         let search_root = if root.is_empty() {
             user_root.clone()
@@ -563,10 +567,10 @@ impl WorkspaceFs {
                     Ok(c) => c,
                     Err(_) => continue, // skip non-UTF-8 files
                 };
-                let rel = entry
-                    .path()
-                    .strip_prefix(&user_root_clone)
-                    .unwrap_or(entry.path());
+                let rel = match entry.path().strip_prefix(&user_root_clone) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
                 for (i, line) in content.lines().enumerate() {
                     if re.is_match(line) {
                         out.push(GrepHit {
@@ -910,6 +914,26 @@ mod tests {
         assert_eq!(results.len(), 3, "expected exactly 3 .rs files, got: {results:?}");
         let set: std::collections::HashSet<&str> = results.iter().map(|s| s.as_str()).collect();
         assert!(set.iter().all(|p| p.ends_with(".rs")), "all paths must end in .rs");
+    }
+
+    #[tokio::test]
+    async fn glob_with_subdir_root_returns_relative_paths() {
+        let tmp = tempdir().unwrap();
+        let src_dir = tmp.path().join("alice/project/src");
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+        tokio::fs::write(src_dir.join("lib.rs"), b"pub fn lib() {}").await.unwrap();
+        tokio::fs::write(src_dir.join("main.rs"), b"fn main() {}").await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+        let results = fs.glob("alice", "**/*.rs", "project/src").await.unwrap();
+
+        assert_eq!(results.len(), 2, "expected exactly 2 .rs files, got: {results:?}");
+        for path in &results {
+            assert!(
+                !path.starts_with('/'),
+                "result must not be an absolute path: {path:?}"
+            );
+        }
     }
 
     #[tokio::test]
