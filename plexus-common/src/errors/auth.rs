@@ -16,8 +16,8 @@ pub enum AuthError {
     TokenExpired,
 
     /// Caller is authenticated but not permitted to perform the action.
-    #[error("forbidden")]
-    Forbidden,
+    #[error("not permitted")]
+    NotPermitted,
 }
 
 impl AuthError {
@@ -25,7 +25,7 @@ impl AuthError {
         match self {
             AuthError::TokenInvalid => ErrorCode::AuthFailed,
             AuthError::TokenExpired => ErrorCode::AuthTokenExpired,
-            AuthError::Forbidden => ErrorCode::Forbidden,
+            AuthError::NotPermitted => ErrorCode::Forbidden,
         }
     }
 }

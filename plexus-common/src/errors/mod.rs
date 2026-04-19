@@ -34,7 +34,6 @@ pub enum ErrorCode {
     ValidationFailed,
     InvalidParams,
     ExecutionFailed,
-    ExecutionTimeout,
     DeviceNotFound,
     DeviceOffline,
     ProtocolMismatch,
@@ -62,7 +61,6 @@ impl ErrorCode {
             Self::ValidationFailed => "VALIDATION_FAILED",
             Self::InvalidParams => "INVALID_PARAMS",
             Self::ExecutionFailed => "EXECUTION_FAILED",
-            Self::ExecutionTimeout => "EXECUTION_TIMEOUT",
             Self::DeviceNotFound => "DEVICE_NOT_FOUND",
             Self::DeviceOffline => "DEVICE_OFFLINE",
             Self::ProtocolMismatch => "PROTOCOL_MISMATCH",
@@ -89,7 +87,7 @@ impl ErrorCode {
             | Self::InvalidParams
             | Self::ToolInvalidParams
             | Self::ProtocolMismatch => 400,
-            Self::ExecutionTimeout | Self::ToolTimeout => 504,
+            Self::ToolTimeout => 504,
             Self::DeviceOffline => 503,
             Self::McpConnectionFailed
             | Self::McpCallFailed
@@ -113,7 +111,6 @@ impl ErrorCode {
             "VALIDATION_FAILED" => Some(Self::ValidationFailed),
             "INVALID_PARAMS" => Some(Self::InvalidParams),
             "EXECUTION_FAILED" => Some(Self::ExecutionFailed),
-            "EXECUTION_TIMEOUT" => Some(Self::ExecutionTimeout),
             "DEVICE_NOT_FOUND" => Some(Self::DeviceNotFound),
             "DEVICE_OFFLINE" => Some(Self::DeviceOffline),
             "PROTOCOL_MISMATCH" => Some(Self::ProtocolMismatch),

@@ -20,10 +20,6 @@ pub enum ToolError {
     /// Dispatched to a client device that is not currently connected.
     #[error("device unreachable: {0}")]
     DeviceUnreachable(String),
-
-    /// Transient failure — caller may retry. The string describes the reason.
-    #[error("retriable failure: {0}")]
-    Retriable(String),
 }
 
 impl ToolError {
@@ -32,7 +28,6 @@ impl ToolError {
             ToolError::ExecutionFailed(_) => ErrorCode::ExecutionFailed,
             ToolError::Timeout(_) => ErrorCode::ToolTimeout,
             ToolError::DeviceUnreachable(_) => ErrorCode::DeviceOffline,
-            ToolError::Retriable(_) => ErrorCode::ExecutionFailed,
         }
     }
 }

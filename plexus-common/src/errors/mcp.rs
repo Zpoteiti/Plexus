@@ -11,10 +11,10 @@ pub enum McpError {
     #[error("MCP server unreachable: {0}")]
     ServerUnreachable(String),
 
-    /// Two sources advertised the same tool name. `mcp_server` is the source
+    /// Two sources advertised the same tool name. `server` is the source
     /// being rejected; `tool` is the offending tool name.
-    #[error("MCP tool name collision: {mcp_server} advertises tool `{tool}`")]
-    SchemaCollision { mcp_server: String, tool: String },
+    #[error("MCP tool name collision: {server} advertises tool `{tool}`")]
+    SchemaCollision { server: String, tool: String },
 }
 
 impl McpError {
