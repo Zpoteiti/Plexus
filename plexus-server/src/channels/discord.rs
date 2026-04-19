@@ -202,14 +202,20 @@ pub async fn deliver(state: &Arc<AppState>, event: &OutboundEvent) {
         }
     }
 
-    // Send media as file attachments (or raw URLs for non-file-store paths)
-    for item in crate::file_store::resolve_media(state, &event.user_id, &event.media).await {
-        let msg = match item {
-            crate::file_store::ResolvedMedia::File { bytes, filename } => {
-                CreateMessage::new().add_file(CreateAttachment::bytes(bytes, filename))
+    // Send media as file attachments via workspace_fs
+    for path in &event.media {
+        let bytes = match state.workspace_fs.read(&event.user_id, path).await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Discord media read failed ({path}): {e}");
+                continue;
             }
-            crate::file_store::ResolvedMedia::Url(url) => CreateMessage::new().content(url),
         };
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file.bin".into());
+        let msg = CreateMessage::new().add_file(CreateAttachment::bytes(bytes, filename));
         if let Err(e) = channel_id.send_message(&http, msg).await {
             error!("Discord media send error: {e}");
         }
@@ -314,15 +320,10 @@ impl EventHandler for DiscordHandler {
                     continue;
                 }
             };
-            match crate::file_store::save_upload(
-                &self.state,
-                &self.plexus_user_id,
-                &att.filename,
-                &bytes,
-            )
-            .await
-            {
-                Ok(file_id) => media_urls.push(format!("/api/files/{file_id}")),
+            let safe_name = att.filename.replace(['/', '\\'], "_");
+            let rel = format!(".attachments/discord-{}/{}", msg.id, safe_name);
+            match self.state.workspace_fs.write(&self.plexus_user_id, &rel, &bytes).await {
+                Ok(()) => media_urls.push(rel),
                 Err(e) => {
                     warn!("discord attachment save failed ({}): {}", att.filename, e);
                     content.push('\n');

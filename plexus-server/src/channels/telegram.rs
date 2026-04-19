@@ -273,10 +273,12 @@ async fn handle_message(
             }
         };
 
-        match crate::file_store::save_upload(state, plexus_user_id, &filename, &bytes).await {
-            Ok(fid) => media_urls.push(format!("/api/files/{fid}")),
+        let safe_name = filename.replace(['/', '\\'], "_");
+        let rel = format!(".attachments/telegram-{}/{}", msg.id, safe_name);
+        match state.workspace_fs.write(plexus_user_id, &rel, &bytes).await {
+            Ok(()) => media_urls.push(rel),
             Err(e) => {
-                warn!("telegram save_upload failed ({filename}): {e:?}");
+                warn!("telegram attachment save failed ({filename}): {e}");
                 content.push('\n');
                 content.push_str(&format!("[Attachment: {filename} — storage failed]"));
             }
@@ -363,20 +365,22 @@ pub async fn deliver(state: &Arc<AppState>, event: &OutboundEvent) {
         }
     }
 
-    // Send media as file attachments (or raw URLs for non-file-store paths)
-    for item in crate::file_store::resolve_media(state, &event.user_id, &event.media).await {
-        match item {
-            crate::file_store::ResolvedMedia::File { bytes, filename } => {
-                let input = teloxide::types::InputFile::memory(bytes).file_name(filename);
-                if let Err(e) = bot.send_document(chat_id, input).await {
-                    error!("Telegram media send error: {e}");
-                }
+    // Send media as file attachments via workspace_fs
+    for path in &event.media {
+        let bytes = match state.workspace_fs.read(&event.user_id, path).await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Telegram media read failed ({path}): {e}");
+                continue;
             }
-            crate::file_store::ResolvedMedia::Url(url) => {
-                if let Err(e) = bot.send_message(chat_id, url).await {
-                    error!("Telegram media url send error: {e}");
-                }
-            }
+        };
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file.bin".into());
+        let input = teloxide::types::InputFile::memory(bytes).file_name(filename);
+        if let Err(e) = bot.send_document(chat_id, input).await {
+            error!("Telegram media send error: {e}");
         }
     }
 }

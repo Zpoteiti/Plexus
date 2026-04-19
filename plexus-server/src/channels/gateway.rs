@@ -192,13 +192,16 @@ mod tests {
             "sender_id": "u1",
             "session_id": "s1",
             "content": "hi",
-            "media": ["/api/files/a", "/api/files/b"]
+            "media": [".attachments/gateway-test/a.png", ".attachments/gateway-test/b.png"]
         }"#;
         let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
         let media = extract_media(&parsed);
         assert_eq!(
             media,
-            vec!["/api/files/a".to_string(), "/api/files/b".to_string()]
+            vec![
+                ".attachments/gateway-test/a.png".to_string(),
+                ".attachments/gateway-test/b.png".to_string()
+            ]
         );
     }
 
