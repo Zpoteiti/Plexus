@@ -24,7 +24,7 @@ These are checked at startup. Missing required vars cause a panic with a descrip
 | `SERVER_PORT` | **yes** | -- | HTTP listen port (e.g. `8080`) |
 | `PLEXUS_GATEWAY_WS_URL` | **yes** | -- | Gateway WebSocket URL (e.g. `ws://gateway:9090/ws/plexus`) |
 | `PLEXUS_GATEWAY_TOKEN` | **yes** | -- | Token for server-to-gateway auth |
-| `PLEXUS_SKILLS_DIR` | no | `~/.plexus/skills` | Directory for skill file storage |
+| `PLEXUS_WORKSPACE_ROOT` | **yes** | -- | Root directory for all user workspaces (`{root}/{user_id}/`) |
 
 A `.env` file in the working directory is loaded automatically via `dotenvy`.
 

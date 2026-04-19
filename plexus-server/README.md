@@ -50,7 +50,7 @@ These tools run on the server, not on client devices. No `device_name` routing n
 | `SERVER_PORT` | Yes | -- | HTTP listen port (e.g. `8080`) |
 | `PLEXUS_GATEWAY_WS_URL` | Yes | -- | WebSocket URL for the gateway connection (e.g. `ws://localhost:9090/ws/plexus`) |
 | `PLEXUS_GATEWAY_TOKEN` | Yes | -- | Shared secret for gateway authentication |
-| `PLEXUS_SKILLS_DIR` | No | `~/.plexus/skills` | Directory where skill scripts are stored |
+| `PLEXUS_WORKSPACE_ROOT` | Yes | -- | Root directory for all user workspaces (`{root}/{user_id}/`) |
 
 LLM configuration (`api_base`, `api_key`, `model`, `context_window`) is managed via the `/api/llm-config` API and persisted in the `system_config` DB table -- not env vars.
 
