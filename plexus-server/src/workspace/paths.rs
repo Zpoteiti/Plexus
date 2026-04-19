@@ -1,21 +1,5 @@
+use plexus_common::errors::workspace::WorkspaceError;
 use std::path::{Path, PathBuf};
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum WorkspaceError {
-    #[error("path traversal attempt: {0}")]
-    Traversal(String),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("quota: {0}")]
-    Quota(crate::workspace::quota::QuotaError),
-}
-
-impl From<crate::workspace::quota::QuotaError> for WorkspaceError {
-    fn from(e: crate::workspace::quota::QuotaError) -> Self {
-        WorkspaceError::Quota(e)
-    }
-}
 
 /// Resolve a relative user-workspace path against `{workspace_root}/{user_id}/`.
 ///

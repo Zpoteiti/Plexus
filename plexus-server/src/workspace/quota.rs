@@ -1,4 +1,5 @@
 use dashmap::DashMap;
+use plexus_common::errors::workspace::WorkspaceError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -7,16 +8,6 @@ pub struct QuotaCache {
     usage: DashMap<String, Arc<AtomicU64>>,
     /// Total quota per user in bytes.
     quota_bytes: u64,
-}
-
-#[derive(Debug, thiserror::Error, PartialEq)]
-pub enum QuotaError {
-    #[error("upload exceeds per-upload cap ({0} bytes; cap {1} bytes)")]
-    UploadTooLarge(u64, u64),
-    #[error("workspace is soft-locked (usage {0} > quota {1}); delete files to continue")]
-    SoftLocked(u64, u64),
-    // HardCeiling removed — dead code. See 2026-04-17 code review.
-    // Can be re-added in ~4 lines if a consumer appears.
 }
 
 impl QuotaCache {
@@ -40,10 +31,17 @@ impl QuotaCache {
 
     /// Check an incoming upload. Returns Ok if allowed; reserves the bytes by
     /// incrementing the usage counter atomically.
-    pub fn check_and_reserve_upload(&self, user_id: &str, bytes: u64) -> Result<(), QuotaError> {
+    pub fn check_and_reserve_upload(
+        &self,
+        user_id: &str,
+        bytes: u64,
+    ) -> Result<(), WorkspaceError> {
         let cap = self.per_upload_cap();
         if bytes > cap {
-            return Err(QuotaError::UploadTooLarge(bytes, cap));
+            return Err(WorkspaceError::UploadTooLarge {
+                actual: bytes,
+                limit: cap,
+            });
         }
         let counter = self.usage_for(user_id);
         let quota = self.quota_bytes;
@@ -56,7 +54,7 @@ impl QuotaCache {
         });
         match update_result {
             Ok(_) => Ok(()),
-            Err(current) => Err(QuotaError::SoftLocked(current, quota)),
+            Err(_) => Err(WorkspaceError::SoftLocked),
         }
     }
 
@@ -155,7 +153,7 @@ mod tests {
     fn test_upload_exceeding_per_upload_cap_rejected() {
         let q = QuotaCache::new(5_000_000_000); // 5 GB
         let result = q.check_and_reserve_upload("alice", 4_500_000_000);
-        assert!(matches!(result, Err(QuotaError::UploadTooLarge(_, _))));
+        assert!(matches!(result, Err(WorkspaceError::UploadTooLarge { .. })));
     }
 
     #[test]
@@ -181,7 +179,7 @@ mod tests {
         q.check_and_reserve_upload("alice", 4_000_000_000).unwrap();
         q.check_and_reserve_upload("alice", 4_000_000_000).unwrap(); // now over
         let result = q.check_and_reserve_upload("alice", 100);
-        assert!(matches!(result, Err(QuotaError::SoftLocked(_, _))));
+        assert!(matches!(result, Err(WorkspaceError::SoftLocked)));
     }
 
     #[test]
@@ -191,7 +189,7 @@ mod tests {
         q.check_and_reserve_upload("alice", 4_000_000_000).unwrap();
         assert!(matches!(
             q.check_and_reserve_upload("alice", 100),
-            Err(QuotaError::SoftLocked(_, _))
+            Err(WorkspaceError::SoftLocked)
         ));
         q.record_delete("alice", 4_000_000_000); // drop to 4 GB
         let result = q.check_and_reserve_upload("alice", 100);

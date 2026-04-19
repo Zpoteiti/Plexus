@@ -117,17 +117,7 @@ impl WorkspaceFs {
             }
             Ok(result)
         } else {
-            crate::workspace::paths::resolve_user_path_for_create(&self.root, user_id, path)
-                .await
-                .map_err(|e| match e {
-                    crate::workspace::paths::WorkspaceError::Traversal(s) => {
-                        WorkspaceError::Traversal(s)
-                    }
-                    crate::workspace::paths::WorkspaceError::Io(io) => WorkspaceError::Io(io),
-                    crate::workspace::paths::WorkspaceError::Quota(_) => {
-                        WorkspaceError::Traversal(path.into())
-                    }
-                })
+            crate::workspace::paths::resolve_user_path_for_create(&self.root, user_id, path).await
         };
         if let Err(WorkspaceError::Traversal(_)) = &result {
             warn!(user_id, path, "workspace path escape attempt");
@@ -152,19 +142,8 @@ impl WorkspaceFs {
                 Ok(canonical)
             }
         } else {
-            // Delegate to the existing relative-path helper, mapping its error type.
-            crate::workspace::paths::resolve_user_path(&self.root, user_id, path)
-                .await
-                .map_err(|e| match e {
-                    crate::workspace::paths::WorkspaceError::Traversal(s) => {
-                        WorkspaceError::Traversal(s)
-                    }
-                    crate::workspace::paths::WorkspaceError::Io(io) => WorkspaceError::Io(io),
-                    crate::workspace::paths::WorkspaceError::Quota(_) => {
-                        // paths.rs only returns Traversal or Io; this arm is exhaustive.
-                        WorkspaceError::Traversal(path.into())
-                    }
-                })
+            // Delegate to the existing relative-path helper.
+            crate::workspace::paths::resolve_user_path(&self.root, user_id, path).await
         };
         if let Err(WorkspaceError::Traversal(_)) = &result {
             warn!(user_id, path, "workspace path escape attempt");
@@ -228,16 +207,7 @@ impl WorkspaceFs {
         let delta = new_size.saturating_sub(existing);
 
         if delta > 0 {
-            self.quota
-                .check_and_reserve_upload(user_id, delta)
-                .map_err(|e| match e {
-                    crate::workspace::quota::QuotaError::UploadTooLarge(actual, limit) => {
-                        WorkspaceError::UploadTooLarge { actual, limit }
-                    }
-                    crate::workspace::quota::QuotaError::SoftLocked(_, _) => {
-                        WorkspaceError::SoftLocked
-                    }
-                })?;
+            self.quota.check_and_reserve_upload(user_id, delta)?;
         }
 
         if let Err(io_err) = tokio::fs::write(&resolved, bytes).await {
@@ -275,13 +245,7 @@ impl WorkspaceFs {
         }
 
         self.quota
-            .check_and_reserve_upload(user_id, expected_size)
-            .map_err(|e| match e {
-                crate::workspace::quota::QuotaError::UploadTooLarge(actual, limit) => {
-                    WorkspaceError::UploadTooLarge { actual, limit }
-                }
-                crate::workspace::quota::QuotaError::SoftLocked(_, _) => WorkspaceError::SoftLocked,
-            })?;
+            .check_and_reserve_upload(user_id, expected_size)?;
 
         let mut file = match tokio::fs::File::create(&resolved).await {
             Ok(f) => f,
