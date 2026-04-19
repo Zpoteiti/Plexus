@@ -676,8 +676,15 @@ fn build_tool_hint(tool_name: &str, arguments_json: &str) -> String {
         .unwrap_or("");
 
     if server_tools::is_server_tool(tool_name) {
-        // Server tools: no device
+        // Server-only tools (message, file_transfer, cron, web_fetch): no device label.
         format!("Executing {tool_name}...")
+    } else if crate::server_tools::dispatch::is_file_tool(tool_name) {
+        // File tools carry device_name; show "server" or client device explicitly.
+        if device.is_empty() || device == "server" {
+            format!("Executing {tool_name} on server...")
+        } else {
+            format!("Executing {tool_name} on {device}...")
+        }
     } else if device.is_empty() {
         format!("Executing {tool_name}...")
     } else {
@@ -695,7 +702,13 @@ async fn execute_tool_call(
     let args: serde_json::Value = serde_json::from_str(arguments_json)
         .unwrap_or(serde_json::Value::Object(Default::default()));
 
-    // Server tools first (no device_name)
+    // File tools first — unified device_name routing (server or client).
+    if crate::server_tools::dispatch::is_file_tool(tool_name) {
+        return crate::server_tools::dispatch::dispatch_file_tool(state, user_id, tool_name, args)
+            .await;
+    }
+
+    // Server-only tools (message, file_transfer, cron, web_fetch): no device_name.
     if server_tools::is_server_tool(tool_name) {
         return server_tools::execute(state, tool_ctx, tool_name, args).await;
     }

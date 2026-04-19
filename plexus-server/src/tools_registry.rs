@@ -91,6 +91,38 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
         }
     }
 
+    // 1.5. File tools — unified schemas with device_name enum covering "server" + every
+    //      client device that reports the capability. Always emitted (even when no client
+    //      is online) with enum = ["server"] as the minimum.
+    {
+        use crate::server_tools::file_ops_schemas;
+
+        for schema_fn in &[
+            file_ops_schemas::read_file_schema as fn() -> Value,
+            file_ops_schemas::write_file_schema,
+            file_ops_schemas::edit_file_schema,
+            file_ops_schemas::delete_file_schema,
+            file_ops_schemas::list_dir_schema,
+            file_ops_schemas::glob_schema,
+            file_ops_schemas::grep_schema,
+        ] {
+            let mut schema = schema_fn();
+            let tool_name_str = tool_name(&schema).to_string();
+            // device_name enum = "server" + any client device that reports this tool.
+            let mut devices: Vec<String> = vec!["server".to_string()];
+            for (device_name, tools) in &device_tools {
+                let has_tool = tools
+                    .iter()
+                    .any(|t| tool_name(t) == tool_name_str);
+                if has_tool {
+                    devices.push(device_name.clone());
+                }
+            }
+            inject_device_name_enum(&mut schema, &devices);
+            schemas.push(schema);
+        }
+    }
+
     // 4. Emit MCP tools — one schema per unique mcp_* name, device_name enum = all sources.
     let mut mcp_keys: Vec<String> = mcp_sources.keys().cloned().collect();
     mcp_keys.sort();
@@ -104,9 +136,14 @@ pub fn build_tool_schemas(state: &AppState, user_id: &str) -> Vec<Value> {
     }
 
     // 5. Emit client native tools — one schema per unique name, device_name enum = all devices.
+    //    File tools are already emitted in step 1.5 above — skip them here.
     let mut native_keys: Vec<String> = native_sources.keys().cloned().collect();
     native_keys.sort();
     for name in native_keys {
+        // Skip file tools — unified schema already emitted in step 1.5.
+        if crate::server_tools::dispatch::is_file_tool(&name) {
+            continue;
+        }
         let devices = &native_sources[&name];
         if let Some(template) = representatives.get(&name) {
             let mut schema = template.clone();
