@@ -137,6 +137,8 @@ plexus-frontend/   React web UI — chat, settings, admin panel
 
 All messages, tool results, and workspace files are persisted. Context compression kicks in automatically when the conversation gets long.
 
+**Unified file model:** every user has a workspace at `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`. Per-message attachments land in `.attachments/` with a 30-day TTL. All file and shell tools accept a `device_name` parameter — `"server"` routes to the user's server-side workspace; any other name routes to that client device's bwrap jail. There is no separate file upload API; files are written via the file tools.
+
 **Autonomous subsystems:**
 
 - **Dream** (every 2 hours, idle-gated) — reads recent conversations, consolidates insights into MEMORY.md, and extracts reusable skills into the skills/ directory. Does nothing — and costs nothing — if there's been no activity since the last run.

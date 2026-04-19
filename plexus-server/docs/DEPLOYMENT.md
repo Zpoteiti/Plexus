@@ -74,7 +74,7 @@ EnvironmentFile=/opt/plexus/.env
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/tmp/plexus-uploads /tmp/plexus-media
+ReadWritePaths=/var/lib/plexus/workspace
 PrivateTmp=false
 
 # Resource limits
@@ -185,17 +185,15 @@ Reasonable defaults:
 - Personal use: 0 (unlimited)
 - Shared instance: 10-30 per minute per user
 
-### File Storage
+### File Storage (Unified Workspace)
 
-Files are stored in `/tmp/plexus-uploads` and `/tmp/plexus-media`. The cleanup task runs every hour and deletes files older than 24 hours.
+All user files live under `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`. Per-message attachments are stored in `.attachments/` within each user's workspace with a 30-day TTL. The workspace service (`WorkspaceFs`) enforces per-user quota (default 5 GB) and path isolation.
 
-For persistent file storage across restarts, mount a persistent volume:
+For production deployments, mount a persistent volume at `PLEXUS_WORKSPACE_ROOT`:
 
 ```bash
-# In systemd
-ReadWritePaths=/var/lib/plexus/uploads /var/lib/plexus/media
-
-# Then symlink or change the paths (currently hardcoded to /tmp)
+# In systemd — grant write access to the workspace directory
+ReadWritePaths=/var/lib/plexus/workspace
 ```
 
 ### Graceful Shutdown
