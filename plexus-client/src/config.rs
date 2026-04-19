@@ -51,7 +51,12 @@ impl ClientConfig {
         }
     }
 
-    /// Merge a ConfigUpdate. Returns true if mcp_servers changed (caller must reinit MCP).
+    /// Merge a ConfigUpdate.
+    /// Returns `(mcp_changed, workspace_path_changed)`.
+    /// `mcp_changed` — caller must reinit MCP sessions.
+    /// `workspace_path_changed` — bwrap jail root has shifted; a reconnect would
+    /// rebind the sandbox to the new path. For now the caller logs + applies in-place;
+    /// see the TODO in main.rs.
     pub fn merge_update(
         &mut self,
         fs_policy: Option<FsPolicy>,
@@ -59,13 +64,16 @@ impl ClientConfig {
         workspace_path: Option<String>,
         shell_timeout_max: Option<u64>,
         ssrf_whitelist: Option<Vec<String>>,
-    ) -> bool {
+    ) -> (bool, bool) {
         if let Some(v) = fs_policy {
             self.fs_policy = v;
         }
-        if let Some(v) = workspace_path {
+        let workspace_path_changed = if let Some(v) = workspace_path {
             self.workspace = resolve_workspace(&v);
-        }
+            true
+        } else {
+            false
+        };
         if let Some(v) = shell_timeout_max {
             self.shell_timeout_max = v;
         }
@@ -74,9 +82,9 @@ impl ClientConfig {
         }
         if let Some(v) = mcp_servers {
             self.mcp_servers = v;
-            return true;
+            return (true, workspace_path_changed);
         }
-        false
+        (false, workspace_path_changed)
     }
 }
 
@@ -98,8 +106,9 @@ mod tests {
     #[test]
     fn test_merge_partial() {
         let mut c = cfg();
-        let mcp = c.merge_update(Some(FsPolicy::Unrestricted), None, None, Some(120), None);
+        let (mcp, wp) = c.merge_update(Some(FsPolicy::Unrestricted), None, None, Some(120), None);
         assert!(!mcp);
+        assert!(!wp);
         assert_eq!(c.fs_policy, FsPolicy::Unrestricted);
         assert_eq!(c.shell_timeout_max, 120);
     }
@@ -107,7 +116,7 @@ mod tests {
     #[test]
     fn test_merge_mcp_returns_true() {
         let mut c = cfg();
-        let mcp = c.merge_update(
+        let (mcp, wp) = c.merge_update(
             None,
             Some(vec![McpServerEntry {
                 name: "t".into(),
@@ -125,13 +134,26 @@ mod tests {
             None,
         );
         assert!(mcp);
+        assert!(!wp);
         assert_eq!(c.mcp_servers.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_workspace_path_changed() {
+        let mut c = cfg();
+        let (mcp, wp) =
+            c.merge_update(None, None, Some("/home/u/new_ws".into()), None, None);
+        assert!(!mcp);
+        assert!(wp);
+        assert_eq!(c.workspace, PathBuf::from("/home/u/new_ws"));
     }
 
     #[test]
     fn test_merge_none_preserves() {
         let mut c = cfg();
-        c.merge_update(None, None, None, None, None);
+        let (mcp, wp) = c.merge_update(None, None, None, None, None);
+        assert!(!mcp);
+        assert!(!wp);
         assert_eq!(c.fs_policy, FsPolicy::Sandbox);
     }
 }

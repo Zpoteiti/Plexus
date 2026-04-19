@@ -189,13 +189,23 @@ async fn message_loop(
                 ssrf_whitelist,
             } => {
                 let mut cfg = config.write().await;
-                let mcp_changed = cfg.merge_update(
+                let (mcp_changed, workspace_path_changed) = cfg.merge_update(
                     fs_policy,
                     mcp_servers.clone(),
                     workspace_path,
                     shell_timeout_max,
                     ssrf_whitelist,
                 );
+                if workspace_path_changed {
+                    // TODO: trigger reconnect so bwrap jail rebinds to new workspace_path.
+                    // For now, log — tools called after this point still see the new config
+                    // via the Arc<RwLock<ClientConfig>>; a clean reconnect would be cleaner.
+                    info!(
+                        "ConfigUpdate: workspace_path changed to {:?}; applying in-place (reconnect for bwrap rebind not yet wired)",
+                        cfg.workspace
+                    );
+                }
+                drop(cfg);
                 if mcp_changed && let Some(new_servers) = mcp_servers {
                     let mut mgr = mcp_manager.lock().await;
                     mgr.apply_config(&new_servers).await;
