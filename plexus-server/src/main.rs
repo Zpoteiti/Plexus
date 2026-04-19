@@ -11,6 +11,7 @@ mod db;
 pub mod dream;
 pub mod evaluator;
 pub mod heartbeat;
+pub mod mcp;
 mod memory;
 mod providers;
 mod server_mcp;

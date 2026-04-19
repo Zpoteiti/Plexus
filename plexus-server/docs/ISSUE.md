@@ -8,6 +8,7 @@ Open, deferred, and closed issues for the server crate. Updated by `/wrap-up` at
 
 ## Deferred
 <!-- Acknowledged but intentionally postponed — include context and date -->
+- **P5.6 deferred: Wire MCP collision check into PUT endpoints** — requires runtime tool-schema capture at install time (PUT /api/devices/{name}/mcp + PUT /api/server-mcp). Today we don't fetch tool schemas until connection; needs a pre-connect introspection path. Track separately.
 - [ ] Manual E2E smoke tests for inbound-media (context: Task 18 of plans/2026-04-15-inbound-media.md — Discord/Telegram photo + voice, browser drag+paste, strip-retry, context rebuild. Requires live bots; not a code task, 2026-04-16)
 - [ ] Manual E2E smoke tests for cross-channel addressing (context: Task CC-7 of plans/2026-04-16-cross-channel-addressing.md — cron across browser reconnect, Discord→Telegram cross-channel, non-partner guard, live browser notification, 2026-04-16)
 - [ ] Manual smoke for graceful-shutdown extension (context: code landed in commit 4496acf — bots + per-session run_session now observe `state.shutdown.cancelled()`. Needs live SIGTERM test with Discord/Telegram bots running to confirm the "bot shutting down" / "agent loop shutting down" logs fire; not yet exercised, 2026-04-19)
