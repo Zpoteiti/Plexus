@@ -416,52 +416,181 @@ pub async fn build_context(
     messages
 }
 
-/// Build device status section for system prompt.
-async fn build_device_status(state: &AppState, user_id: &str) -> String {
-    let mut section = "## Connected Devices\n".to_string();
+/// Per-device info used by `render_device_status`.
+struct DeviceStatusEntry {
+    name: String,
+    online: bool,
+    workspace_path: String,
+    shell_timeout_max: i64,
+    ssrf_whitelist: serde_json::Value,
+    fs_policy: serde_json::Value,
+    mcp_config: serde_json::Value,
+}
 
-    let Some(keys) = state.devices_by_user.get(user_id) else {
-        section += "- No devices connected\n\n";
-        return section;
-    };
-
-    // Only query DB when at least one device is online (avoids hot-path DB hit for disconnected users)
-    let tokens = crate::db::devices::list_by_user(&state.db, user_id)
-        .await
-        .unwrap_or_default();
-    let token_map: std::collections::HashMap<_, _> = tokens
-        .into_iter()
-        .map(|t| (t.device_name.clone(), t))
-        .collect();
-
-    let mut has_devices = false;
-    for key in keys.value() {
-        if let Some(conn) = state.devices.get(key) {
-            let (mode, workspace) = if let Some(t) = token_map.get(&conn.device_name) {
-                let m = t
-                    .fs_policy
+/// Render the structured `## Your targets` block for the system prompt.
+fn render_device_status(devices: &[DeviceStatusEntry]) -> String {
+    if devices.is_empty() {
+        return "## Your targets\n\n(no devices registered)\n\n".to_string();
+    }
+    let mut out = "## Your targets\n\n### server\nworkspace_root: (user's workspace root)\n\n"
+        .to_string();
+    for d in devices {
+        let ssrf = {
+            let arr = d.ssrf_whitelist.as_array();
+            match arr {
+                None => "(none; default RFC-1918 block applies)".to_string(),
+                Some(v) if v.is_empty() => "(none; default RFC-1918 block applies)".to_string(),
+                Some(v) => v
+                    .iter()
+                    .filter_map(|e| e.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            }
+        };
+        let mcp = {
+            let arr = d.mcp_config.as_array();
+            match arr {
+                None => "(none)".to_string(),
+                Some(v) if v.is_empty() => "(none)".to_string(),
+                Some(v) => v
+                    .iter()
+                    .filter_map(|e| e.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            }
+        };
+        let fs_policy_str = d
+            .fs_policy
+            .as_str()
+            .unwrap_or_else(|| {
+                d.fs_policy
                     .get("mode")
                     .and_then(|v| v.as_str())
                     .unwrap_or("sandbox")
-                    .to_string();
-                (m, t.workspace_path.clone())
-            } else {
-                ("sandbox".to_string(), "~/.plexus/workspace".to_string())
-            };
+            })
+            .to_string();
+        let status = if d.online {
+            "online".to_string()
+        } else {
+            "offline".to_string()
+        };
+        out.push_str(&format!(
+            "### {} ({})\nworkspace_root: {}\nshell_timeout_max: {}s\nssrf_whitelist: {}\nfs_policy: {}\nmcp_servers: {}\n\n",
+            d.name, status, d.workspace_path, d.shell_timeout_max, ssrf, fs_policy_str, mcp
+        ));
+    }
+    out
+}
 
-            section += &format!(
-                "- {}: online ({} mode, workspace: {})\n",
-                conn.device_name, mode, workspace
-            );
-            has_devices = true;
+/// Build device status section for system prompt.
+async fn build_device_status(state: &AppState, user_id: &str) -> String {
+    // Always query all registered devices (not just online ones) so agent sees full picture
+    let tokens = crate::db::devices::list_by_user(&state.db, user_id)
+        .await
+        .unwrap_or_default();
+
+    if tokens.is_empty() {
+        return "## Your targets\n\n(no devices registered)\n\n".to_string();
+    }
+
+    let entries: Vec<DeviceStatusEntry> = tokens
+        .into_iter()
+        .map(|t| {
+            let key = AppState::device_key(user_id, &t.device_name);
+            let online = state.devices.contains_key(&key);
+            DeviceStatusEntry {
+                name: t.device_name,
+                online,
+                workspace_path: t.workspace_path,
+                shell_timeout_max: t.shell_timeout_max,
+                ssrf_whitelist: t.ssrf_whitelist,
+                fs_policy: t.fs_policy,
+                mcp_config: t.mcp_config,
+            }
+        })
+        .collect();
+
+    render_device_status(&entries)
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    fn make_entry(
+        name: &str,
+        online: bool,
+        workspace_path: &str,
+        shell_timeout_max: i64,
+        ssrf_whitelist: serde_json::Value,
+        fs_policy: serde_json::Value,
+        mcp_config: serde_json::Value,
+    ) -> DeviceStatusEntry {
+        DeviceStatusEntry {
+            name: name.to_string(),
+            online,
+            workspace_path: workspace_path.to_string(),
+            shell_timeout_max,
+            ssrf_whitelist,
+            fs_policy,
+            mcp_config,
         }
     }
 
-    if !has_devices {
-        section += "- No devices connected\n";
+    #[test]
+    fn render_device_status_format_snapshot() {
+        let devices = vec![
+            make_entry(
+                "laptop",
+                true,
+                "/home/user/work",
+                300,
+                serde_json::json!([]),
+                serde_json::json!("sandbox"),
+                serde_json::json!([]),
+            ),
+            make_entry(
+                "server",
+                false,
+                "/var/plexus",
+                600,
+                serde_json::json!(["10.0.0.0/8", "192.168.0.0/16"]),
+                serde_json::json!("unrestricted"),
+                serde_json::json!([{"name": "filesystem"}, {"name": "git"}]),
+            ),
+        ];
+
+        let output = render_device_status(&devices);
+
+        let expected = "\
+## Your targets\n\
+\n\
+### server\n\
+workspace_root: (user's workspace root)\n\
+\n\
+### laptop (online)\n\
+workspace_root: /home/user/work\n\
+shell_timeout_max: 300s\n\
+ssrf_whitelist: (none; default RFC-1918 block applies)\n\
+fs_policy: sandbox\n\
+mcp_servers: (none)\n\
+\n\
+### server (offline)\n\
+workspace_root: /var/plexus\n\
+shell_timeout_max: 600s\n\
+ssrf_whitelist: 10.0.0.0/8, 192.168.0.0/16\n\
+fs_policy: unrestricted\n\
+mcp_servers: filesystem, git\n\
+\n";
+
+        assert_eq!(output, expected);
     }
-    section += "\n";
-    section
+
+    #[test]
+    fn render_device_status_empty() {
+        let output = render_device_status(&[]);
+        assert_eq!(output, "## Your targets\n\n(no devices registered)\n\n");
+    }
 }
 
 /// Reconstruct chat history from DB message rows.
