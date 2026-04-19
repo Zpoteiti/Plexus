@@ -10,7 +10,6 @@ mod cron;
 mod db;
 pub mod dream;
 pub mod evaluator;
-mod file_store;
 pub mod heartbeat;
 mod memory;
 mod providers;

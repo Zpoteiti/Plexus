@@ -169,50 +169,6 @@ async fn get_messages(
     Ok(Json(msgs))
 }
 
-// -- Files --
-
-async fn upload_file(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    mut multipart: Multipart,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let c = claims(&headers, &state)?;
-    let field = multipart
-        .next_field()
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::ValidationFailed, format!("multipart: {e}")))?
-        .ok_or_else(|| ApiError::new(ErrorCode::ValidationFailed, "No file provided"))?;
-    let filename = field.file_name().unwrap_or("upload").to_string();
-    let data = field
-        .bytes()
-        .await
-        .map_err(|e| ApiError::new(ErrorCode::ValidationFailed, format!("read: {e}")))?;
-    let file_id = crate::file_store::save_upload(&state, &c.sub, &filename, &data).await?;
-    Ok(Json(serde_json::json!({
-        "file_id": file_id,
-        "file_name": filename,
-    })))
-}
-
-async fn download_file(
-    headers: HeaderMap,
-    State(state): State<Arc<AppState>>,
-    Path(file_id): Path<String>,
-) -> Result<Response<Body>, ApiError> {
-    let c = claims(&headers, &state)?;
-    let (data, filename) = crate::file_store::load_file(&state, &c.sub, &file_id).await?;
-    let mime = plexus_common::mime::detect_mime_from_extension(&filename);
-    Ok(Response::builder()
-        .header("Content-Type", mime)
-        .header(
-            "Content-Disposition",
-            format!("attachment; filename=\"{filename}\""),
-        )
-        .header("X-Content-Type-Options", "nosniff")
-        .body(Body::from(data))
-        .unwrap())
-}
-
 // -- Workspace Upload --
 
 #[derive(serde::Serialize)]
@@ -493,8 +449,6 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{session_id}", delete(delete_session))
         .route("/api/sessions/{session_id}/messages", get(get_messages))
-        .route("/api/files", post(upload_file))
-        .route("/api/files/{file_id}", get(download_file))
         .route("/api/workspace/quota", get(workspace_quota))
         .route("/api/workspace/tree", get(workspace_tree))
         .route(
