@@ -43,9 +43,7 @@ pub async fn dispatch_file_tool(
     }
     match device_name.as_deref() {
         Some("server") => run_on_server(state, user_id, tool_name, args).await,
-        Some(d) => {
-            crate::tools_registry::route_to_device(state, user_id, d, tool_name, args).await
-        }
+        Some(d) => crate::tools_registry::route_to_device(state, user_id, d, tool_name, args).await,
         None => ToolExecutionResult {
             request_id: String::new(),
             exit_code: 1,
@@ -88,7 +86,10 @@ mod tests {
     fn is_file_tool_rejects_non_file_tools() {
         assert!(!is_file_tool("shell"), "shell must not be a file tool");
         assert!(!is_file_tool("message"), "message must not be a file tool");
-        assert!(!is_file_tool("web_fetch"), "web_fetch must not be a file tool");
+        assert!(
+            !is_file_tool("web_fetch"),
+            "web_fetch must not be a file tool"
+        );
         assert!(!is_file_tool("cron"), "cron must not be a file tool");
         // File tools must be recognized.
         assert!(is_file_tool("read_file"));

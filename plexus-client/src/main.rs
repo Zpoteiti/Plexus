@@ -7,6 +7,7 @@ mod mcp;
 mod sandbox;
 mod tools;
 
+use base64::Engine;
 use connection::{WsSink, recv_message, send_message};
 use heartbeat::{ack_heartbeat, spawn_heartbeat};
 use plexus_common::consts::DEVICE_TOKEN_PREFIX;
@@ -15,7 +16,6 @@ use plexus_common::protocol::{ClientToServer, ServerToClient, ToolExecutionResul
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use tokio::sync::{Mutex, RwLock};
-use base64::Engine;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -273,10 +273,12 @@ async fn message_loop(
                     let cfg = config.read().await;
                     let ack_err = match tools::helpers::sanitize_path(&destination, &cfg, true) {
                         Ok(resolved) => {
-                            match base64::engine::general_purpose::STANDARD.decode(&content_base64) {
+                            match base64::engine::general_purpose::STANDARD.decode(&content_base64)
+                            {
                                 Ok(bytes) => {
                                     let mkdir_err = if let Some(parent) = resolved.parent() {
-                                        tokio::fs::create_dir_all(parent).await
+                                        tokio::fs::create_dir_all(parent)
+                                            .await
                                             .err()
                                             .map(|e| format!("Create dirs failed: {e}"))
                                     } else {

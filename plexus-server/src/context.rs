@@ -98,7 +98,10 @@ pub async fn build_user_content(
         let path = path.to_string();
         let state = state.clone();
         async move {
-            state.workspace_fs.read(&uid, &path).await
+            state
+                .workspace_fs
+                .read(&uid, &path)
+                .await
                 .map_err(|e| format!("{e}"))
         }
     })
@@ -361,7 +364,8 @@ pub async fn build_context(
             // Attachments
             s += "## Attachments\n";
             s += "Files may appear as [Attachment: name → /api/workspace/files/<path>]. They live in\n";
-            s += "the user's workspace — use `read_file(device=\"server\", path=...)` to inspect.\n";
+            s +=
+                "the user's workspace — use `read_file(device=\"server\", path=...)` to inspect.\n";
             s += "To operate on one from a client device, use `file_transfer` to move it there,\n";
             s += "then use client tools (shell, read_file, etc.). Choose the action based on\n";
             s += "filename and the user's intent.\n\n";
@@ -432,8 +436,8 @@ fn render_device_status(devices: &[DeviceStatusEntry]) -> String {
     if devices.is_empty() {
         return "## Your targets\n\n(no devices registered)\n\n".to_string();
     }
-    let mut out = "## Your targets\n\n### server\nworkspace_root: (user's workspace root)\n\n"
-        .to_string();
+    let mut out =
+        "## Your targets\n\n### server\nworkspace_root: (user's workspace root)\n\n".to_string();
     for d in devices {
         let ssrf = {
             let arr = d.ssrf_whitelist.as_array();

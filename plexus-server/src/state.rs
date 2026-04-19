@@ -228,15 +228,11 @@ impl AppState {
             rate_limiter: Default::default(),
             rate_limit_config: std::sync::Arc::new(RwLock::new(0)),
             default_soul: std::sync::Arc::new(RwLock::new(None)),
-            dream_phase1_prompt: Arc::from(
-                include_str!("../templates/prompts/dream_phase1.md"),
-            ),
-            dream_phase2_prompt: Arc::from(
-                include_str!("../templates/prompts/dream_phase2.md"),
-            ),
-            heartbeat_phase1_prompt: Arc::from(
-                include_str!("../templates/prompts/heartbeat_phase1.md"),
-            ),
+            dream_phase1_prompt: Arc::from(include_str!("../templates/prompts/dream_phase1.md")),
+            dream_phase2_prompt: Arc::from(include_str!("../templates/prompts/dream_phase2.md")),
+            heartbeat_phase1_prompt: Arc::from(include_str!(
+                "../templates/prompts/heartbeat_phase1.md"
+            )),
             sessions: Default::default(),
             web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
             http_client: reqwest::Client::new(),
@@ -280,15 +276,15 @@ impl AppState {
             rate_limiter: Default::default(),
             rate_limit_config: std::sync::Arc::new(RwLock::new(0)),
             default_soul: std::sync::Arc::new(RwLock::new(None)),
-            dream_phase1_prompt: std::sync::Arc::from(
-                include_str!("../templates/prompts/dream_phase1.md"),
-            ),
-            dream_phase2_prompt: std::sync::Arc::from(
-                include_str!("../templates/prompts/dream_phase2.md"),
-            ),
-            heartbeat_phase1_prompt: std::sync::Arc::from(
-                include_str!("../templates/prompts/heartbeat_phase1.md"),
-            ),
+            dream_phase1_prompt: std::sync::Arc::from(include_str!(
+                "../templates/prompts/dream_phase1.md"
+            )),
+            dream_phase2_prompt: std::sync::Arc::from(include_str!(
+                "../templates/prompts/dream_phase2.md"
+            )),
+            heartbeat_phase1_prompt: std::sync::Arc::from(include_str!(
+                "../templates/prompts/heartbeat_phase1.md"
+            )),
             sessions: Default::default(),
             web_fetch_semaphore: std::sync::Arc::new(Semaphore::new(1)),
             http_client: reqwest::Client::new(),

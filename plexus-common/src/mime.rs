@@ -107,7 +107,10 @@ mod tests {
             detect_mime_from_extension("archive.tar.gz"),
             "application/gzip"
         );
-        assert_eq!(detect_mime_from_extension("archive.tgz"), "application/gzip");
+        assert_eq!(
+            detect_mime_from_extension("archive.tgz"),
+            "application/gzip"
+        );
         assert_eq!(detect_mime_from_extension("foo.zip"), "application/zip");
 
         // From api.rs — code/source types
@@ -168,7 +171,10 @@ mod tests {
     #[test]
     fn dotless_input() {
         // Bare extension tokens are NOT extensions — default.
-        assert_eq!(detect_mime_from_extension("png"), "application/octet-stream");
+        assert_eq!(
+            detect_mime_from_extension("png"),
+            "application/octet-stream"
+        );
         assert_eq!(
             detect_mime_from_extension("README"),
             "application/octet-stream"

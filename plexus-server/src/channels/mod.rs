@@ -12,7 +12,13 @@ pub mod telegram;
 pub(crate) fn safe_attachment_filename(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
-        .map(|c| if c == '/' || c == '\\' || c == '\0' { '_' } else { c })
+        .map(|c| {
+            if c == '/' || c == '\\' || c == '\0' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     match cleaned.as_str() {
         "" | "." | ".." => "attachment".into(),

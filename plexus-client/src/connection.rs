@@ -47,7 +47,10 @@ pub async fn recv_message(stream: &mut WsStream) -> Result<ServerToClient, Plexu
                 ));
             }
             None => {
-                return Err(PlexusError::new(ErrorCode::ConnectionFailed, "stream ended"));
+                return Err(PlexusError::new(
+                    ErrorCode::ConnectionFailed,
+                    "stream ended",
+                ));
             }
             _ => continue,
         }

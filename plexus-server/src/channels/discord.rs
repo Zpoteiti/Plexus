@@ -322,7 +322,12 @@ impl EventHandler for DiscordHandler {
             };
             let safe_name = super::safe_attachment_filename(&att.filename);
             let rel = format!(".attachments/discord-{}/{}", msg.id, safe_name);
-            match self.state.workspace_fs.write(&self.plexus_user_id, &rel, &bytes).await {
+            match self
+                .state
+                .workspace_fs
+                .write(&self.plexus_user_id, &rel, &bytes)
+                .await
+            {
                 Ok(()) => media_urls.push(rel),
                 Err(e) => {
                     warn!("discord attachment save failed ({}): {}", att.filename, e);

@@ -1,7 +1,9 @@
 //! Shared tool helpers: path sanitization, output truncation, ignored dirs.
 
 use crate::config::ClientConfig;
-use plexus_common::consts::{MAX_TOOL_OUTPUT_CHARS, TOOL_OUTPUT_HEAD_CHARS, TOOL_OUTPUT_TAIL_CHARS};
+use plexus_common::consts::{
+    MAX_TOOL_OUTPUT_CHARS, TOOL_OUTPUT_HEAD_CHARS, TOOL_OUTPUT_TAIL_CHARS,
+};
 use plexus_common::protocol::FsPolicy;
 use std::path::{Path, PathBuf};
 

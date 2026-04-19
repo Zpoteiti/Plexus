@@ -141,8 +141,7 @@ mod tests {
     #[test]
     fn test_merge_workspace_path_changed() {
         let mut c = cfg();
-        let (mcp, wp) =
-            c.merge_update(None, None, Some("/home/u/new_ws".into()), None, None);
+        let (mcp, wp) = c.merge_update(None, None, Some("/home/u/new_ws".into()), None, None);
         assert!(!mcp);
         assert!(wp);
         assert_eq!(c.workspace, PathBuf::from("/home/u/new_ws"));

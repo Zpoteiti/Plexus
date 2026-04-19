@@ -90,9 +90,7 @@ pub async fn message_tool(state: &Arc<AppState>, ctx: &ToolContext, args: &Value
                     Err(WorkspaceError::Traversal(_)) => {
                         return (1, "Path escapes user workspace".into());
                     }
-                    Err(WorkspaceError::Io(e))
-                        if e.kind() == std::io::ErrorKind::NotFound =>
-                    {
+                    Err(WorkspaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                         return (1, format!("File not found: {path}"));
                     }
                     Err(e) => return (1, format!("Resolve error on {path}: {e}")),

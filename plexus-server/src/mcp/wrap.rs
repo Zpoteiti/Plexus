@@ -12,11 +12,7 @@ use serde_json::{Value, json};
 
 /// Wrap a raw MCP tool schema. Output shape: one OpenAI-style function schema
 /// with `name = "mcp_{server}_{tool}"` + `device_name` in parameters.
-pub fn wrap_mcp_tool(
-    mcp_server_name: &str,
-    raw_schema: &Value,
-    install_sites: &[String],
-) -> Value {
+pub fn wrap_mcp_tool(mcp_server_name: &str, raw_schema: &Value, install_sites: &[String]) -> Value {
     let tool_name = raw_schema
         .get("name")
         .and_then(|n| n.as_str())

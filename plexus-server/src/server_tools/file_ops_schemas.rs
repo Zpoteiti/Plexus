@@ -139,4 +139,3 @@ pub fn grep_schema() -> Value {
         }
     })
 }
-

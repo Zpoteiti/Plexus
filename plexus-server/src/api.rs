@@ -178,7 +178,10 @@ pub async fn workspace_upload_save_one(
     let rel = format!("uploads/{date}-{hash}-{safe_name}");
 
     let outcome = match state.workspace_fs.write(user_id, &rel, &bytes).await {
-        Ok(()) => UploadOutcome::Success(Uploaded { path: rel, size_bytes: size }),
+        Ok(()) => UploadOutcome::Success(Uploaded {
+            path: rel,
+            size_bytes: size,
+        }),
         Err(WorkspaceError::UploadTooLarge { .. }) => UploadOutcome::Error(UploadError::TooLarge),
         Err(WorkspaceError::SoftLocked) => {
             let snap = state.workspace_fs.quota(user_id);
@@ -187,7 +190,10 @@ pub async fn workspace_upload_save_one(
         }
         Err(e) => UploadOutcome::Error(UploadError::Io(format!("{e}"))),
     };
-    WorkspaceUploadResult { filename: original_filename.to_string(), outcome }
+    WorkspaceUploadResult {
+        filename: original_filename.to_string(),
+        outcome,
+    }
 }
 
 async fn workspace_upload(
@@ -206,7 +212,8 @@ async fn workspace_upload(
         let bytes = field.bytes().await.map_err(|e| {
             ApiError::new(ErrorCode::ValidationFailed, format!("multipart read: {e}"))
         })?;
-        results.push(workspace_upload_save_one(&state, &claims.sub, &filename, bytes.to_vec()).await);
+        results
+            .push(workspace_upload_save_one(&state, &claims.sub, &filename, bytes.to_vec()).await);
     }
     Ok(Json(results))
 }
@@ -275,19 +282,32 @@ async fn workspace_file_get(
     axum::extract::Path(path): axum::extract::Path<String>,
 ) -> Result<Response<Body>, ApiError> {
     let c = claims(&headers, &state)?;
-    let stat = state.workspace_fs.stat(&c.sub, &path).await.map_err(map_ws_err)?;
-    let stream = state.workspace_fs.read_stream(&c.sub, &path).await.map_err(map_ws_err)?;
+    let stat = state
+        .workspace_fs
+        .stat(&c.sub, &path)
+        .await
+        .map_err(map_ws_err)?;
+    let stream = state
+        .workspace_fs
+        .read_stream(&c.sub, &path)
+        .await
+        .map_err(map_ws_err)?;
     let body = Body::from_stream(stream);
     let mut resp = Response::new(body);
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         stat.mime.parse().unwrap_or_else(|_| {
-            "application/octet-stream".parse().expect("static str parses")
+            "application/octet-stream"
+                .parse()
+                .expect("static str parses")
         }),
     );
     resp.headers_mut().insert(
         axum::http::header::CONTENT_LENGTH,
-        stat.size.to_string().parse().expect("u64 parses as header value"),
+        stat.size
+            .to_string()
+            .parse()
+            .expect("u64 parses as header value"),
     );
     resp.headers_mut().insert(
         "X-Content-Type-Options",
@@ -303,7 +323,11 @@ async fn workspace_file_put(
     body: axum::body::Bytes,
 ) -> Result<StatusCode, ApiError> {
     let c = claims(&headers, &state)?;
-    state.workspace_fs.write(&c.sub, &path, &body).await.map_err(map_ws_err)?;
+    state
+        .workspace_fs
+        .write(&c.sub, &path, &body)
+        .await
+        .map_err(map_ws_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -322,7 +346,11 @@ async fn workspace_file_delete(
     Query(q): Query<DeleteQuery>,
 ) -> Result<StatusCode, ApiError> {
     let c = claims(&headers, &state)?;
-    state.workspace_fs.delete_path(&c.sub, &path, q.recursive).await.map_err(map_ws_err)?;
+    state
+        .workspace_fs
+        .delete_path(&c.sub, &path, q.recursive)
+        .await
+        .map_err(map_ws_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -392,7 +420,6 @@ async fn delete_self(
     Ok(Json(serde_json::json!({ "message": "Account deleted" })))
 }
 
-
 pub fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/user/profile", get(get_profile))
@@ -438,8 +465,8 @@ mod tests {
             .unwrap();
 
         let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 1024 * 1024);
-        let result = workspace_upload_save_one(&state, "alice", "photo.jpg", b"fakedata".to_vec())
-            .await;
+        let result =
+            workspace_upload_save_one(&state, "alice", "photo.jpg", b"fakedata".to_vec()).await;
 
         let u = match result.outcome {
             UploadOutcome::Success(u) => u,

@@ -74,7 +74,10 @@ pub async fn file_transfer(state: &Arc<AppState>, user_id: &str, args: &Value) -
 }
 
 /// Map WorkspaceError to a user-facing string.
-fn workspace_err_to_string(e: plexus_common::errors::workspace::WorkspaceError, path: &str) -> String {
+fn workspace_err_to_string(
+    e: plexus_common::errors::workspace::WorkspaceError,
+    path: &str,
+) -> String {
     match e {
         plexus_common::errors::workspace::WorkspaceError::Traversal(_) => {
             "Path escapes user workspace".to_string()
@@ -104,9 +107,7 @@ where
     for attempt in 0..3u32 {
         match f().await {
             Ok(v) => return Ok(v),
-            Err(e) if attempt == 2 => {
-                return Err(format!("{label} failed after 3 attempts: {e}"))
-            }
+            Err(e) if attempt == 2 => return Err(format!("{label} failed after 3 attempts: {e}")),
             Err(_) => tokio::time::sleep(delay).await,
         }
         delay *= 2;

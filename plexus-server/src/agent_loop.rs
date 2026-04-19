@@ -299,7 +299,10 @@ async fn handle_event(
     // Large message conversion: >4K chars → save full to workspace, inline first 4K
     let content = if event.content.len() > USER_MESSAGE_MAX_CHARS {
         let rel = format!(".attachments/large_messages/{}.txt", uuid::Uuid::new_v4());
-        state.workspace_fs.write(user_id, &rel, event.content.as_bytes()).await
+        state
+            .workspace_fs
+            .write(user_id, &rel, event.content.as_bytes())
+            .await
             .map_err(|e| format!("Save large message: {e}"))?;
         format!(
             "{}\n\n[Full message saved as file: /api/workspace/files/{rel}]",

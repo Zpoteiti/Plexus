@@ -103,14 +103,14 @@ impl WorkspaceFs {
                     .to_path_buf();
             }
             let canonical_ancestor = tokio::fs::canonicalize(&ancestor).await?;
-            let user_root_canonical =
-                tokio::fs::canonicalize(self.root.join(user_id)).await?;
+            let user_root_canonical = tokio::fs::canonicalize(self.root.join(user_id)).await?;
             if !canonical_ancestor.starts_with(&user_root_canonical) {
                 return Err(WorkspaceError::Traversal(path.into()));
             }
             let mut result = canonical_ancestor;
             for component in tail.into_iter().rev() {
-                if component == std::ffi::OsStr::new("..") || component == std::ffi::OsStr::new(".") {
+                if component == std::ffi::OsStr::new("..") || component == std::ffi::OsStr::new(".")
+                {
                     return Err(WorkspaceError::Traversal(path.into()));
                 }
                 result.push(component);
@@ -145,8 +145,7 @@ impl WorkspaceFs {
                 // A missing file or escape via non-existent path — treat as IO.
                 WorkspaceError::Io(e)
             })?;
-            let user_root_canonical =
-                tokio::fs::canonicalize(self.root.join(user_id)).await?;
+            let user_root_canonical = tokio::fs::canonicalize(self.root.join(user_id)).await?;
             if !canonical.starts_with(&user_root_canonical) {
                 Err(WorkspaceError::Traversal(path.into()))
             } else {
@@ -196,10 +195,8 @@ impl WorkspaceFs {
         let meta = tokio::fs::metadata(&resolved).await?;
         let size = meta.len();
         let mtime = meta.modified()?;
-        let mime = plexus_common::mime::detect_mime_from_extension(
-            resolved.to_str().unwrap_or(""),
-        )
-        .to_owned();
+        let mime = plexus_common::mime::detect_mime_from_extension(resolved.to_str().unwrap_or(""))
+            .to_owned();
         Ok(FileStat {
             path: path.to_owned(),
             size,
@@ -283,9 +280,7 @@ impl WorkspaceFs {
                 crate::workspace::quota::QuotaError::UploadTooLarge(actual, limit) => {
                     WorkspaceError::UploadTooLarge { actual, limit }
                 }
-                crate::workspace::quota::QuotaError::SoftLocked(_, _) => {
-                    WorkspaceError::SoftLocked
-                }
+                crate::workspace::quota::QuotaError::SoftLocked(_, _) => WorkspaceError::SoftLocked,
             })?;
 
         let mut file = match tokio::fs::File::create(&resolved).await {
@@ -385,9 +380,7 @@ impl WorkspaceFs {
                     // Apply TTL filter if requested.
                     if let Some(dur) = older_than {
                         let mtime = entry_meta.modified()?;
-                        let age = SystemTime::now()
-                            .duration_since(mtime)
-                            .unwrap_or_default();
+                        let age = SystemTime::now().duration_since(mtime).unwrap_or_default();
                         if age < dur {
                             continue; // file is too recent — skip
                         }
@@ -486,11 +479,7 @@ impl WorkspaceFs {
 
     // ── Directory / search ────────────────────────────────────────────────────
 
-    pub async fn list(
-        &self,
-        user_id: &str,
-        path: &str,
-    ) -> Result<Vec<DirEntry>, WorkspaceError> {
+    pub async fn list(&self, user_id: &str, path: &str) -> Result<Vec<DirEntry>, WorkspaceError> {
         let resolved = self.resolve_path(user_id, path).await?;
 
         let meta = tokio::fs::metadata(&resolved).await?;
@@ -705,16 +694,18 @@ fn new_for_test_with_quota(root: PathBuf, quota_bytes: u64) -> WorkspaceFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
     #[cfg(unix)]
     use filetime;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn read_relative_path_succeeds() {
         let tmp = tempdir().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("hello.txt"), b"hi").await.unwrap();
+        tokio::fs::write(user_dir.join("hello.txt"), b"hi")
+            .await
+            .unwrap();
 
         let fs = new_for_test(tmp.path().to_path_buf());
         let bytes = fs.read("alice", "hello.txt").await.unwrap();
@@ -726,7 +717,9 @@ mod tests {
         let tmp = tempdir().unwrap();
         let user_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&user_dir).await.unwrap();
-        tokio::fs::write(user_dir.join("hello.txt"), b"hi").await.unwrap();
+        tokio::fs::write(user_dir.join("hello.txt"), b"hi")
+            .await
+            .unwrap();
 
         let root = tmp.path().to_str().unwrap().to_string();
         let fs = new_for_test(tmp.path().to_path_buf());
@@ -742,7 +735,9 @@ mod tests {
         tokio::fs::create_dir_all(&alice_dir).await.unwrap();
         let bob_dir = tmp.path().join("bob");
         tokio::fs::create_dir_all(&bob_dir).await.unwrap();
-        tokio::fs::write(bob_dir.join("secret"), b"secrets").await.unwrap();
+        tokio::fs::write(bob_dir.join("secret"), b"secrets")
+            .await
+            .unwrap();
 
         let fs = new_for_test(tmp.path().to_path_buf());
         let result = fs.read("alice", "../bob/secret").await;
@@ -755,7 +750,9 @@ mod tests {
         let tmp = tempdir().unwrap();
         let alice_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&alice_dir).await.unwrap();
-        tokio::fs::symlink("/etc/passwd", alice_dir.join("pw")).await.unwrap();
+        tokio::fs::symlink("/etc/passwd", alice_dir.join("pw"))
+            .await
+            .unwrap();
 
         let fs = new_for_test(tmp.path().to_path_buf());
         let result = fs.read("alice", "pw").await;
@@ -949,8 +946,12 @@ mod tests {
         let tmp = tempdir().unwrap();
         let alice_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&alice_dir).await.unwrap();
-        tokio::fs::write(alice_dir.join("a.txt"), b"hello").await.unwrap();
-        tokio::fs::create_dir_all(alice_dir.join("sub")).await.unwrap();
+        tokio::fs::write(alice_dir.join("a.txt"), b"hello")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(alice_dir.join("sub"))
+            .await
+            .unwrap();
 
         let fs = new_for_test(tmp.path().to_path_buf());
         let mut entries = fs.list("alice", ".").await.unwrap();
@@ -969,18 +970,35 @@ mod tests {
     async fn glob_matches_extension_pattern() {
         let tmp = tempdir().unwrap();
         let alice_dir = tmp.path().join("alice");
-        tokio::fs::create_dir_all(alice_dir.join("nested")).await.unwrap();
-        tokio::fs::write(alice_dir.join("a.rs"), b"fn a() {}").await.unwrap();
-        tokio::fs::write(alice_dir.join("b.rs"), b"fn b() {}").await.unwrap();
-        tokio::fs::write(alice_dir.join("c.py"), b"def c(): pass").await.unwrap();
-        tokio::fs::write(alice_dir.join("nested/d.rs"), b"fn d() {}").await.unwrap();
+        tokio::fs::create_dir_all(alice_dir.join("nested"))
+            .await
+            .unwrap();
+        tokio::fs::write(alice_dir.join("a.rs"), b"fn a() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(alice_dir.join("b.rs"), b"fn b() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(alice_dir.join("c.py"), b"def c(): pass")
+            .await
+            .unwrap();
+        tokio::fs::write(alice_dir.join("nested/d.rs"), b"fn d() {}")
+            .await
+            .unwrap();
 
         let fs = new_for_test(tmp.path().to_path_buf());
         let results = fs.glob("alice", "**/*.rs", "").await.unwrap();
 
-        assert_eq!(results.len(), 3, "expected exactly 3 .rs files, got: {results:?}");
+        assert_eq!(
+            results.len(),
+            3,
+            "expected exactly 3 .rs files, got: {results:?}"
+        );
         let set: std::collections::HashSet<&str> = results.iter().map(|s| s.as_str()).collect();
-        assert!(set.iter().all(|p| p.ends_with(".rs")), "all paths must end in .rs");
+        assert!(
+            set.iter().all(|p| p.ends_with(".rs")),
+            "all paths must end in .rs"
+        );
     }
 
     #[tokio::test]
@@ -988,13 +1006,21 @@ mod tests {
         let tmp = tempdir().unwrap();
         let src_dir = tmp.path().join("alice/project/src");
         tokio::fs::create_dir_all(&src_dir).await.unwrap();
-        tokio::fs::write(src_dir.join("lib.rs"), b"pub fn lib() {}").await.unwrap();
-        tokio::fs::write(src_dir.join("main.rs"), b"fn main() {}").await.unwrap();
+        tokio::fs::write(src_dir.join("lib.rs"), b"pub fn lib() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(src_dir.join("main.rs"), b"fn main() {}")
+            .await
+            .unwrap();
 
         let fs = new_for_test(tmp.path().to_path_buf());
         let results = fs.glob("alice", "**/*.rs", "project/src").await.unwrap();
 
-        assert_eq!(results.len(), 2, "expected exactly 2 .rs files, got: {results:?}");
+        assert_eq!(
+            results.len(),
+            2,
+            "expected exactly 2 .rs files, got: {results:?}"
+        );
         for path in &results {
             assert!(
                 !path.starts_with('/'),
@@ -1008,9 +1034,12 @@ mod tests {
         let tmp = tempdir().unwrap();
         let alice_dir = tmp.path().join("alice");
         tokio::fs::create_dir_all(&alice_dir).await.unwrap();
-        tokio::fs::write(alice_dir.join("doc.txt"), b"one\ntwo three\nTHREE\nfour three")
-            .await
-            .unwrap();
+        tokio::fs::write(
+            alice_dir.join("doc.txt"),
+            b"one\ntwo three\nTHREE\nfour three",
+        )
+        .await
+        .unwrap();
 
         let fs = new_for_test(tmp.path().to_path_buf());
         let hits = fs
@@ -1018,7 +1047,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(hits.len(), 2, "expected 2 case-sensitive hits, got: {hits:?}");
+        assert_eq!(
+            hits.len(),
+            2,
+            "expected 2 case-sensitive hits, got: {hits:?}"
+        );
         let line_numbers: Vec<u64> = hits.iter().map(|h| h.line_number).collect();
         assert!(line_numbers.contains(&2), "line 2 must be a hit");
         assert!(line_numbers.contains(&4), "line 4 must be a hit");
@@ -1037,7 +1070,9 @@ mod tests {
     async fn write_overwrite_adjusts_quota_by_delta() {
         let dir = tempdir().unwrap();
         let fs = new_for_test(dir.path().to_path_buf());
-        tokio::fs::create_dir_all(dir.path().join("alice")).await.unwrap();
+        tokio::fs::create_dir_all(dir.path().join("alice"))
+            .await
+            .unwrap();
 
         fs.write("alice", "notes.md", &[0u8; 100]).await.unwrap();
         assert_eq!(fs.quota("alice").used_bytes, 100);
@@ -1055,9 +1090,15 @@ mod tests {
     async fn delete_path_removes_directory_recursively_and_frees_quota() {
         let dir = tempdir().unwrap();
         let fs = new_for_test(dir.path().to_path_buf());
-        tokio::fs::create_dir_all(dir.path().join("alice/project/sub")).await.unwrap();
-        fs.write("alice", "project/a.txt", &[0u8; 10]).await.unwrap();
-        fs.write("alice", "project/sub/b.txt", &[0u8; 20]).await.unwrap();
+        tokio::fs::create_dir_all(dir.path().join("alice/project/sub"))
+            .await
+            .unwrap();
+        fs.write("alice", "project/a.txt", &[0u8; 10])
+            .await
+            .unwrap();
+        fs.write("alice", "project/sub/b.txt", &[0u8; 20])
+            .await
+            .unwrap();
         assert_eq!(fs.quota("alice").used_bytes, 30);
 
         fs.delete_path("alice", "project", true).await.unwrap();
@@ -1069,7 +1110,9 @@ mod tests {
     async fn delete_path_refuses_directory_without_recursive_flag() {
         let dir = tempdir().unwrap();
         let fs = new_for_test(dir.path().to_path_buf());
-        tokio::fs::create_dir_all(dir.path().join("alice/subdir")).await.unwrap();
+        tokio::fs::create_dir_all(dir.path().join("alice/subdir"))
+            .await
+            .unwrap();
 
         let r = fs.delete_path("alice", "subdir", false).await;
         assert!(r.is_err());
