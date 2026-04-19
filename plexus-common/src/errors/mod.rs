@@ -13,12 +13,14 @@ use std::fmt;
 
 pub mod auth;
 pub mod mcp;
+pub mod network;
 pub mod protocol;
 pub mod tool;
 pub mod workspace;
 
 pub use auth::AuthError;
 pub use mcp::McpError;
+pub use network::NetworkError;
 pub use protocol::ProtocolError;
 pub use tool::ToolError;
 pub use workspace::WorkspaceError;
