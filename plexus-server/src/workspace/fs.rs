@@ -222,20 +222,37 @@ impl WorkspaceFs {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        self.quota
-            .check_and_reserve_upload(user_id, bytes.len() as u64)
-            .map_err(|e| match e {
-                crate::workspace::quota::QuotaError::UploadTooLarge(actual, limit) => {
-                    WorkspaceError::UploadTooLarge { actual, limit }
-                }
-                crate::workspace::quota::QuotaError::SoftLocked(_, _) => {
-                    WorkspaceError::SoftLocked
-                }
-            })?;
+        // Delta-aware quota: only reserve the *net increase* in bytes.
+        let existing = tokio::fs::metadata(&resolved)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let new_size = bytes.len() as u64;
+        let delta = new_size.saturating_sub(existing);
+
+        if delta > 0 {
+            self.quota
+                .check_and_reserve_upload(user_id, delta)
+                .map_err(|e| match e {
+                    crate::workspace::quota::QuotaError::UploadTooLarge(actual, limit) => {
+                        WorkspaceError::UploadTooLarge { actual, limit }
+                    }
+                    crate::workspace::quota::QuotaError::SoftLocked(_, _) => {
+                        WorkspaceError::SoftLocked
+                    }
+                })?;
+        }
 
         if let Err(io_err) = tokio::fs::write(&resolved, bytes).await {
-            self.quota.release(user_id, bytes.len() as u64);
+            if delta > 0 {
+                self.quota.release(user_id, delta);
+            }
             return Err(WorkspaceError::Io(io_err));
+        }
+
+        // If we shrank the file, release the reclaimed bytes from quota.
+        if new_size < existing {
+            self.quota.record_delete(user_id, existing - new_size);
         }
 
         if crate::workspace::paths::is_under_skills_dir(&resolved, &self.root, user_id) {
@@ -415,6 +432,54 @@ impl WorkspaceFs {
         }
 
         Ok(total_reclaimed)
+    }
+
+    /// Delete a file or directory at `path`.
+    ///
+    /// - File: delegates to the same logic as `delete`.
+    /// - Directory + `recursive=true`: removes all contents, frees quota, then
+    ///   removes the directory tree.
+    /// - Directory + `recursive=false`: returns an `Io` error.
+    pub async fn delete_path(
+        &self,
+        user_id: &str,
+        path: &str,
+        recursive: bool,
+    ) -> Result<(), WorkspaceError> {
+        let resolved = self.resolve_path(user_id, path).await?;
+        let meta = tokio::fs::metadata(&resolved).await?;
+
+        if meta.is_file() {
+            // Delegate to the single-file deletion path.
+            let bytes_freed = meta.len();
+            tokio::fs::remove_file(&resolved).await?;
+            self.quota.record_delete(user_id, bytes_freed);
+            if crate::workspace::paths::is_under_skills_dir(&resolved, &self.root, user_id) {
+                self.skills_cache.invalidate(user_id);
+            }
+        } else if meta.is_dir() {
+            if !recursive {
+                return Err(WorkspaceError::Io(std::io::Error::other(
+                    "directory requires recursive",
+                )));
+            }
+            // Walk to sum file sizes before removal, for accurate quota accounting.
+            let freed = crate::workspace::quota::walk_dir_bytes(&resolved)
+                .await
+                .unwrap_or(0);
+            tokio::fs::remove_dir_all(&resolved).await?;
+            if freed > 0 {
+                self.quota.record_delete(user_id, freed);
+            }
+            // Invalidate skills cache if we deleted under the skills dir.
+            if crate::workspace::paths::is_under_skills_dir(&resolved, &self.root, user_id)
+                || resolved == self.root.join(user_id).join("skills")
+            {
+                self.skills_cache.invalidate(user_id);
+            }
+        }
+
+        Ok(())
     }
 
     // ── Directory / search ────────────────────────────────────────────────────
@@ -962,6 +1027,51 @@ mod tests {
                 hit.line_content
             );
         }
+    }
+
+    // ── P3.7 delta-aware write + delete_path tests ───────────────────────────
+
+    #[tokio::test]
+    async fn write_overwrite_adjusts_quota_by_delta() {
+        let dir = tempdir().unwrap();
+        let fs = new_for_test(dir.path().to_path_buf());
+        tokio::fs::create_dir_all(dir.path().join("alice")).await.unwrap();
+
+        fs.write("alice", "notes.md", &[0u8; 100]).await.unwrap();
+        assert_eq!(fs.quota("alice").used_bytes, 100);
+
+        // Shrink: overwrite with 40 bytes → quota should drop to 40.
+        fs.write("alice", "notes.md", &[0u8; 40]).await.unwrap();
+        assert_eq!(fs.quota("alice").used_bytes, 40);
+
+        // Grow: overwrite with 120 bytes → quota should be 120.
+        fs.write("alice", "notes.md", &[0u8; 120]).await.unwrap();
+        assert_eq!(fs.quota("alice").used_bytes, 120);
+    }
+
+    #[tokio::test]
+    async fn delete_path_removes_directory_recursively_and_frees_quota() {
+        let dir = tempdir().unwrap();
+        let fs = new_for_test(dir.path().to_path_buf());
+        tokio::fs::create_dir_all(dir.path().join("alice/project/sub")).await.unwrap();
+        fs.write("alice", "project/a.txt", &[0u8; 10]).await.unwrap();
+        fs.write("alice", "project/sub/b.txt", &[0u8; 20]).await.unwrap();
+        assert_eq!(fs.quota("alice").used_bytes, 30);
+
+        fs.delete_path("alice", "project", true).await.unwrap();
+        assert_eq!(fs.quota("alice").used_bytes, 0);
+        assert!(!dir.path().join("alice/project").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_path_refuses_directory_without_recursive_flag() {
+        let dir = tempdir().unwrap();
+        let fs = new_for_test(dir.path().to_path_buf());
+        tokio::fs::create_dir_all(dir.path().join("alice/subdir")).await.unwrap();
+
+        let r = fs.delete_path("alice", "subdir", false).await;
+        assert!(r.is_err());
+        assert!(dir.path().join("alice/subdir").exists());
     }
 
     #[tokio::test]

@@ -224,16 +224,12 @@ pub struct WorkspaceUploadResult {
 /// Save a single uploaded file under {user_root}/uploads/, using the same
 /// dated-hashed naming convention as the channel adapters' inbound-media path:
 ///   uploads/{YYYY-MM-DD}-{8-char-hash}-{filename}
-///
-/// Quota enforcement happens inside `workspace_file_put_bytes` (reserves the
-/// delta against the existing file, rolls back on write failure). Do NOT
-/// pre-reserve here — that would double-count against the quota.
 pub async fn workspace_upload_save_one(
     state: &AppState,
     user_id: &str,
     original_filename: &str,
     bytes: Vec<u8>,
-) -> Result<WorkspaceUploadResult, crate::workspace::WorkspaceError> {
+) -> Result<WorkspaceUploadResult, plexus_common::errors::workspace::WorkspaceError> {
     let size = bytes.len() as u64;
 
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -249,7 +245,7 @@ pub async fn workspace_upload_save_one(
         .replace("..", "_");
     let rel = format!("uploads/{date}-{hash}-{safe_name}");
 
-    workspace_file_put_bytes(state, user_id, &rel, bytes).await?;
+    state.workspace_fs.write(user_id, &rel, &bytes).await?;
     Ok(WorkspaceUploadResult {
         path: rel,
         size_bytes: size,
@@ -292,13 +288,12 @@ pub struct WorkspaceQuotaResponse {
     pub total_bytes: u64,
 }
 
-/// Pure logic: query the quota cache for `user_id`. No I/O or DB calls.
+/// Pure logic: query the workspace_fs quota for `user_id`. No I/O or DB calls.
 pub fn workspace_quota_handler(state: &AppState, user_id: &str) -> WorkspaceQuotaResponse {
-    let used = state.quota.current_usage(user_id);
-    let total = state.quota.quota_bytes();
+    let snap = state.workspace_fs.quota(user_id);
     WorkspaceQuotaResponse {
-        used_bytes: used,
-        total_bytes: total,
+        used_bytes: snap.used_bytes,
+        total_bytes: snap.limit_bytes,
     }
 }
 
@@ -328,224 +323,86 @@ async fn workspace_tree(
 
 // -- Workspace File --
 
-#[derive(serde::Deserialize)]
-pub struct WorkspaceFileQuery {
-    pub path: String,
-}
-
 /// Testable core: given user_id + rel path, return bytes or an error.
-/// HTTP wrapper below converts the error to StatusCode + JSON body.
+/// Kept for unit tests in this module that read without HTTP plumbing.
 pub async fn workspace_file_get_bytes(
     state: &AppState,
     user_id: &str,
     rel_path: &str,
-) -> Result<Vec<u8>, crate::workspace::WorkspaceError> {
-    let root = std::path::Path::new(&state.config.workspace_root);
-    let resolved = crate::workspace::resolve_user_path(root, user_id, rel_path).await?;
-    let bytes = tokio::fs::read(&resolved)
-        .await
-        .map_err(crate::workspace::WorkspaceError::Io)?;
-    Ok(bytes)
+) -> Result<Vec<u8>, plexus_common::errors::workspace::WorkspaceError> {
+    state.workspace_fs.read(user_id, rel_path).await
+}
+
+/// Map a `WorkspaceError` (from `plexus_common`) to an `ApiError`.
+fn map_ws_err(e: plexus_common::errors::workspace::WorkspaceError) -> ApiError {
+    use plexus_common::errors::workspace::WorkspaceError;
+    match &e {
+        WorkspaceError::Traversal(_) => ApiError::new(ErrorCode::Forbidden, "forbidden"),
+        WorkspaceError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+            ApiError::new(ErrorCode::NotFound, "not found")
+        }
+        WorkspaceError::UploadTooLarge { .. } | WorkspaceError::SoftLocked => {
+            ApiError::new(ErrorCode::ValidationFailed, format!("{e}"))
+        }
+        _ => ApiError::new(ErrorCode::InternalError, format!("{e}")),
+    }
 }
 
 async fn workspace_file_get(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(q): Query<WorkspaceFileQuery>,
+    axum::extract::Path(path): axum::extract::Path<String>,
 ) -> Result<Response<Body>, ApiError> {
-    let claims = claims(&headers, &state)?;
-    let root = std::path::Path::new(&state.config.workspace_root);
-    let resolved = crate::workspace::resolve_user_path(root, &claims.sub, &q.path)
-        .await
-        .map_err(|e| match &e {
-            crate::workspace::WorkspaceError::Traversal(_) => {
-                ApiError::new(ErrorCode::Forbidden, "forbidden")
-            }
-            _ => ApiError::new(ErrorCode::NotFound, "not found"),
-        })?;
-
-    let meta = tokio::fs::metadata(&resolved)
-        .await
-        .map_err(|_| ApiError::new(ErrorCode::NotFound, "not found"))?;
-    let size = meta.len();
-
-    let file = tokio::fs::File::open(&resolved)
-        .await
-        .map_err(|_| ApiError::new(ErrorCode::NotFound, "not found"))?;
-
-    let stream = tokio_util::io::ReaderStream::new(file);
+    let c = claims(&headers, &state)?;
+    let stat = state.workspace_fs.stat(&c.sub, &path).await.map_err(map_ws_err)?;
+    let stream = state.workspace_fs.read_stream(&c.sub, &path).await.map_err(map_ws_err)?;
     let body = Body::from_stream(stream);
-
-    let mime = mime_from_path(&q.path);
     let mut resp = Response::new(body);
-    let resp_headers = resp.headers_mut();
-    resp_headers.insert(
+    resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
-        mime.parse().unwrap_or_else(|_| {
-            "application/octet-stream"
-                .parse()
-                .expect("static str parses")
+        stat.mime.parse().unwrap_or_else(|_| {
+            "application/octet-stream".parse().expect("static str parses")
         }),
     );
-    resp_headers.insert(
+    resp.headers_mut().insert(
         axum::http::header::CONTENT_LENGTH,
-        size.to_string()
-            .parse()
-            .expect("u64 to string always parses as header value"),
+        stat.size.to_string().parse().expect("u64 parses as header value"),
     );
-    resp_headers.insert(
+    resp.headers_mut().insert(
         "X-Content-Type-Options",
         "nosniff".parse().expect("static str parses"),
     );
     Ok(resp)
 }
 
-/// Testable core: write raw bytes to `{workspace_root}/{user_id}/{rel_path}`.
-/// Creates parent dirs. Quota-checked via `check_and_reserve_upload` (delta
-/// against existing file size). Rolls back reservation on write failure.
-pub async fn workspace_file_put_bytes(
-    state: &AppState,
-    user_id: &str,
-    rel_path: &str,
-    bytes: Vec<u8>,
-) -> Result<(), crate::workspace::WorkspaceError> {
-    let root = std::path::Path::new(&state.config.workspace_root);
-    let resolved = crate::workspace::resolve_user_path_for_create(root, user_id, rel_path).await?;
-
-    // Compute delta against existing file (if any), reserve against quota.
-    let existing = tokio::fs::metadata(&resolved)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let new_size = bytes.len() as u64;
-    let delta = new_size.saturating_sub(existing);
-
-    if delta > 0 {
-        state
-            .quota
-            .check_and_reserve_upload(user_id, delta)
-            .map_err(crate::workspace::WorkspaceError::Quota)?;
-    }
-
-    // Create parent dirs.
-    if let Some(parent) = resolved.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-
-    match tokio::fs::write(&resolved, &bytes).await {
-        Ok(()) => {
-            // If we shrunk the file, release the reclaimed bytes.
-            if new_size < existing {
-                state.quota.release(user_id, existing - new_size);
-            }
-            Ok(())
-        }
-        Err(e) => {
-            // Rollback the reservation.
-            if delta > 0 {
-                state.quota.release(user_id, delta);
-            }
-            Err(e.into())
-        }
-    }
-}
-
 async fn workspace_file_put(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(q): Query<WorkspaceFileQuery>,
+    axum::extract::Path(path): axum::extract::Path<String>,
     body: axum::body::Bytes,
 ) -> Result<StatusCode, ApiError> {
-    let claims = claims(&headers, &state)?;
-    workspace_file_put_bytes(&state, &claims.sub, &q.path, body.to_vec())
-        .await
-        .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|e| {
-            use crate::workspace::WorkspaceError;
-            match &e {
-                WorkspaceError::Traversal(_) => ApiError::new(ErrorCode::Forbidden, "forbidden"),
-                WorkspaceError::Quota(_) => {
-                    ApiError::new(ErrorCode::ValidationFailed, format!("{e:?}"))
-                }
-                _ => ApiError::new(ErrorCode::InternalError, format!("{e:?}")),
-            }
-        })
+    let c = claims(&headers, &state)?;
+    state.workspace_fs.write(&c.sub, &path, &body).await.map_err(map_ws_err)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // -- Workspace File Delete --
 
 #[derive(serde::Deserialize)]
-pub struct WorkspaceDeleteQuery {
-    pub path: String,
+pub struct DeleteQuery {
     #[serde(default)]
     pub recursive: bool,
-}
-
-pub async fn workspace_file_delete_path(
-    state: &AppState,
-    user_id: &str,
-    rel_path: &str,
-    recursive: bool,
-) -> Result<(), crate::workspace::WorkspaceError> {
-    let root = std::path::Path::new(&state.config.workspace_root);
-    let resolved = crate::workspace::resolve_user_path(root, user_id, rel_path).await?;
-
-    let meta = tokio::fs::metadata(&resolved).await?;
-
-    if meta.is_dir() {
-        if !recursive {
-            return Err(crate::workspace::WorkspaceError::Io(std::io::Error::other(
-                "directory delete requires recursive=true",
-            )));
-        }
-        // Sum sizes before deletion to release from quota.
-        let freed = dir_size(&resolved).await.unwrap_or(0);
-        tokio::fs::remove_dir_all(&resolved).await?;
-        state.quota.release(user_id, freed);
-    } else {
-        let size = meta.len();
-        tokio::fs::remove_file(&resolved).await?;
-        state.quota.release(user_id, size);
-    }
-    Ok(())
-}
-
-async fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let mut total = 0u64;
-        for entry in walkdir::WalkDir::new(&path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            if entry.file_type().is_file() {
-                if let Ok(m) = entry.metadata() {
-                    total = total.saturating_add(m.len());
-                }
-            }
-        }
-        Ok(total)
-    })
-    .await
-    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
 }
 
 async fn workspace_file_delete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(q): Query<WorkspaceDeleteQuery>,
+    axum::extract::Path(path): axum::extract::Path<String>,
+    Query(q): Query<DeleteQuery>,
 ) -> Result<StatusCode, ApiError> {
-    let claims = claims(&headers, &state)?;
-    workspace_file_delete_path(&state, &claims.sub, &q.path, q.recursive)
-        .await
-        .map(|()| StatusCode::NO_CONTENT)
-        .map_err(|e| {
-            use crate::workspace::WorkspaceError;
-            match &e {
-                WorkspaceError::Traversal(_) => ApiError::new(ErrorCode::Forbidden, "forbidden"),
-                _ => ApiError::new(ErrorCode::ValidationFailed, format!("{e:?}")),
-            }
-        })
+    let c = claims(&headers, &state)?;
+    state.workspace_fs.delete_path(&c.sub, &path, q.recursive).await.map_err(map_ws_err)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // -- Workspace Skills --
@@ -614,23 +471,6 @@ async fn delete_self(
     Ok(Json(serde_json::json!({ "message": "Account deleted" })))
 }
 
-// TODO(cleanup): delete this helper; use plexus_common::mime::detect_mime_from_extension.
-// Removed in P3.7/P4.4.
-fn mime_from_path(p: &str) -> &'static str {
-    let ext = p.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    match ext.as_str() {
-        "md" | "txt" | "log" | "toml" | "rs" | "ts" | "tsx" | "js" | "py" | "yaml" | "yml" => {
-            "text/plain; charset=utf-8"
-        }
-        "json" => "application/json",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        _ => "application/octet-stream",
-    }
-}
 
 pub fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -646,7 +486,7 @@ pub fn api_routes() -> Router<Arc<AppState>> {
         .route("/api/workspace/quota", get(workspace_quota))
         .route("/api/workspace/tree", get(workspace_tree))
         .route(
-            "/api/workspace/file",
+            "/api/workspace/files/{*path}",
             get(workspace_file_get)
                 .put(workspace_file_put)
                 .delete(workspace_file_delete),
@@ -713,64 +553,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_workspace_file_put_writes_bytes_and_updates_quota() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let user_root = tmp.path().join("alice");
-        tokio::fs::create_dir_all(&user_root).await.unwrap();
-
-        let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 1024 * 1024);
-
-        workspace_file_put_bytes(&state, "alice", "notes.md", b"hello".to_vec())
-            .await
-            .unwrap();
-
-        let written = tokio::fs::read(user_root.join("notes.md")).await.unwrap();
-        assert_eq!(written, b"hello");
-        assert_eq!(state.quota.current_usage("alice"), 5);
-    }
-
-    #[tokio::test]
-    async fn test_workspace_file_delete_file_updates_quota() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let user_root = tmp.path().join("alice");
-        tokio::fs::create_dir_all(&user_root).await.unwrap();
-        tokio::fs::write(user_root.join("doomed.txt"), b"goodbye")
-            .await
-            .unwrap();
-
-        let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 1024 * 1024);
-        state.quota.reserve_for_test("alice", 7);
-
-        workspace_file_delete_path(&state, "alice", "doomed.txt", false)
-            .await
-            .unwrap();
-
-        assert!(!user_root.join("doomed.txt").exists());
-        assert_eq!(state.quota.current_usage("alice"), 0);
-    }
-
-    #[tokio::test]
-    async fn test_workspace_file_delete_directory_requires_recursive_flag() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let user_root = tmp.path().join("alice");
-        tokio::fs::create_dir_all(user_root.join("subdir"))
-            .await
-            .unwrap();
-
-        let state = crate::state::AppState::test_minimal(tmp.path());
-        let err = workspace_file_delete_path(&state, "alice", "subdir", false)
-            .await
-            .unwrap_err();
-        assert!(format!("{err:?}").to_lowercase().contains("directory"));
-
-        // With recursive: true, it succeeds.
-        workspace_file_delete_path(&state, "alice", "subdir", true)
-            .await
-            .unwrap();
-        assert!(!user_root.join("subdir").exists());
-    }
-
-    #[tokio::test]
     async fn test_workspace_upload_saves_to_uploads_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
         tokio::fs::create_dir_all(tmp.path().join("alice/uploads"))
@@ -793,30 +575,6 @@ mod tests {
         // File actually exists on disk.
         let full = tmp.path().join("alice").join(&saved.path);
         assert!(full.exists());
-    }
-
-    #[tokio::test]
-    async fn test_workspace_file_put_rejects_quota_overage() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        tokio::fs::create_dir_all(tmp.path().join("alice"))
-            .await
-            .unwrap();
-
-        let state = crate::state::AppState::test_minimal_with_quota(tmp.path(), 10);
-
-        let err = workspace_file_put_bytes(&state, "alice", "big.bin", vec![0; 100])
-            .await
-            .unwrap_err();
-        // Accept whatever variant the actual quota enforcement returns —
-        // the string form just needs to indicate a size/quota problem.
-        let msg = format!("{err:?}").to_lowercase();
-        assert!(
-            msg.contains("quota")
-                || msg.contains("too large")
-                || msg.contains("soft")
-                || msg.contains("cap"),
-            "expected quota-related error; got: {msg}"
-        );
     }
 
     #[tokio::test]
