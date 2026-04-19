@@ -36,19 +36,13 @@ pub enum ErrorCode {
     ValidationFailed,
     InvalidParams,
     ExecutionFailed,
-    DeviceNotFound,
     DeviceOffline,
     ProtocolMismatch,
     InternalError,
-    ToolBlocked,
     ToolTimeout,
-    ToolNotFound,
-    ToolInvalidParams,
     McpConnectionFailed,
-    McpCallFailed,
     ConnectionFailed,
     HandshakeFailed,
-    ChannelError,
 }
 
 impl ErrorCode {
@@ -63,19 +57,13 @@ impl ErrorCode {
             Self::ValidationFailed => "VALIDATION_FAILED",
             Self::InvalidParams => "INVALID_PARAMS",
             Self::ExecutionFailed => "EXECUTION_FAILED",
-            Self::DeviceNotFound => "DEVICE_NOT_FOUND",
             Self::DeviceOffline => "DEVICE_OFFLINE",
             Self::ProtocolMismatch => "PROTOCOL_MISMATCH",
             Self::InternalError => "INTERNAL_ERROR",
-            Self::ToolBlocked => "TOOL_BLOCKED",
             Self::ToolTimeout => "TOOL_TIMEOUT",
-            Self::ToolNotFound => "TOOL_NOT_FOUND",
-            Self::ToolInvalidParams => "TOOL_INVALID_PARAMS",
             Self::McpConnectionFailed => "MCP_CONNECTION_FAILED",
-            Self::McpCallFailed => "MCP_CALL_FAILED",
             Self::ConnectionFailed => "CONNECTION_FAILED",
             Self::HandshakeFailed => "HANDSHAKE_FAILED",
-            Self::ChannelError => "CHANNEL_ERROR",
         }
     }
 
@@ -83,22 +71,13 @@ impl ErrorCode {
         match self {
             Self::AuthFailed | Self::AuthTokenExpired | Self::Unauthorized => 401,
             Self::Forbidden => 403,
-            Self::NotFound | Self::DeviceNotFound | Self::ToolNotFound => 404,
+            Self::NotFound => 404,
             Self::Conflict => 409,
-            Self::ValidationFailed
-            | Self::InvalidParams
-            | Self::ToolInvalidParams
-            | Self::ProtocolMismatch => 400,
+            Self::ValidationFailed | Self::InvalidParams | Self::ProtocolMismatch => 400,
             Self::ToolTimeout => 504,
             Self::DeviceOffline => 503,
-            Self::McpConnectionFailed
-            | Self::McpCallFailed
-            | Self::ConnectionFailed
-            | Self::HandshakeFailed => 502,
-            Self::ExecutionFailed
-            | Self::InternalError
-            | Self::ToolBlocked
-            | Self::ChannelError => 500,
+            Self::McpConnectionFailed | Self::ConnectionFailed | Self::HandshakeFailed => 502,
+            Self::ExecutionFailed | Self::InternalError => 500,
         }
     }
 
@@ -113,19 +92,13 @@ impl ErrorCode {
             "VALIDATION_FAILED" => Some(Self::ValidationFailed),
             "INVALID_PARAMS" => Some(Self::InvalidParams),
             "EXECUTION_FAILED" => Some(Self::ExecutionFailed),
-            "DEVICE_NOT_FOUND" => Some(Self::DeviceNotFound),
             "DEVICE_OFFLINE" => Some(Self::DeviceOffline),
             "PROTOCOL_MISMATCH" => Some(Self::ProtocolMismatch),
             "INTERNAL_ERROR" => Some(Self::InternalError),
-            "TOOL_BLOCKED" => Some(Self::ToolBlocked),
             "TOOL_TIMEOUT" => Some(Self::ToolTimeout),
-            "TOOL_NOT_FOUND" => Some(Self::ToolNotFound),
-            "TOOL_INVALID_PARAMS" => Some(Self::ToolInvalidParams),
             "MCP_CONNECTION_FAILED" => Some(Self::McpConnectionFailed),
-            "MCP_CALL_FAILED" => Some(Self::McpCallFailed),
             "CONNECTION_FAILED" => Some(Self::ConnectionFailed),
             "HANDSHAKE_FAILED" => Some(Self::HandshakeFailed),
-            "CHANNEL_ERROR" => Some(Self::ChannelError),
             _ => None,
         }
     }
@@ -221,7 +194,6 @@ mod tests {
             ErrorCode::InternalError,
             ErrorCode::DeviceOffline,
             ErrorCode::ToolTimeout,
-            ErrorCode::ChannelError,
         ];
         for code in codes {
             let s = code.http_status();
