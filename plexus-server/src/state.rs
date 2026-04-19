@@ -76,6 +76,7 @@ pub struct AppState {
     pub server_mcp: Arc<RwLock<crate::server_mcp::ServerMcpManager>>,
 
     // Gateway WebSocket sink (for outbound delivery)
+    #[allow(clippy::type_complexity)]
     pub gateway_sink: RwLock<
         Option<
             Arc<

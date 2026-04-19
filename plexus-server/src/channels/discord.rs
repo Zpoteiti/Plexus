@@ -127,10 +127,10 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
 
 /// Stop a Discord bot for a user.
 pub async fn stop_bot(user_id: &str) {
-    if let Some(mut handle) = BOT_REGISTRY.write().await.remove(user_id) {
-        if let Some(tx) = handle.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
+    if let Some(mut handle) = BOT_REGISTRY.write().await.remove(user_id)
+        && let Some(tx) = handle.shutdown_tx.take()
+    {
+        let _ = tx.send(());
     }
 }
 
@@ -403,7 +403,7 @@ fn split_message(text: &str, limit: usize) -> Vec<String> {
         // Try to split at newline
         let split_at = remaining[..limit].rfind('\n').unwrap_or(limit);
         chunks.push(remaining[..split_at].to_string());
-        remaining = &remaining[split_at..].trim_start();
+        remaining = remaining[split_at..].trim_start();
     }
     chunks
 }

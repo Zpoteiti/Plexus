@@ -92,21 +92,21 @@ pub async fn write_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (
     // If the new write grows the file, reserve the growth up-front.
     // (This is the only point where the quota check can reject us.)
     let growth = new_size.saturating_sub(old_size);
-    if growth > 0 {
-        if let Err(e) = state.quota.check_and_reserve_upload(user_id, growth) {
-            return (1, format!("Quota: {e}"));
-        }
+    if growth > 0
+        && let Err(e) = state.quota.check_and_reserve_upload(user_id, growth)
+    {
+        return (1, format!("Quota: {e}"));
     }
 
     // Make parent dirs if needed.
-    if let Some(parent) = resolved.parent() {
-        if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            if growth > 0 {
-                // Infallible rollback: release what we reserved.
-                state.quota.record_delete(user_id, growth);
-            }
-            return (1, format!("Create dir: {e}"));
+    if let Some(parent) = resolved.parent()
+        && let Err(e) = tokio::fs::create_dir_all(parent).await
+    {
+        if growth > 0 {
+            // Infallible rollback: release what we reserved.
+            state.quota.record_delete(user_id, growth);
         }
+        return (1, format!("Create dir: {e}"));
     }
 
     // Write.
@@ -218,10 +218,10 @@ pub async fn edit_file(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i
 
     // Net-delta quota accounting (A-8 pattern).
     let growth = new_size.saturating_sub(old_size);
-    if growth > 0 {
-        if let Err(e) = state.quota.check_and_reserve_upload(user_id, growth) {
-            return (1, format!("Quota: {e}"));
-        }
+    if growth > 0
+        && let Err(e) = state.quota.check_and_reserve_upload(user_id, growth)
+    {
+        return (1, format!("Quota: {e}"));
     }
 
     if let Err(e) = tokio::fs::write(&resolved, &updated).await {

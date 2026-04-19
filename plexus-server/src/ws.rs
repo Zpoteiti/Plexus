@@ -193,10 +193,10 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
 }
 
 fn resolve_pending(state: &AppState, device_key: &str, result: ToolExecutionResult) {
-    if let Some(device_pending) = state.pending.get(device_key) {
-        if let Some((_, sender)) = device_pending.remove(&result.request_id) {
-            let _ = sender.send(result);
-        }
+    if let Some(device_pending) = state.pending.get(device_key)
+        && let Some((_, sender)) = device_pending.remove(&result.request_id)
+    {
+        let _ = sender.send(result);
     }
 }
 

@@ -315,10 +315,11 @@ pub async fn build_context(
         .unwrap_or_default();
     let soul = if !soul_from_file.trim().is_empty() {
         soul_from_file.as_str()
-    } else if let Some(s) = default_soul.as_deref().filter(|s| !s.is_empty()) {
-        s
     } else {
-        "You are PLEXUS, a distributed AI agent."
+        default_soul
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("You are PLEXUS, a distributed AI agent.")
     };
 
     let memory = tokio::fs::read_to_string(user_root.join("MEMORY.md"))
@@ -397,7 +398,7 @@ pub async fn build_context(
             // Deliberately OMITS channel identity, device list, and current time —
             // dream is an autonomous server-side pass, not a user-facing reply.
             let phase2 = state.dream_phase2_prompt.as_ref();
-            assemble_dream_system_prompt(&phase2, &memory, soul, &skills_section)
+            assemble_dream_system_prompt(phase2, &memory, soul, &skills_section)
         }
     };
 

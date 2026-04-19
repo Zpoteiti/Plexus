@@ -274,11 +274,11 @@ async fn tick_once(state: &Arc<AppState>) -> Result<(), String> {
         // 3a. Skip if prior heartbeat turn still running.
         //     try_lock is a liveness probe; benign race if a new turn
         //     starts between our check and publish.
-        if let Some(handle) = state.sessions.get(&format!("heartbeat:{user_id}")) {
-            if handle.lock.try_lock().is_err() {
-                debug!(user_id, "heartbeat: prior turn still running, skipping");
-                continue;
-            }
+        if let Some(handle) = state.sessions.get(&format!("heartbeat:{user_id}"))
+            && handle.lock.try_lock().is_err()
+        {
+            debug!(user_id, "heartbeat: prior turn still running, skipping");
+            continue;
         }
 
         // 3b. Skip if HEARTBEAT.md is missing (users can delete it).

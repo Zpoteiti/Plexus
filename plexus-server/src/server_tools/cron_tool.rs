@@ -102,7 +102,7 @@ async fn add_job(state: &Arc<AppState>, ctx: &ToolContext, args: &Value) -> (i32
     };
 
     // For at mode, default delete_after_run to true
-    let delete_after_run = if at.is_some() && !args.get("delete_after_run").is_some() {
+    let delete_after_run = if at.is_some() && args.get("delete_after_run").is_none() {
         true
     } else {
         delete_after_run

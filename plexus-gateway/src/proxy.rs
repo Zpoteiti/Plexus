@@ -66,12 +66,11 @@ pub async fn proxy_handler(State(state): State<Arc<AppState>>, req: Request<Body
     let mut upstream_headers = reqwest::header::HeaderMap::new();
     for (key, value) in req.headers() {
         let name = key.as_str().to_lowercase();
-        if !HOP_BY_HOP.contains(&name.as_str()) {
-            if let Ok(rname) = reqwest::header::HeaderName::from_bytes(key.as_str().as_bytes()) {
-                if let Ok(val) = reqwest::header::HeaderValue::from_bytes(value.as_bytes()) {
-                    upstream_headers.insert(rname, val);
-                }
-            }
+        if !HOP_BY_HOP.contains(&name.as_str())
+            && let Ok(rname) = reqwest::header::HeaderName::from_bytes(key.as_str().as_bytes())
+            && let Ok(val) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
+        {
+            upstream_headers.insert(rname, val);
         }
     }
 

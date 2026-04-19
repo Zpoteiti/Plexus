@@ -347,13 +347,13 @@ async fn attempt_chat(
             .next()
             .ok_or_else(|| CallError::NonTransient("No choices in LLM response".into()))?;
 
-        if let Some(tool_calls) = choice.message.tool_calls {
-            if !tool_calls.is_empty() {
-                return Ok(LlmResponse::ToolCalls {
-                    calls: tool_calls,
-                    vision_stripped: false,
-                });
-            }
+        if let Some(tool_calls) = choice.message.tool_calls
+            && !tool_calls.is_empty()
+        {
+            return Ok(LlmResponse::ToolCalls {
+                calls: tool_calls,
+                vision_stripped: false,
+            });
         }
 
         if let Some(content) = choice.message.content {

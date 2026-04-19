@@ -1,8 +1,8 @@
-/// Build script for plexus-gateway.
-///
-/// When the `embed-frontend` feature is enabled, this automatically runs
-/// `npm run build` in the frontend directory so the compiled assets are
-/// available for rust-embed to include in the binary.
+//! Build script for plexus-gateway.
+//!
+//! When the `embed-frontend` feature is enabled, this automatically runs
+//! `npm run build` in the frontend directory so the compiled assets are
+//! available for rust-embed to include in the binary.
 
 fn main() {
     #[cfg(feature = "embed-frontend")]

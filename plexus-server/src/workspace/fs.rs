@@ -412,7 +412,7 @@ impl WorkspaceFs {
             }
         }
         // Sort longest path first so we remove leaf dirs before parents.
-        dirs_to_clean.sort_by(|a, b| b.components().count().cmp(&a.components().count()));
+        dirs_to_clean.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
         for dir in dirs_to_clean {
             // Ignore errors — directory may not be empty or already removed.
             let _ = tokio::fs::remove_dir(&dir).await;
@@ -570,10 +570,7 @@ impl WorkspaceFs {
         })
         .await
         .map_err(|e| {
-            WorkspaceError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("spawn_blocking panic: {e}"),
-            ))
+            WorkspaceError::Io(std::io::Error::other(format!("spawn_blocking panic: {e}")))
         })?;
 
         Ok(matches)
@@ -644,10 +641,7 @@ impl WorkspaceFs {
         })
         .await
         .map_err(|e| {
-            WorkspaceError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("spawn_blocking panic: {e}"),
-            ))
+            WorkspaceError::Io(std::io::Error::other(format!("spawn_blocking panic: {e}")))
         })?;
 
         Ok(hits)

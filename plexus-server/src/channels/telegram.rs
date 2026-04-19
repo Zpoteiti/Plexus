@@ -131,6 +131,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_message(
     state: &Arc<AppState>,
     bot: &Bot,
@@ -187,10 +188,10 @@ async fn handle_message(
 
     let attachments: Vec<(String, String)> = {
         let mut v: Vec<(String, String)> = Vec::new();
-        if let Some(photos) = msg.photo() {
-            if let Some(largest) = photos.last() {
-                v.push((largest.file.id.clone(), synth_filename_for_photo(now)));
-            }
+        if let Some(photos) = msg.photo()
+            && let Some(largest) = photos.last()
+        {
+            v.push((largest.file.id.clone(), synth_filename_for_photo(now)));
         }
         if let Some(voice) = msg.voice() {
             v.push((voice.file.id.clone(), synth_filename_for_voice(now)));
@@ -316,10 +317,10 @@ async fn handle_message(
 
 /// Stop a Telegram bot for a user.
 pub async fn stop_bot(user_id: &str) {
-    if let Some(mut handle) = BOT_REGISTRY.write().await.remove(user_id) {
-        if let Some(tx) = handle.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
+    if let Some(mut handle) = BOT_REGISTRY.write().await.remove(user_id)
+        && let Some(tx) = handle.shutdown_tx.take()
+    {
+        let _ = tx.send(());
     }
 }
 

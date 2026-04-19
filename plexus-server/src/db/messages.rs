@@ -14,6 +14,7 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert(
     pool: &PgPool,
     message_id: &str,

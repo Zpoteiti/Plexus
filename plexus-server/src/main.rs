@@ -154,23 +154,21 @@ async fn main() {
     if let Ok(Some(soul)) = crate::db::system_config::get(&state.db, "default_soul").await {
         *state.default_soul.write().await = Some(soul);
     }
-    if let Ok(Some(llm_json)) = crate::db::system_config::get(&state.db, "llm_config").await {
-        if let Ok(config) = serde_json::from_str::<crate::config::LlmConfig>(&llm_json) {
-            *state.llm_config.write().await = Some(config);
-        }
+    if let Ok(Some(llm_json)) = crate::db::system_config::get(&state.db, "llm_config").await
+        && let Ok(config) = serde_json::from_str::<crate::config::LlmConfig>(&llm_json)
+    {
+        *state.llm_config.write().await = Some(config);
     }
-    if let Ok(Some(rl)) = crate::db::system_config::get(&state.db, "rate_limit_per_min").await {
-        if let Ok(limit) = rl.parse::<u32>() {
-            *state.rate_limit_config.write().await = limit;
-        }
+    if let Ok(Some(rl)) = crate::db::system_config::get(&state.db, "rate_limit_per_min").await
+        && let Ok(limit) = rl.parse::<u32>()
+    {
+        *state.rate_limit_config.write().await = limit;
     }
     if let Ok(Some(mcp_json)) = crate::db::system_config::get(&state.db, "server_mcp_config").await
-    {
-        if let Ok(servers) =
+        && let Ok(servers) =
             serde_json::from_str::<Vec<plexus_common::protocol::McpServerEntry>>(&mcp_json)
-        {
-            state.server_mcp.write().await.initialize(&servers).await;
-        }
+    {
+        state.server_mcp.write().await.initialize(&servers).await;
     }
 
     let app = axum::Router::new()

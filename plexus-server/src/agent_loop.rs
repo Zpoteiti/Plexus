@@ -364,7 +364,7 @@ async fn handle_event(
         channel: event.channel.clone(),
         chat_id: event.chat_id.clone(),
         is_cron: event.kind == crate::bus::EventKind::Cron,
-        is_partner: event.identity.as_ref().map_or(true, |i| i.is_partner),
+        is_partner: event.identity.as_ref().is_none_or(|i| i.is_partner),
     };
 
     // Resolve PromptMode + allowlist from event.kind.

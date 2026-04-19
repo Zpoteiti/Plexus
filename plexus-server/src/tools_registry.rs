@@ -158,26 +158,26 @@ fn tool_name(schema: &Value) -> &str {
 
 /// Inject device_name enum into a tool schema's parameters.
 fn inject_device_name_enum(schema: &mut Value, devices: &[String]) {
-    if let Some(function) = schema.get_mut("function") {
-        if let Some(parameters) = function.get_mut("parameters") {
-            if let Some(properties) = parameters.get_mut("properties") {
-                if let Some(obj) = properties.as_object_mut() {
-                    obj.insert(
-                        "device_name".to_string(),
-                        serde_json::json!({
-                            "type": "string",
-                            "enum": devices,
-                            "description": "Target device to execute this tool on"
-                        }),
-                    );
-                }
-            }
-            // Add device_name to required
-            if let Some(required) = parameters.get_mut("required") {
-                if let Some(arr) = required.as_array_mut() {
-                    arr.push(Value::String("device_name".into()));
-                }
-            }
+    if let Some(function) = schema.get_mut("function")
+        && let Some(parameters) = function.get_mut("parameters")
+    {
+        if let Some(properties) = parameters.get_mut("properties")
+            && let Some(obj) = properties.as_object_mut()
+        {
+            obj.insert(
+                "device_name".to_string(),
+                serde_json::json!({
+                    "type": "string",
+                    "enum": devices,
+                    "description": "Target device to execute this tool on"
+                }),
+            );
+        }
+        // Add device_name to required
+        if let Some(required) = parameters.get_mut("required")
+            && let Some(arr) = required.as_array_mut()
+        {
+            arr.push(Value::String("device_name".into()));
         }
     }
 }

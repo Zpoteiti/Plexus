@@ -171,10 +171,9 @@ pub async fn reschedule_after_completion(state: &Arc<AppState>, job_id: &str, su
 fn compute_next_run(job: &crate::db::cron::CronJob) -> Option<chrono::DateTime<chrono::Utc>> {
     if let Some(ref expr) = job.cron_expr {
         crate::server_tools::cron_tool::compute_next_cron_pub(expr, &job.timezone).ok()
-    } else if let Some(secs) = job.every_seconds {
-        Some(chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
     } else {
-        None
+        job.every_seconds
+            .map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
     }
 }
 

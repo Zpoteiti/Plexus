@@ -147,15 +147,15 @@ struct PatchDeviceConfig {
 fn validate_patch(req: &PatchDeviceConfig) -> Result<(), ApiError> {
     let mut errors: Vec<String> = Vec::new();
 
-    if let Some(wp) = &req.workspace_path {
-        if wp.is_empty() || !wp.starts_with('/') {
-            errors.push("workspace_path=not absolute".to_string());
-        }
+    if let Some(wp) = &req.workspace_path
+        && (wp.is_empty() || !wp.starts_with('/'))
+    {
+        errors.push("workspace_path=not absolute".to_string());
     }
-    if let Some(n) = req.shell_timeout_max {
-        if !(10..=1800).contains(&n) {
-            errors.push("shell_timeout_max=out of range (10-1800)".to_string());
-        }
+    if let Some(n) = req.shell_timeout_max
+        && !(10..=1800).contains(&n)
+    {
+        errors.push("shell_timeout_max=out of range (10-1800)".to_string());
     }
     if let Some(whitelist) = &req.ssrf_whitelist {
         for entry in whitelist {
@@ -165,10 +165,10 @@ fn validate_patch(req: &PatchDeviceConfig) -> Result<(), ApiError> {
             }
         }
     }
-    if let Some(fp) = &req.fs_policy {
-        if serde_json::from_value::<FsPolicy>(fp.clone()).is_err() {
-            errors.push("fs_policy=must be \"sandbox\" or \"unrestricted\"".to_string());
-        }
+    if let Some(fp) = &req.fs_policy
+        && serde_json::from_value::<FsPolicy>(fp.clone()).is_err()
+    {
+        errors.push("fs_policy=must be \"sandbox\" or \"unrestricted\"".to_string());
     }
 
     if errors.is_empty() {
