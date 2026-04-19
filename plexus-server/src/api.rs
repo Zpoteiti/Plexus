@@ -35,28 +35,6 @@ async fn get_profile(
     })))
 }
 
-// -- Soul (deprecated) --
-// Soul is now a workspace file: {workspace}/{user_id}/SOUL.md
-// These endpoints return 410 Gone.
-
-async fn get_soul(_headers: HeaderMap, _state: State<Arc<AppState>>) -> (StatusCode, &'static str) {
-    (
-        StatusCode::GONE,
-        "Soul is now a workspace file. Use read_file on SOUL.md or the workspace file API.",
-    )
-}
-
-async fn patch_soul(
-    _headers: HeaderMap,
-    _state: State<Arc<AppState>>,
-    _body: axum::body::Bytes,
-) -> (StatusCode, &'static str) {
-    (
-        StatusCode::GONE,
-        "Soul is now a workspace file. Use write_file/edit_file on SOUL.md or the workspace file API.",
-    )
-}
-
 // -- Display Name --
 
 #[derive(Deserialize)]
@@ -81,31 +59,6 @@ async fn patch_display_name(
     Ok(Json(
         serde_json::json!({ "message": "Display name updated" }),
     ))
-}
-
-// -- Memory (deprecated) --
-// Memory is now a workspace file: {workspace}/{user_id}/MEMORY.md
-// These endpoints return 410 Gone.
-
-async fn get_memory(
-    _headers: HeaderMap,
-    _state: State<Arc<AppState>>,
-) -> (StatusCode, &'static str) {
-    (
-        StatusCode::GONE,
-        "Memory is now a workspace file. Use read_file on MEMORY.md or the workspace file API.",
-    )
-}
-
-async fn patch_memory(
-    _headers: HeaderMap,
-    _state: State<Arc<AppState>>,
-    _body: axum::body::Bytes,
-) -> (StatusCode, &'static str) {
-    (
-        StatusCode::GONE,
-        "Memory is now a workspace file. Use write_file/edit_file on MEMORY.md or the workspace file API.",
-    )
 }
 
 // -- Sessions --
@@ -443,9 +396,7 @@ async fn delete_self(
 pub fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/user/profile", get(get_profile))
-        .route("/api/user/soul", get(get_soul).patch(patch_soul))
         .route("/api/user/display-name", patch(patch_display_name))
-        .route("/api/user/memory", get(get_memory).patch(patch_memory))
         .route("/api/sessions", get(list_sessions))
         .route("/api/sessions/{session_id}", delete(delete_session))
         .route("/api/sessions/{session_id}/messages", get(get_messages))
