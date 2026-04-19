@@ -558,3 +558,57 @@ The existing Settings page loses its Soul + Memory textareas and rewires the Ski
 - **TanStack Query for server-state caching:** overkill for a page with ~5 fetches. Local `useState` + manual refresh is fine.
 
 ---
+
+## ADR-38: Unified file/tool model via `workspace_fs` + `device_name` routing
+
+### Context
+
+Post-M2, three drift axes had accumulated:
+
+1. **File storage** was split across a workspace tree (`workspace/<user_id>/...`) and an opaque `/api/files/<id>` store (`file_store.rs`). Messages carried `/api/files/<id>` URLs; channels had a `resolve_media` helper; `save_upload`/`load_file` duplicated the quota and path-escape logic that workspace handlers already owned.
+2. **Server file-tool schemas** (read_file, write_file, edit_file, delete_file, list_dir, glob, grep) were emitted as server-only tools. Client-reported versions of the same tools were emitted as a *separate* section with a `device_name` enum of client devices. The agent saw duplicate tool names with overlapping semantics.
+3. **Write path in the server** reimplemented the "resolve + escape-check + quota reserve + rollback + skills invalidate" pipeline in three places (`api.rs` PUT handler, `server_tools/file_ops::write_file`, `server_tools/file_transfer`).
+
+### Options
+
+- **A. Single file service + `device_name` on every file tool.** Introduce a `workspace_fs` service in the server that owns every read/write/delete/glob/grep path — including quota math, skills-cache invalidation, and symlink escape. Make `device_name` a first-class routing dimension: every file tool emits exactly one schema with `device_name` enum = `["server", ...clients_with_that_capability]`. Server ≡ device named "server" from the agent's perspective.
+- **B. Keep file_store, shim through workspace paths.** Build a translation layer so `/api/files/<id>` resolves to a workspace path on read, and stays as a sentinel for outbound. Less churn, but preserves dual-truth permanently.
+- **C. Status quo; factor duplication via helper fns.** Leaves opaque IDs in place, leaves duplicate tool-name emission in place; addresses only the write-path duplication.
+
+### Decision
+
+**Option A.** Delete `file_store.rs` entirely. Build `plexus-server/src/workspace/fs.rs::WorkspaceFs` as the single-writer service. Route REST handlers, tool handlers, channel adapters, and `agent_loop` large-message spill through it. Introduce `server_tools/dispatch.rs` + `server_tools/file_ops_schemas.rs` + `server_tools/shell_schema.rs` to make file-tool + shell-tool schemas canonical and server-owned; strip `description()` + `parameters()` from the client `Tool` trait (client reports only `RegisterTools { tool_names }`). `device_name` is the sole dispatch dimension for file tools: `"server"` → `workspace_fs` call; any other value → `tools_registry::route_to_device` WS forward. Shell stays client-only (no bwrap on server).
+
+Related unifications adopted in the same pass:
+
+- `OutboundEvent.media: Vec<String>` now carries workspace-relative paths (not URLs); channels read via `workspace_fs.read`; inbound attachments from Discord/Telegram write to `.attachments/<channel>-<msg_id>/<file>` via `workspace_fs.write` with a shared `safe_attachment_filename` sanitizer.
+- `UploadOutcome { Success(Uploaded), Error(UploadError) }` replaces the `format!("ERROR:{filename}")` sentinel in `WorkspaceUploadResult`.
+- `file_transfer` collapses to `workspace_fs.read`/`write` server-side + a 3-attempt retry wrapper around device RPCs.
+- `web_fetch` uses `plexus_common::network::validate_url(url, &[])` (hardcoded RFC-1918 block; per-device whitelist is a client-side concern).
+- `/api/devices/{name}/policy` → `/api/devices/{name}/config` accepting `workspace_path`, `shell_timeout_max`, `ssrf_whitelist`, `fs_policy` with 422-on-invalid, pushing `ConfigUpdate` to the device on success.
+- `dream_phase1_prompt` / `dream_phase2_prompt` / `heartbeat_phase1_prompt` flattened from `Arc<RwLock<String>>` to `Arc<str>` (load-once-at-boot; no hot-reload caller existed).
+
+### Consequences
+
+- **Positive:**
+  - One path for "write to user's workspace" — quota math, path resolution, symlink escape, skills-cache invalidation all live in one place. Reduced `file_transfer.rs` by 60 lines, `api.rs` workspace handlers by ~130 lines.
+  - Agent sees **one** schema per file tool. No more "read_file (server) vs read_file (devbox)" ambiguity in the tool list. `device_name` selects the target in a single slot.
+  - Server owns all schemas. Client just reports capability names. Easier to reason about what the LLM sees: server controls the contract.
+  - No opaque file IDs. Every reference is a workspace path the user (and agent) can inspect via `list_dir`/`glob`. `.attachments/<msg_id>/<file>` is a predictable structure.
+  - `cargo clippy --workspace -- -D warnings` exits 0 post-sweep; 328 tests pass.
+
+- **Negative / deferred:**
+  - **Frontend is out of sync** with the backend route/contract changes. `/api/workspace/file?path=` → `/api/workspace/files/{*path}` and `ERROR:{}` sentinel → typed `UploadOutcome` both break current frontend fetches. Captured as a single follow-up Open item in ISSUE.md; batched with P4.6/P7.5/P9.1/P9.2 frontend tasks.
+  - **P5.6 MCP collision wiring deferred.** The `mcp::wrap::check_mcp_schema_collision` helper is in place with unit tests, but wiring it into `PUT /api/devices/{name}/mcp` + `PUT /api/server-mcp` requires pre-connect tool-schema introspection at install time, which today only happens after a live WebSocket session. Tracked in ISSUE.md Deferred.
+  - **P4.5 `/api/device-stream/{device}/{path:.*}` endpoint deferred.** Needs a server→client WS `ReadStream` + `StreamChunk` implementation (the protocol frames exist in `plexus-common` per Phase 1, but no end-to-end plumbing).
+  - **Client `ConfigUpdate` reconnect on `workspace_path` change is log-only.** Clean reconnect needs coordination with in-flight tool calls; logged as a TODO in `plexus-client/src/main.rs`.
+  - **`workspace_fs::write_stream` not delta-aware** (unlike `write`). No overwrite caller currently wires through it; if one appears the delta math needs porting. Inline TODO comment left in `fs.rs`.
+  - **`workspace_fs::delete_prefix` silently skips symlinks-to-files** in the TTL sweep path. Defense-in-depth at the write boundary prevents symlinks from being created inside the workspace in the first place, but the reclaim accounting is imperfect if one ever exists.
+
+### Alternatives considered
+
+- **Keep duplicate tool emission, dedupe in the client.** Rejected — pushes complexity to the client and leaves the LLM's schema surface noisy.
+- **Keep `file_store` as a cache layer in front of workspace paths.** Rejected — adds a second source of truth to maintain; the workspace quota + TTL already handle the lifecycle concerns `file_store` was solving.
+- **Split the cleanup across two separate branches (file storage first, then tool unification).** Rejected — the two touch the same message/context/channel files and staging them would double the merge coordination. One coherent branch with 37 reviewable commits is cleaner.
+
+---
