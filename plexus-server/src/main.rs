@@ -67,6 +67,12 @@ async fn main() {
     let (outbound_tx, outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(1000);
 
     let quota = Arc::new(crate::workspace::QuotaCache::new(5 * 1024 * 1024 * 1024));
+    let skills_cache = Arc::new(crate::skills_cache::SkillsCache::new());
+    let workspace_fs = Arc::new(crate::workspace::WorkspaceFs::new(
+        std::path::PathBuf::from(&config.workspace_root),
+        quota.clone(),
+        skills_cache.clone(),
+    ));
 
     let state = Arc::new(AppState {
         db: pool,
@@ -104,7 +110,8 @@ async fn main() {
         outbound_tx,
         shutdown: CancellationToken::new(),
         quota,
-        skills_cache: crate::skills_cache::SkillsCache::new(),
+        skills_cache,
+        workspace_fs,
     });
 
     // Prime quota cache from existing workspace files before spawning any background tasks.

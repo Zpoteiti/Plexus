@@ -97,8 +97,11 @@ pub struct AppState {
     // Per-user disk quota tracking.
     pub quota: std::sync::Arc<crate::workspace::QuotaCache>,
 
-    // Per-user in-memory skills cache (placeholder until A-16).
-    pub skills_cache: crate::skills_cache::SkillsCache,
+    // Per-user in-memory skills cache.
+    pub skills_cache: std::sync::Arc<crate::skills_cache::SkillsCache>,
+
+    // Workspace filesystem service (path checks, quota, skills-cache invalidation).
+    pub workspace_fs: std::sync::Arc<crate::workspace::WorkspaceFs>,
 }
 
 impl AppState {
@@ -206,6 +209,14 @@ impl AppState {
 
         let (outbound_tx, _outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(16);
 
+        let quota = std::sync::Arc::new(crate::workspace::QuotaCache::new(1024 * 1024));
+        let skills_cache = std::sync::Arc::new(crate::skills_cache::SkillsCache::new());
+        let workspace_fs = std::sync::Arc::new(crate::workspace::WorkspaceFs::new(
+            std::path::PathBuf::from(workspace_root.to_string_lossy().as_ref()),
+            quota.clone(),
+            skills_cache.clone(),
+        ));
+
         std::sync::Arc::new(AppState {
             db: pool,
             config,
@@ -236,8 +247,9 @@ impl AppState {
             gateway_sink: RwLock::new(None),
             outbound_tx,
             shutdown: CancellationToken::new(),
-            quota: std::sync::Arc::new(crate::workspace::QuotaCache::new(1024 * 1024)),
-            skills_cache: crate::skills_cache::SkillsCache::new(),
+            quota,
+            skills_cache,
+            workspace_fs,
         })
     }
 
@@ -248,6 +260,14 @@ impl AppState {
     ) -> std::sync::Arc<Self> {
         use tokio::sync::{RwLock, Semaphore};
         use tokio_util::sync::CancellationToken;
+
+        let quota = std::sync::Arc::new(crate::workspace::QuotaCache::new(quota_bytes));
+        let skills_cache = std::sync::Arc::new(crate::skills_cache::SkillsCache::new());
+        let workspace_fs = std::sync::Arc::new(crate::workspace::WorkspaceFs::new(
+            std::path::PathBuf::from(&config.workspace_root),
+            quota.clone(),
+            skills_cache.clone(),
+        ));
 
         std::sync::Arc::new(AppState {
             db: sqlx::PgPool::connect_lazy("postgres://invalid").unwrap(),
@@ -279,8 +299,9 @@ impl AppState {
             gateway_sink: RwLock::new(None),
             outbound_tx,
             shutdown: CancellationToken::new(),
-            quota: std::sync::Arc::new(crate::workspace::QuotaCache::new(quota_bytes)),
-            skills_cache: crate::skills_cache::SkillsCache::new(),
+            quota,
+            skills_cache,
+            workspace_fs,
         })
     }
 }
