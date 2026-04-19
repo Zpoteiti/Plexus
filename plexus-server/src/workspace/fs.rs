@@ -262,6 +262,8 @@ impl WorkspaceFs {
         Ok(())
     }
 
+    // TODO: make delta-aware before any overwrite-capable caller wires in; today
+    // only `write` handles shrink/grow quota math correctly.
     pub async fn write_stream<R: tokio::io::AsyncRead + Unpin>(
         &self,
         user_id: &str,

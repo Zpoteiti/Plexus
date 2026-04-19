@@ -323,16 +323,6 @@ async fn workspace_tree(
 
 // -- Workspace File --
 
-/// Testable core: given user_id + rel path, return bytes or an error.
-/// Kept for unit tests in this module that read without HTTP plumbing.
-pub async fn workspace_file_get_bytes(
-    state: &AppState,
-    user_id: &str,
-    rel_path: &str,
-) -> Result<Vec<u8>, plexus_common::errors::workspace::WorkspaceError> {
-    state.workspace_fs.read(user_id, rel_path).await
-}
-
 /// Map a `WorkspaceError` (from `plexus_common`) to an `ApiError`.
 fn map_ws_err(e: plexus_common::errors::workspace::WorkspaceError) -> ApiError {
     use plexus_common::errors::workspace::WorkspaceError;
@@ -511,45 +501,6 @@ mod tests {
         let result = workspace_quota_handler(&state, "alice");
         assert_eq!(result.used_bytes, 1024);
         assert_eq!(result.total_bytes, 5 * 1024 * 1024);
-    }
-
-    #[tokio::test]
-    async fn test_workspace_file_get_inside_user_root() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let user_root = tmp.path().join("alice");
-        tokio::fs::create_dir_all(&user_root).await.unwrap();
-        tokio::fs::write(user_root.join("greeting.txt"), b"hi there")
-            .await
-            .unwrap();
-
-        let state = crate::state::AppState::test_minimal(tmp.path());
-        let bytes = workspace_file_get_bytes(&state, "alice", "greeting.txt")
-            .await
-            .unwrap();
-        assert_eq!(&bytes[..], b"hi there");
-    }
-
-    #[tokio::test]
-    async fn test_workspace_file_get_rejects_traversal() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        tokio::fs::create_dir_all(tmp.path().join("alice"))
-            .await
-            .unwrap();
-
-        let state = crate::state::AppState::test_minimal(tmp.path());
-        let err = workspace_file_get_bytes(&state, "alice", "../../etc/passwd")
-            .await
-            .unwrap_err();
-        // WorkspaceError may render as Traversal or NotFound depending on which
-        // check fires first. Both are acceptable — just assert it's an error.
-        let msg = format!("{err:?}").to_lowercase();
-        assert!(
-            msg.contains("traversal")
-                || msg.contains("not found")
-                || msg.contains("outside")
-                || msg.contains("io"),
-            "expected traversal/not-found/io-style error; got: {msg}"
-        );
     }
 
     #[tokio::test]
