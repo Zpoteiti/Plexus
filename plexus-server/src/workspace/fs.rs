@@ -78,7 +78,7 @@ impl WorkspaceFs {
     /// guaranteed to be inside `<root>/<user_id>/`. Returns
     /// `WorkspaceError::Traversal` on any escape attempt, with a `warn!` log.
     async fn resolve_path(&self, user_id: &str, path: &str) -> Result<PathBuf, WorkspaceError> {
-        if Path::new(path).is_absolute() {
+        let result = if Path::new(path).is_absolute() {
             // Canonicalize both sides and do a prefix check.
             let canonical = tokio::fs::canonicalize(path).await.map_err(|e| {
                 // A missing file or escape via non-existent path — treat as IO.
@@ -87,21 +87,16 @@ impl WorkspaceFs {
             let user_root_canonical =
                 tokio::fs::canonicalize(self.root.join(user_id)).await?;
             if !canonical.starts_with(&user_root_canonical) {
-                warn!(
-                    user_id,
-                    path,
-                    "absolute path escapes user workspace root"
-                );
-                return Err(WorkspaceError::Traversal(path.into()));
+                Err(WorkspaceError::Traversal(path.into()))
+            } else {
+                Ok(canonical)
             }
-            Ok(canonical)
         } else {
             // Delegate to the existing relative-path helper, mapping its error type.
             crate::workspace::paths::resolve_user_path(&self.root, user_id, path)
                 .await
                 .map_err(|e| match e {
                     crate::workspace::paths::WorkspaceError::Traversal(s) => {
-                        warn!(user_id, path = s.as_str(), "relative path escapes user workspace root");
                         WorkspaceError::Traversal(s)
                     }
                     crate::workspace::paths::WorkspaceError::Io(io) => WorkspaceError::Io(io),
@@ -110,7 +105,11 @@ impl WorkspaceFs {
                         WorkspaceError::Traversal(path.into())
                     }
                 })
+        };
+        if let Err(WorkspaceError::Traversal(_)) = &result {
+            warn!(user_id, path, "workspace path escape attempt");
         }
+        result
     }
 
     // ── Reads ─────────────────────────────────────────────────────────────────
