@@ -2,7 +2,6 @@
 
 use crate::db::messages::Message;
 use crate::db::users::User;
-use crate::file_store;
 use crate::providers::openai::{
     ChatMessage, Content, ContentBlock, FunctionCall, ImageUrl, ToolCall,
 };
@@ -94,20 +93,19 @@ pub async fn build_user_content(
 ) -> Vec<ContentBlock> {
     let uid = user_id.to_string();
     let state = state.clone();
-    build_user_content_inner(content, media, move |fid| {
+    build_user_content_inner(content, media, move |path| {
         let uid = uid.clone();
-        let fid = fid.to_string();
+        let path = path.to_string();
         let state = state.clone();
         async move {
-            file_store::load_file(&state, &uid, &fid)
-                .await
-                .map_err(|e| e.message)
+            state.workspace_fs.read(&uid, &path).await
+                .map_err(|e| format!("{e}"))
         }
     })
     .await
 }
 
-/// Test-friendly inner that accepts a loader closure for mocking file_store.
+/// Test-friendly inner that accepts a loader closure for mocking workspace_fs.
 async fn build_user_content_inner<F, Fut>(
     content: &str,
     media: &[String],
@@ -115,7 +113,7 @@ async fn build_user_content_inner<F, Fut>(
 ) -> Vec<ContentBlock>
 where
     F: Fn(&str) -> Fut,
-    Fut: std::future::Future<Output = Result<(Vec<u8>, String), String>>,
+    Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
 {
     let mut blocks: Vec<ContentBlock> = Vec::new();
 
@@ -127,21 +125,21 @@ where
 
     let mut non_image_refs: Vec<String> = Vec::new();
 
-    for url in media {
-        let Some(file_id) = url.strip_prefix("/api/files/") else {
-            non_image_refs.push(format!("[Attachment: {url} — unknown reference]"));
-            continue;
-        };
+    for path in media {
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
 
-        let (bytes, filename) = match load(file_id).await {
-            Ok(x) => x,
+        let bytes = match load(path).await {
+            Ok(b) => b,
             Err(_) => {
-                non_image_refs.push(format!("[Attachment: {file_id} — storage read failed]"));
+                non_image_refs.push(format!("[Attachment: {filename} — storage read failed]"));
                 continue;
             }
         };
 
-        let mime = mime_from_filename(&filename);
+        let mime = plexus_common::mime::detect_mime_from_extension(path);
 
         if mime.starts_with("image/") {
             let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -152,7 +150,7 @@ where
             });
         } else {
             non_image_refs.push(format!(
-                "[Attachment: {filename} → {url}]\n\
+                "[Attachment: {filename} → /api/workspace/files/{path}]\n\
                  Use file_transfer to move it to a client device for further processing."
             ));
         }
@@ -165,33 +163,6 @@ where
     }
 
     blocks
-}
-
-// TODO(cleanup): delete this helper; use plexus_common::mime::detect_mime_from_extension.
-// Removed in P3.7/P4.4.
-fn mime_from_filename(name: &str) -> String {
-    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "bmp" => "image/bmp",
-        "svg" => "image/svg+xml",
-        "heic" => "image/heic",
-        "heif" => "image/heif",
-        "pdf" => "application/pdf",
-        "txt" | "md" | "log" => "text/plain",
-        "json" => "application/json",
-        "csv" => "text/csv",
-        "mp3" => "audio/mpeg",
-        "ogg" | "oga" => "audio/ogg",
-        "wav" => "audio/wav",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        _ => "application/octet-stream",
-    }
-    .to_string()
 }
 
 /// Per-user channel configuration summary used to render the `## Channels`
@@ -389,8 +360,9 @@ pub async fn build_context(
 
             // Attachments
             s += "## Attachments\n";
-            s += "Files may appear as [Attachment: name → /api/files/{id}]. They live on the\n";
-            s += "server. To operate on one, use `file_transfer` to move it to a client device,\n";
+            s += "Files may appear as [Attachment: name → /api/workspace/files/<path>]. They live in\n";
+            s += "the user's workspace — use `read_file(device=\"server\", path=...)` to inspect.\n";
+            s += "To operate on one from a client device, use `file_transfer` to move it there,\n";
             s += "then use client tools (shell, read_file, etc.). Choose the action based on\n";
             s += "filename and the user's intent.\n\n";
 
@@ -705,7 +677,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_user_content_text_only() {
         let blocks = build_user_content_inner("hello", &[], |_| async {
-            Err::<(Vec<u8>, String), String>("should not be called".into())
+            Err::<Vec<u8>, String>("should not be called".into())
         })
         .await;
 
@@ -716,16 +688,19 @@ mod tests {
     #[tokio::test]
     async fn test_build_user_content_with_image() {
         let png_bytes = vec![0x89u8, 0x50, 0x4E, 0x47];
-        let blocks =
-            build_user_content_inner("what is this", &["/api/files/abc123".to_string()], |fid| {
+        let blocks = build_user_content_inner(
+            "what is this",
+            &[".attachments/msg-1/photo.png".to_string()],
+            |path| {
                 let bytes = png_bytes.clone();
-                let fid = fid.to_string();
+                let path = path.to_string();
                 async move {
-                    assert_eq!(fid, "abc123");
-                    Ok::<_, String>((bytes, "photo.png".to_string()))
+                    assert_eq!(path, ".attachments/msg-1/photo.png");
+                    Ok::<Vec<u8>, String>(bytes)
                 }
-            })
-            .await;
+            },
+        )
+        .await;
 
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "what is this"));
@@ -739,15 +714,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_user_content_with_non_image() {
-        let blocks = build_user_content_inner("", &["/api/files/xyz".to_string()], |_| async {
-            Ok::<_, String>((b"hello".to_vec(), "notes.txt".to_string()))
-        })
+        let blocks = build_user_content_inner(
+            "",
+            &[".attachments/msg-2/notes.txt".to_string()],
+            |_| async { Ok::<Vec<u8>, String>(b"hello".to_vec()) },
+        )
         .await;
 
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             ContentBlock::Text { text } => {
-                assert!(text.contains("[Attachment: notes.txt → /api/files/xyz]"));
+                assert!(text.contains(
+                    "[Attachment: notes.txt → /api/workspace/files/.attachments/msg-2/notes.txt]"
+                ));
                 assert!(text.contains(
                     "Use file_transfer to move it to a client device for further processing."
                 ));
@@ -761,14 +740,14 @@ mod tests {
         // text + 1 image + 1 doc → [text, image, trailing-text-with-attachment]
         let blocks = build_user_content_inner(
             "mixed",
-            &["/api/files/i1".to_string(), "/api/files/d1".to_string()],
-            |fid| {
-                let fid = fid.to_string();
+            &["imgs/pic.jpg".to_string(), "docs/doc.txt".to_string()],
+            |path| {
+                let path = path.to_string();
                 async move {
-                    if fid == "i1" {
-                        Ok::<_, String>((vec![0x89], "pic.jpg".to_string()))
+                    if path == "imgs/pic.jpg" {
+                        Ok::<Vec<u8>, String>(vec![0x89])
                     } else {
-                        Ok::<_, String>((b"hi".to_vec(), "doc.txt".to_string()))
+                        Ok::<Vec<u8>, String>(b"hi".to_vec())
                     }
                 }
             },
@@ -780,7 +759,7 @@ mod tests {
         assert!(matches!(&blocks[1], ContentBlock::ImageUrl { .. }));
         match &blocks[2] {
             ContentBlock::Text { text } => {
-                assert!(text.contains("[Attachment: doc.txt → /api/files/d1]"));
+                assert!(text.contains("[Attachment: doc.txt → /api/workspace/files/docs/doc.txt]"));
             }
             _ => panic!("expected trailing text"),
         }
@@ -851,14 +830,14 @@ mod tests {
     #[test]
     fn test_attachments_section_content() {
         // The system prompt's Attachments section should mention file_transfer
-        // and the [Attachment: ...] marker format. This test pins the exact
-        // four-line phrasing from Task 11 of the plan.
+        // and the [Attachment: ...] marker format.
         let body = "## Attachments\n\
-                    Files may appear as [Attachment: name → /api/files/{id}]. They live on the\n\
-                    server. To operate on one, use `file_transfer` to move it to a client device,\n\
+                    Files may appear as [Attachment: name → /api/workspace/files/<path>]. They live in\n\
+                    the user's workspace — use `read_file(device=\"server\", path=...)` to inspect.\n\
+                    To operate on one from a client device, use `file_transfer` to move it there,\n\
                     then use client tools (shell, read_file, etc.). Choose the action based on\n\
                     filename and the user's intent.\n";
-        assert!(body.contains("[Attachment: name → /api/files/{id}]"));
+        assert!(body.contains("[Attachment: name → /api/workspace/files/<path>]"));
         assert!(body.contains("file_transfer"));
         assert!(body.contains("client device"));
         assert!(body.contains("filename and the user's intent"));

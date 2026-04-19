@@ -296,18 +296,13 @@ async fn handle_event(
         .clone()
         .unwrap_or_else(|| ChannelIdentity::gateway_partner(&user));
 
-    // Large message conversion: >4K chars → save full to file, inline first 4K
+    // Large message conversion: >4K chars → save full to workspace, inline first 4K
     let content = if event.content.len() > USER_MESSAGE_MAX_CHARS {
-        let file_id = crate::file_store::save_upload(
-            state,
-            user_id,
-            "large_message.txt",
-            event.content.as_bytes(),
-        )
-        .await
-        .map_err(|e| format!("Save large message: {}", e.message))?;
+        let rel = format!(".attachments/large_messages/{}.txt", uuid::Uuid::new_v4());
+        state.workspace_fs.write(user_id, &rel, event.content.as_bytes()).await
+            .map_err(|e| format!("Save large message: {e}"))?;
         format!(
-            "{}\n\n[Full message saved as file: /api/files/{file_id}]",
+            "{}\n\n[Full message saved as file: /api/workspace/files/{rel}]",
             &event.content[..USER_MESSAGE_MAX_CHARS]
         )
     } else {
