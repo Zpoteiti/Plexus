@@ -3,7 +3,7 @@
 use crate::config::ClientConfig;
 use futures_util::{SinkExt, StreamExt};
 use plexus_common::consts::PROTOCOL_VERSION;
-use plexus_common::error::{ErrorCode, PlexusError};
+use plexus_common::errors::{ErrorCode, PlexusError};
 use plexus_common::protocol::{ClientToServer, ServerToClient};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info};

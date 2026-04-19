@@ -8,7 +8,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::SinkExt;
 use plexus_common::consts::DEVICE_TOKEN_PREFIX;
-use plexus_common::error::{ApiError, ErrorCode};
+use plexus_common::errors::{ApiError, ErrorCode};
 use plexus_common::protocol::{FsPolicy, McpServerEntry, ServerToClient};
 use serde::Deserialize;
 use std::sync::Arc;

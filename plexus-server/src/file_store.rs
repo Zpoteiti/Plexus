@@ -4,7 +4,7 @@
 //! handles size bounds and files are durable until the user deletes them.
 
 use crate::state::AppState;
-use plexus_common::error::{ApiError, ErrorCode};
+use plexus_common::errors::{ApiError, ErrorCode};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;

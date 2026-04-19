@@ -7,7 +7,7 @@ use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
-use plexus_common::error::{ApiError, ErrorCode};
+use plexus_common::errors::{ApiError, ErrorCode};
 use serde::Deserialize;
 use std::sync::Arc;
 

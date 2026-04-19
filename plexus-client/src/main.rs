@@ -10,7 +10,7 @@ mod tools;
 use connection::{WsSink, recv_message, send_message};
 use heartbeat::{ack_heartbeat, spawn_heartbeat};
 use plexus_common::consts::DEVICE_TOKEN_PREFIX;
-use plexus_common::error::{ErrorCode, PlexusError};
+use plexus_common::errors::{ErrorCode, PlexusError};
 use plexus_common::protocol::{ClientToServer, ServerToClient, ToolExecutionResult};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;

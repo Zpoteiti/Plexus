@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
-use plexus_common::error::{ApiError, ErrorCode};
+use plexus_common::errors::{ApiError, ErrorCode};
 use serde::Deserialize;
 use std::sync::Arc;
 

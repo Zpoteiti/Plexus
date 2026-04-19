@@ -10,7 +10,7 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use plexus_common::error::ApiError;
+use plexus_common::errors::ApiError;
 use std::path::Path as FsPath;
 use std::sync::Arc;
 

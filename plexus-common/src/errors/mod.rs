@@ -1,5 +1,27 @@
+//! Typed error hierarchy shared by all Plexus crates.
+//!
+//! `ErrorCode` is the wire-level discriminant used in `ApiError` (HTTP) and
+//! `ProtocolMessage::Error` (WebSocket). Each domain-specific typed error
+//! (`WorkspaceError`, `ToolError`, ...) maps to one `ErrorCode` via `fn code()`.
+//!
+//! HTTP mapping (`ApiError → StatusCode`) lives in `plexus-server`; the server
+//! layer wraps these typed errors into HTTP. Never define new error types
+//! outside this tree.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+pub mod auth;
+pub mod mcp;
+pub mod protocol;
+pub mod tool;
+pub mod workspace;
+
+pub use auth::AuthError;
+pub use mcp::McpError;
+pub use protocol::ProtocolError;
+pub use tool::ToolError;
+pub use workspace::WorkspaceError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorCode {
