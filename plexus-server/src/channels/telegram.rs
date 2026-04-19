@@ -273,7 +273,7 @@ async fn handle_message(
             }
         };
 
-        let safe_name = filename.replace(['/', '\\'], "_");
+        let safe_name = super::safe_attachment_filename(&filename);
         let rel = format!(".attachments/telegram-{}/{}", msg.id, safe_name);
         match state.workspace_fs.write(plexus_user_id, &rel, &bytes).await {
             Ok(()) => media_urls.push(rel),

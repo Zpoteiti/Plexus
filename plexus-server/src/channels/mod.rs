@@ -5,6 +5,21 @@ pub mod discord;
 pub mod gateway;
 pub mod telegram;
 
+/// Sanitize an inbound attachment filename before it's used as a workspace path segment.
+/// - Strips path separators.
+/// - Collapses `..` / `.` / empty into `_`.
+/// - Returns `"attachment"` if the result is empty after cleaning (defensive default).
+pub(crate) fn safe_attachment_filename(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c == '\0' { '_' } else { c })
+        .collect();
+    match cleaned.as_str() {
+        "" | "." | ".." => "attachment".into(),
+        _ => cleaned,
+    }
+}
+
 use crate::bus::OutboundEvent;
 use crate::state::AppState;
 use plexus_common::consts::{CHANNEL_DISCORD, CHANNEL_GATEWAY};
