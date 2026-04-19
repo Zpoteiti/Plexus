@@ -6,6 +6,7 @@ pub mod device;
 pub mod discord_api;
 pub mod telegram_api;
 
+use crate::consts::{BCRYPT_COST, JWT_EXPIRY_DAYS};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -13,7 +14,6 @@ use axum::routing::post;
 use axum::{Json, Router};
 use chrono::Utc;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use crate::consts::{BCRYPT_COST, JWT_EXPIRY_DAYS};
 use plexus_common::errors::{ApiError, ErrorCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

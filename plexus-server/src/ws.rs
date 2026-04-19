@@ -1,11 +1,11 @@
 //! Client WebSocket handler: device login, heartbeat, tool registration, tool results.
 
+use crate::consts::HEARTBEAT_REAPER_INTERVAL_SEC;
 use crate::state::{AppState, DeviceConnection};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
-use crate::consts::HEARTBEAT_REAPER_INTERVAL_SEC;
 use plexus_common::consts::PROTOCOL_VERSION;
 use plexus_common::protocol::{
     ClientToServer, FsPolicy, McpServerEntry, ServerToClient, ToolExecutionResult,
@@ -112,6 +112,7 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             sink: Arc::clone(&sink),
             last_seen: Arc::clone(&last_seen),
             tools: Vec::new(),
+            tool_schemas: Vec::new(),
         },
     );
     state
@@ -136,9 +137,13 @@ async fn handle_connection(socket: WebSocket, state: Arc<AppState>) {
             ClientToServer::Heartbeat { .. } => {
                 let _ = send_msg_arc(&sink, &ServerToClient::HeartbeatAck).await;
             }
-            ClientToServer::RegisterTools { tool_names } => {
+            ClientToServer::RegisterTools {
+                tool_names,
+                tool_schemas,
+            } => {
                 if let Some(mut conn) = state.devices.get_mut(&device_key) {
                     conn.tools = tool_names;
+                    conn.tool_schemas = tool_schemas;
                 }
                 state.tool_schema_cache.remove(&user_id);
                 info!("Tools registered for {device_key}");

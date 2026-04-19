@@ -113,6 +113,15 @@ pub enum ClientToServer {
     },
     RegisterTools {
         tool_names: Vec<String>,
+        /// Client-only tool schemas this device advertises (e.g. `shell`).
+        /// Server caches per-device and merges into the aggregated tool
+        /// list, injecting a `device_name` enum of all devices that
+        /// reported each schema. File tool schemas are NOT sent here —
+        /// they are canonical in `plexus_common::file_ops_schemas` and
+        /// the server owns them. Additive field — older clients that
+        /// omit it are treated as "no client-only schemas reported".
+        #[serde(default)]
+        tool_schemas: Vec<Value>,
     },
     Heartbeat {
         status: DeviceStatus,
@@ -232,6 +241,47 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("hash"));
+    }
+
+    #[test]
+    fn test_register_tools_with_schemas_round_trip() {
+        let schema = serde_json::json!({
+            "type": "function",
+            "function": { "name": "shell", "parameters": {} }
+        });
+        let msg = ClientToServer::RegisterTools {
+            tool_names: vec!["shell".into(), "read_file".into()],
+            tool_schemas: vec![schema.clone()],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let de: ClientToServer = serde_json::from_str(&json).unwrap();
+        match de {
+            ClientToServer::RegisterTools {
+                tool_names,
+                tool_schemas,
+            } => {
+                assert_eq!(tool_names, vec!["shell".to_string(), "read_file".into()]);
+                assert_eq!(tool_schemas, vec![schema]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_register_tools_missing_schemas_defaults_empty() {
+        // Additive field — older clients send {tool_names} only; must still deserialize.
+        let legacy = r#"{"type":"RegisterTools","data":{"tool_names":["shell"]}}"#;
+        let de: ClientToServer = serde_json::from_str(legacy).unwrap();
+        match de {
+            ClientToServer::RegisterTools {
+                tool_names,
+                tool_schemas,
+            } => {
+                assert_eq!(tool_names, vec!["shell".to_string()]);
+                assert!(tool_schemas.is_empty());
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

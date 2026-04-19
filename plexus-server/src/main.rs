@@ -90,9 +90,7 @@ async fn main() {
         dream_phase2_prompt: Arc::from(dream_phase2_prompt.as_str()),
         heartbeat_phase1_prompt: Arc::from(heartbeat_phase1_prompt.as_str()),
         sessions: Default::default(),
-        web_fetch_semaphore: Arc::new(Semaphore::new(
-            crate::consts::WEB_FETCH_CONCURRENT_MAX,
-        )),
+        web_fetch_semaphore: Arc::new(Semaphore::new(crate::consts::WEB_FETCH_CONCURRENT_MAX)),
         http_client: reqwest::Client::new(),
         server_mcp: Arc::new(RwLock::new(server_mcp::ServerMcpManager::new())),
         gateway_sink: RwLock::new(None),

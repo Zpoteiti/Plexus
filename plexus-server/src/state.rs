@@ -23,6 +23,10 @@ pub struct DeviceConnection {
     pub sink: Arc<Mutex<WsSink>>,
     pub last_seen: Arc<AtomicI64>,
     pub tools: Vec<String>,
+    /// Client-only tool schemas this device advertised at login
+    /// (e.g. `shell`). Merged per-device by `tools_registry` into the
+    /// aggregated tool list, with `device_name` enum injection.
+    pub tool_schemas: Vec<Value>,
 }
 
 pub struct AppState {

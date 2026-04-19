@@ -11,7 +11,6 @@ pub mod dispatch;
 pub mod file_ops;
 pub mod file_transfer;
 pub mod message;
-pub mod shell_schema;
 pub mod web_fetch;
 
 /// Allowlist for tool dispatch. Used by restricted modes (e.g. dream phase 2)

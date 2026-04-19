@@ -5,6 +5,7 @@ mod guardrails;
 mod heartbeat;
 mod mcp;
 mod sandbox;
+mod tool_schemas;
 mod tools;
 
 use base64::Engine;
@@ -83,7 +84,7 @@ async fn run_session(ws_url: &str, token: &str) -> Result<(), PlexusError> {
     tools::register_builtin_tools(&mut registry);
     let registry = Arc::new(registry);
 
-    // Collect and send tool names (built-in + MCP)
+    // Collect and send tool names (built-in + MCP) + client-only tool schemas.
     {
         let mut tool_names = registry.tool_names();
         let mcp_names: Vec<String> = mcp_manager
@@ -99,7 +100,10 @@ async fn run_session(ws_url: &str, token: &str) -> Result<(), PlexusError> {
             })
             .collect();
         tool_names.extend(mcp_names);
-        let msg = ClientToServer::RegisterTools { tool_names };
+        let msg = ClientToServer::RegisterTools {
+            tool_names,
+            tool_schemas: crate::tool_schemas::client_tool_schemas(),
+        };
         let mut s = sink.lock().await;
         send_message(&mut s, &msg).await?;
         info!(
@@ -222,7 +226,10 @@ async fn message_loop(
                         })
                         .collect();
                     tool_names.extend(mcp_names);
-                    let msg = ClientToServer::RegisterTools { tool_names };
+                    let msg = ClientToServer::RegisterTools {
+                        tool_names,
+                        tool_schemas: crate::tool_schemas::client_tool_schemas(),
+                    };
                     let _ = send_message(&mut *sink.lock().await, &msg).await;
                 }
             }

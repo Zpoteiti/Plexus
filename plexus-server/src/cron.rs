@@ -9,8 +9,8 @@
 //! recover_stuck_jobs() resets the job after 30 minutes.
 
 use crate::bus::{self, EventKind, InboundEvent};
-use crate::state::AppState;
 use crate::consts::CRON_POLL_INTERVAL_SEC;
+use crate::state::AppState;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 

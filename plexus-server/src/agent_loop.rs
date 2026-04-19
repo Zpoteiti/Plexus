@@ -1,11 +1,11 @@
 //! Per-session ReAct agent loop: LLM call → tool dispatch → iterate.
 
 use crate::bus::{InboundEvent, OutboundEvent};
+use crate::consts::USER_MESSAGE_MAX_CHARS;
 use crate::context::{self, ChannelIdentity, SkillInfo};
 use crate::providers::openai::{self, LlmResponse};
 use crate::server_tools::{self, ToolContext};
 use crate::state::AppState;
-use crate::consts::USER_MESSAGE_MAX_CHARS;
 use plexus_common::consts::MAX_AGENT_ITERATIONS;
 use std::collections::HashMap;
 use std::sync::Arc;
