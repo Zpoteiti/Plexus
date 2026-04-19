@@ -41,6 +41,7 @@ pub struct GrepOpts {
     pub file_glob: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct GrepHit {
     pub path: String,
     pub line_number: u64,
@@ -465,21 +466,131 @@ impl WorkspaceFs {
 
     pub async fn glob(
         &self,
-        _user_id: &str,
-        _pattern: &str,
-        _root: &str,
+        user_id: &str,
+        pattern: &str,
+        root: &str,
     ) -> Result<Vec<String>, WorkspaceError> {
-        unimplemented!()
+        let user_root = self.root.join(user_id);
+
+        let search_root = if root.is_empty() {
+            user_root.clone()
+        } else {
+            self.resolve_path(user_id, root).await?
+        };
+
+        let matcher = globset::Glob::new(pattern)
+            .map_err(|e| {
+                WorkspaceError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("bad glob pattern: {e}"),
+                ))
+            })?
+            .compile_matcher();
+
+        let user_root_clone = user_root.clone();
+        let matches = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for entry in walkdir::WalkDir::new(&search_root)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                if entry.path() == search_root {
+                    continue;
+                }
+                let rel = entry
+                    .path()
+                    .strip_prefix(&user_root_clone)
+                    .unwrap_or(entry.path());
+                if matcher.is_match(rel) {
+                    out.push(rel.display().to_string());
+                }
+                if out.len() >= 500 {
+                    break;
+                }
+            }
+            out
+        })
+        .await
+        .map_err(|e| {
+            WorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("spawn_blocking panic: {e}"),
+            ))
+        })?;
+
+        Ok(matches)
     }
 
     pub async fn grep(
         &self,
-        _user_id: &str,
-        _pattern: &str,
-        _root: &str,
-        _opts: GrepOpts,
+        user_id: &str,
+        pattern: &str,
+        root: &str,
+        opts: GrepOpts,
     ) -> Result<Vec<GrepHit>, WorkspaceError> {
-        unimplemented!()
+        let user_root = self.root.join(user_id);
+
+        let search_root = if root.is_empty() {
+            user_root.clone()
+        } else {
+            self.resolve_path(user_id, root).await?
+        };
+
+        let regex_pattern = if opts.case_insensitive {
+            format!("(?i){pattern}")
+        } else {
+            pattern.to_string()
+        };
+
+        let re = regex::Regex::new(&regex_pattern).map_err(|e| {
+            WorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("bad regex pattern: {e}"),
+            ))
+        })?;
+
+        let user_root_clone = user_root.clone();
+        let hits = tokio::task::spawn_blocking(move || {
+            let mut out: Vec<GrepHit> = Vec::new();
+            for entry in walkdir::WalkDir::new(&search_root)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let content = match std::fs::read_to_string(entry.path()) {
+                    Ok(c) => c,
+                    Err(_) => continue, // skip non-UTF-8 files
+                };
+                let rel = entry
+                    .path()
+                    .strip_prefix(&user_root_clone)
+                    .unwrap_or(entry.path());
+                for (i, line) in content.lines().enumerate() {
+                    if re.is_match(line) {
+                        out.push(GrepHit {
+                            path: rel.display().to_string(),
+                            line_number: (i + 1) as u64,
+                            line_content: line.to_string(),
+                        });
+                        if out.len() >= 200 {
+                            return out;
+                        }
+                    }
+                }
+            }
+            out
+        })
+        .await
+        .map_err(|e| {
+            WorkspaceError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("spawn_blocking panic: {e}"),
+            ))
+        })?;
+
+        Ok(hits)
     }
 
     // ── Quota / admin ─────────────────────────────────────────────────────────
@@ -779,6 +890,54 @@ mod tests {
         assert_eq!(entries[0].kind, EntryKind::File);
         assert_eq!(entries[1].name, "sub");
         assert_eq!(entries[1].kind, EntryKind::Dir);
+    }
+
+    // ── P3.5 glob + grep tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn glob_matches_extension_pattern() {
+        let tmp = tempdir().unwrap();
+        let alice_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(alice_dir.join("nested")).await.unwrap();
+        tokio::fs::write(alice_dir.join("a.rs"), b"fn a() {}").await.unwrap();
+        tokio::fs::write(alice_dir.join("b.rs"), b"fn b() {}").await.unwrap();
+        tokio::fs::write(alice_dir.join("c.py"), b"def c(): pass").await.unwrap();
+        tokio::fs::write(alice_dir.join("nested/d.rs"), b"fn d() {}").await.unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+        let results = fs.glob("alice", "**/*.rs", "").await.unwrap();
+
+        assert_eq!(results.len(), 3, "expected exactly 3 .rs files, got: {results:?}");
+        let set: std::collections::HashSet<&str> = results.iter().map(|s| s.as_str()).collect();
+        assert!(set.iter().all(|p| p.ends_with(".rs")), "all paths must end in .rs");
+    }
+
+    #[tokio::test]
+    async fn grep_finds_pattern_line_numbered() {
+        let tmp = tempdir().unwrap();
+        let alice_dir = tmp.path().join("alice");
+        tokio::fs::create_dir_all(&alice_dir).await.unwrap();
+        tokio::fs::write(alice_dir.join("doc.txt"), b"one\ntwo three\nTHREE\nfour three")
+            .await
+            .unwrap();
+
+        let fs = new_for_test(tmp.path().to_path_buf());
+        let hits = fs
+            .grep("alice", "three", "", GrepOpts::default())
+            .await
+            .unwrap();
+
+        assert_eq!(hits.len(), 2, "expected 2 case-sensitive hits, got: {hits:?}");
+        let line_numbers: Vec<u64> = hits.iter().map(|h| h.line_number).collect();
+        assert!(line_numbers.contains(&2), "line 2 must be a hit");
+        assert!(line_numbers.contains(&4), "line 4 must be a hit");
+        for hit in &hits {
+            assert!(
+                hit.line_content.contains("three"),
+                "each hit must contain 'three': {:?}",
+                hit.line_content
+            );
+        }
     }
 
     #[tokio::test]
