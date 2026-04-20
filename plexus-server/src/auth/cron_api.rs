@@ -217,6 +217,15 @@ async fn delete_job(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+pub fn cron_api_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/cron-jobs", get(list_jobs).post(create_job))
+        .route(
+            "/api/cron-jobs/{job_id}",
+            patch(update_job).delete(delete_job),
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,13 +408,4 @@ mod tests {
             .await
             .ok();
     }
-}
-
-pub fn cron_api_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/cron-jobs", get(list_jobs).post(create_job))
-        .route(
-            "/api/cron-jobs/{job_id}",
-            patch(update_job).delete(delete_job),
-        )
 }

@@ -180,6 +180,63 @@ fn extract_media(parsed: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Deliver an outbound event to the gateway.
+pub async fn deliver(state: &AppState, event: &OutboundEvent) {
+    let sink = state.gateway_sink.read().await;
+    let Some(sink) = sink.as_ref() else {
+        warn!("Gateway: not connected, dropping outbound message");
+        return;
+    };
+    let msg = build_deliver_frame(event);
+    let json = serde_json::to_string(&msg).unwrap();
+    let mut s = sink.lock().await;
+    if let Err(e) = futures_util::SinkExt::send(
+        &mut *s,
+        tokio_tungstenite::tungstenite::Message::Text(json.into()),
+    )
+    .await
+    {
+        warn!("Gateway: send failed: {e}");
+    }
+}
+
+/// Build the WS frame sent to plexus-gateway. Always a session_update
+/// pointer — browsers fetch content via the existing REST history endpoint.
+fn build_deliver_frame(event: &crate::bus::OutboundEvent) -> serde_json::Value {
+    serde_json::json!({
+        "type": "session_update",
+        "user_id": event.user_id,
+        "session_id": event.session_id,
+    })
+}
+
+fn build_kick_user_frame(user_id: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "kick_user", "user_id": user_id })
+}
+
+/// Send a kick_user frame to plexus-gateway. The gateway will cancel
+/// every browser WebSocket whose user_id matches. Used by the account
+/// deletion flow (AD-5) to close live browser connections for a
+/// deleted user.
+pub async fn kick_user(state: &AppState, user_id: &str) {
+    let sink_guard = state.gateway_sink.read().await;
+    let Some(sink) = sink_guard.as_ref() else {
+        warn!(user_id, "Gateway: not connected, cannot kick user");
+        return;
+    };
+    let frame = build_kick_user_frame(user_id);
+    let json = serde_json::to_string(&frame).unwrap();
+    let mut s = sink.lock().await;
+    if let Err(e) = futures_util::SinkExt::send(
+        &mut *s,
+        tokio_tungstenite::tungstenite::Message::Text(json.into()),
+    )
+    .await
+    {
+        warn!(error = %e, user_id, "Gateway: kick_user send failed");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,62 +301,5 @@ mod tests {
         let frame = build_kick_user_frame("user-42");
         assert_eq!(frame["type"], "kick_user");
         assert_eq!(frame["user_id"], "user-42");
-    }
-}
-
-/// Deliver an outbound event to the gateway.
-pub async fn deliver(state: &AppState, event: &OutboundEvent) {
-    let sink = state.gateway_sink.read().await;
-    let Some(sink) = sink.as_ref() else {
-        warn!("Gateway: not connected, dropping outbound message");
-        return;
-    };
-    let msg = build_deliver_frame(event);
-    let json = serde_json::to_string(&msg).unwrap();
-    let mut s = sink.lock().await;
-    if let Err(e) = futures_util::SinkExt::send(
-        &mut *s,
-        tokio_tungstenite::tungstenite::Message::Text(json.into()),
-    )
-    .await
-    {
-        warn!("Gateway: send failed: {e}");
-    }
-}
-
-/// Build the WS frame sent to plexus-gateway. Always a session_update
-/// pointer — browsers fetch content via the existing REST history endpoint.
-fn build_deliver_frame(event: &crate::bus::OutboundEvent) -> serde_json::Value {
-    serde_json::json!({
-        "type": "session_update",
-        "user_id": event.user_id,
-        "session_id": event.session_id,
-    })
-}
-
-fn build_kick_user_frame(user_id: &str) -> serde_json::Value {
-    serde_json::json!({ "type": "kick_user", "user_id": user_id })
-}
-
-/// Send a kick_user frame to plexus-gateway. The gateway will cancel
-/// every browser WebSocket whose user_id matches. Used by the account
-/// deletion flow (AD-5) to close live browser connections for a
-/// deleted user.
-pub async fn kick_user(state: &AppState, user_id: &str) {
-    let sink_guard = state.gateway_sink.read().await;
-    let Some(sink) = sink_guard.as_ref() else {
-        warn!(user_id, "Gateway: not connected, cannot kick user");
-        return;
-    };
-    let frame = build_kick_user_frame(user_id);
-    let json = serde_json::to_string(&frame).unwrap();
-    let mut s = sink.lock().await;
-    if let Err(e) = futures_util::SinkExt::send(
-        &mut *s,
-        tokio_tungstenite::tungstenite::Message::Text(json.into()),
-    )
-    .await
-    {
-        warn!(error = %e, user_id, "Gateway: kick_user send failed");
     }
 }

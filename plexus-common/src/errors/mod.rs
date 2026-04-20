@@ -197,7 +197,7 @@ mod tests {
         ];
         for code in codes {
             let s = code.http_status();
-            assert!(s >= 400 && s < 600, "Bad status for {code}: {s}");
+            assert!((400..600).contains(&s), "Bad status for {code}: {s}");
         }
     }
 

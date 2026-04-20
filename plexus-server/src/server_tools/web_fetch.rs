@@ -145,8 +145,6 @@ pub async fn web_fetch(state: &Arc<AppState>, _user_id: &str, args: &Value) -> (
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn ssrf_private_ips_rejected() {
         assert!(
