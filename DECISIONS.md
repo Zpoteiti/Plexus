@@ -518,7 +518,74 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 
 ---
 
-## 10. Explicit Non-Goals (v1)
+## 10. Safety
+
+### ADR-072 · Server is not a code execution environment for agents
+
+**Status:** accepted
+**Context:** The server hosts user workspaces on disk — SOUL.md, MEMORY.md, `skills/`, `.attachments/`, arbitrary user-uploaded files. Any of these could contain executable content (a shell script, a Python file, a binary). The agent itself can write such content via `write_file`. The question: can the agent, or the content, cause the server to execute something?
+**Decision:** **No.** The agent's server-side tool surface is deliberately restricted to non-executing operations:
+
+- **File tools** (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_dir`, `glob`, `grep`) — byte-level operations through `workspace_fs`. Read and write content, never interpret it.
+- **`message`** — delivers text/media to a channel. No execution.
+- **`web_fetch`** — HTTP GET/POST with hardcoded RFC-1918 block (ADR-052). Content is returned as bytes; server does not evaluate.
+- **`cron`** — schedules future agent invocations. Does not itself execute anything.
+- **`file_transfer`** — moves bytes between server and a device. No execution.
+
+Absent, deliberately: `shell`, `exec`, `python`, `eval`, any code-execution tool.
+
+**Consequence:** An agent that writes `rm -rf /` into `~/workspace/evil.sh` cannot trigger its execution on the server. Same for anything in MEMORY.md, SOUL.md, `skills/*/SKILL.md`, `.attachments/`. The server treats all user/agent-provided files as inert data.
+
+**Corollary — server-side MCP subprocesses are the one admin-gated exception.** Admin-installed MCPs (ADR-047) run as `TokioChildProcess` via rmcp. This is intentional code execution, but access is:
+- Admin-configured only (`PUT /api/server-mcp`, admin JWT required).
+- Not agent-reachable beyond the MCP's declared tool schemas.
+- Schema-collision-checked at install (ADR-049).
+
+Admin is trusted. Agent is not. The shape of "admin explicitly installs; agent calls tools through protocol" keeps the blast radius bounded to what the MCP itself exposes.
+
+### ADR-073 · Client-side code execution is sandboxed by default; user-opted to unrestricted
+
+**Status:** accepted
+**Context:** The client's purpose is precisely the opposite of the server's — it exists to give the agent code-execution capability on the user's device (shell commands, MCP subprocesses, file writes that users will then run themselves). That necessarily creates a risk surface.
+**Decision:** Defense-in-depth with two explicit tiers, user-selected per device:
+
+1. **`fs_policy = "sandbox"` (default).** On Linux, `shell` and client-side MCP subprocesses run inside a `bwrap` jail rooted at the device's `workspace_path`. The jail read-binds `/usr`, `/bin`, `/lib`, `/etc/ssl/certs`, etc. (minimum to make a subprocess function), binds `workspace_path` read-write, tmpfs-mounts everything else. No access to `$HOME`, no access to files outside the workspace, no access to host env beyond a minimal whitelist (`PATH`, `HOME`, `LANG`, `TERM`).
+2. **`fs_policy = "unrestricted"`.** Sandbox disabled. Agent runs shell + subprocesses with the client process's full privileges. **Toggle requires typed-device-name confirmation** (ADR-051).
+
+**Platform coverage in v1:** Linux (bwrap) only. Non-Linux clients effectively run unrestricted even if `fs_policy="sandbox"` is set, because the sandbox primitive isn't available. Future: macOS `sandbox-exec`, Windows Job Objects / AppContainer. Not blockers for v1.
+
+**Consequences:**
+- **Trust model is explicit.** Server protects itself (ADR-072); client protects the user *with the user's consent.* A user who flips to unrestricted or runs Plexus on a non-Linux platform without a sandbox primitive accepts that the agent runs with their full user permissions.
+- **The sandbox is a defense, not a guarantee.** `bwrap` namespace isolation is strong but not unbreakable — notable escapes exist for adjacent kernel bugs, privileged capabilities, or misconfigurations. Plexus documents the risk in the device setup UI.
+- **Environment isolation applies even in unrestricted mode for shell.** We strip host env to a small whitelist before exec, so secrets in `$GITHUB_TOKEN` etc. don't leak to agent-run processes. (Inherited from nanobot's pattern.)
+- **Future sandbox primitives slot in via `fs_policy` values.** Adding macOS support means adding a `fs_policy="sandbox-darwin"` variant or extending the existing `sandbox` enum. No protocol change.
+
+### ADR-074 · Trust model summary
+
+**Status:** accepted (documentation ADR)
+**Context:** The above ADRs define the "what"; this one is the "who trusts whom."
+**Decision:**
+| Principal | Trusted by | To do |
+|---|---|---|
+| **Admin** (platform operator) | Plexus itself, all users on this deployment | Install server-side MCPs, configure LLM provider, set rate policies (ADR-056 — none in v1), delete users |
+| **User** (Plexus account partner) | Their own resources (workspace, devices, channels) | Manage their devices, their skills, their memory, their integrations, their conversation history |
+| **Agent** | The user for their own conversation | Read + write within the user's workspace; execute on the user's sandboxed devices; message through the user's connected channels |
+| **Partner** (the human on the other end of a channel conversation) | The agent, for responsiveness | Treated as the user by default when the channel config matches; otherwise treated as untrusted (ADR-007) |
+
+**Hard boundaries:**
+- Agents never cross user boundaries (user A's agent cannot read user B's workspace).
+- Agents cannot execute code on the server (ADR-072).
+- Server never inspects or executes content users upload (treated as inert data).
+- Cross-account impersonation via JWT forgery is the primary risk and handled by JWT signing (ADR-004); compromise of `JWT_SECRET` is a catastrophic admin-level concern, documented in deployment material.
+
+**What this explicitly does NOT try to defend against:**
+- **The user's own agent going off the rails.** If a user instructs their agent to `rm -rf ~` on their own unrestricted device, the agent will comply. That's a user-ergonomics + sandbox policy question, not a platform security question.
+- **Compromised LLM provider.** If the admin-configured LLM starts returning malicious tool calls, the agent will attempt them. In sandbox mode this is bounded to the workspace; in unrestricted, the user has accepted the risk.
+- **Partners on shared channels.** If Alice shares a Discord channel with Bob, Bob's untrusted-wrapped messages reach the agent. Wrap + system prompt teach the agent to reject instructions from non-partners (ADR-007). Not a cryptographic guarantee.
+
+---
+
+## 11. Explicit Non-Goals (v1)
 
 Listed here so scope is clear. Each is defensible future work but out of M0–M3.
 
