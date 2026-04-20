@@ -93,15 +93,18 @@ export interface DeviceConfig {
   mcp_servers: McpServerEntry[]
 }
 
-// MCP server config entry (used by both server and client MCP)
+// MCP server config entry (used by both server and client MCP).
+// Mirrors `plexus_common::protocol::McpServerEntry`.
 export interface McpServerEntry {
   name: string
+  transport_type?: string | null
   command: string
   args: string[]
-  env?: Record<string, string>
-  url?: string
+  env?: Record<string, string> | null
+  url?: string | null
+  headers?: Record<string, string> | null
+  tool_timeout?: number | null
   enabled: boolean
-  tool_timeout?: number
 }
 
 // Discord channel config

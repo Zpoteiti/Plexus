@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft } from 'lucide-react'
-import { api } from '../lib/api'
+import { ArrowLeft, Eye, EyeOff, Plus, Trash2 } from 'lucide-react'
+import { api, ApiError } from '../lib/api'
 import type { LlmConfig, RateLimit, DefaultSoul, McpServerEntry, AdminUser } from '../lib/types'
 
 type Tab = 'llm' | 'soul' | 'rate' | 'mcp' | 'users'
@@ -14,7 +14,7 @@ export default function Admin() {
     { id: 'llm', label: 'LLM' },
     { id: 'soul', label: 'Default Soul' },
     { id: 'rate', label: 'Rate Limit' },
-    { id: 'mcp', label: 'Server MCP' },
+    { id: 'mcp', label: 'Server MCPs' },
     { id: 'users', label: 'Users' },
   ]
 
@@ -206,48 +206,538 @@ function RateLimitTab() {
   )
 }
 
-// ── Server MCP Tab ────────────────────────────────────────────────────────────
+// ── Server MCPs Tab ───────────────────────────────────────────────────────────
+//
+// Structured editor for server-wide MCP configs (FR5 / spec §10.3). List rows
+// show each installed MCP with masked env values; Add / Remove / Edit flow
+// through a modal. Saves replace-all via PUT /api/server-mcp.
+
+type Transport = 'stdio' | 'http'
+
+function transportOf(m: McpServerEntry): Transport {
+  if (m.transport_type === 'http') return 'http'
+  if (m.transport_type === 'stdio') return 'stdio'
+  // Infer when legacy entries omit transport_type.
+  return m.url ? 'http' : 'stdio'
+}
+
+function emptyEntry(): McpServerEntry {
+  return {
+    name: '',
+    transport_type: 'stdio',
+    command: '',
+    args: [],
+    env: {},
+    url: null,
+    headers: null,
+    tool_timeout: null,
+    enabled: true,
+  }
+}
 
 function ServerMcpTab() {
-  const [json, setJson] = useState('[]')
-  const [msg, setMsg] = useState('')
-  const [loading, setLoading] = useState(false)
+  const [servers, setServers] = useState<McpServerEntry[] | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
 
-  useEffect(() => {
-    api
-      .get<{ mcp_servers: McpServerEntry[] }>('/api/server-mcp')
-      .then(r => setJson(JSON.stringify(r.mcp_servers, null, 2)))
-      .catch(() => {})
-  }, [])
+  // Modal state: `null` = closed, `{ index: null }` = add, `{ index: n }` = edit row n.
+  const [editing, setEditing] = useState<{ index: number | null } | null>(null)
+  const [confirmRemove, setConfirmRemove] = useState<number | null>(null)
 
-  async function save() {
-    setLoading(true)
+  async function load() {
     try {
-      const parsed = JSON.parse(json) as McpServerEntry[]
-      await api.put('/api/server-mcp', { mcp_servers: parsed })
-      setMsg('Server MCP saved. Servers will restart.')
+      const r = await api.get<{ mcp_servers: McpServerEntry[] }>('/api/server-mcp')
+      setServers(r.mcp_servers ?? [])
+      setLoadError(null)
     } catch (e) {
-      setMsg(e instanceof Error ? e.message : 'Invalid JSON')
-    } finally {
-      setLoading(false)
+      setLoadError(e instanceof Error ? e.message : 'Failed to load MCP config')
     }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  async function persist(next: McpServerEntry[]): Promise<boolean> {
+    setSaving(true)
+    setErr(null)
+    setMsg(null)
+    try {
+      await api.put('/api/server-mcp', { mcp_servers: next })
+      // Confirm server state by refetching (spec §10.3).
+      await load()
+      setMsg('Server MCP saved. Servers will restart.')
+      return true
+    } catch (e) {
+      if (e instanceof ApiError) {
+        setErr(e.message)
+      } else {
+        setErr(e instanceof Error ? e.message : 'Save failed')
+      }
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function onSaveEntry(entry: McpServerEntry, index: number | null): Promise<boolean> {
+    if (!servers) return false
+    const next = [...servers]
+    if (index === null) next.push(entry)
+    else next[index] = entry
+    return persist(next)
+  }
+
+  async function onRemove(index: number) {
+    if (!servers) return
+    const next = servers.filter((_, i) => i !== index)
+    await persist(next)
+    setConfirmRemove(null)
+  }
+
+  if (loadError) {
+    return (
+      <div className="text-xs" style={{ color: '#ef4444' }}>{loadError}</div>
+    )
+  }
+  if (!servers) {
+    return (
+      <div className="text-xs" style={{ color: 'var(--muted)' }}>Loading…</div>
+    )
   }
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="text-xs" style={{ color: 'var(--muted)' }}>
-        MCP servers available to all users on this instance.
-      </p>
-      <textarea
-        value={json}
-        onChange={e => setJson(e.target.value)}
-        rows={16}
-        placeholder={'[{"name":"minimax","command":"uvx","args":["minimax-mcp"],"env":{"MINIMAX_API_KEY":"..."},"enabled":true}]'}
-        className="w-full rounded-lg p-3 text-xs font-mono resize-y outline-none border"
-        style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
-      />
-      <AdminSave onClick={save} loading={loading} />
+      <div className="flex items-center justify-between">
+        <p className="text-xs" style={{ color: 'var(--muted)' }}>
+          MCP servers available to all users on this instance.
+        </p>
+        <button
+          onClick={() => setEditing({ index: null })}
+          className="flex items-center gap-1 text-xs px-3 py-1.5 rounded font-semibold"
+          style={{ background: 'var(--accent)', color: '#000' }}
+        >
+          <Plus size={14} /> Add MCP
+        </button>
+      </div>
+
+      {servers.length === 0 && (
+        <p className="text-xs" style={{ color: 'var(--muted)' }}>
+          No MCP servers configured.
+        </p>
+      )}
+
+      <ul className="list-none p-0 m-0 flex flex-col gap-2">
+        {servers.map((s, i) => (
+          <McpRow
+            key={`${s.name}-${i}`}
+            entry={s}
+            onEdit={() => setEditing({ index: i })}
+            onRemove={() => setConfirmRemove(i)}
+          />
+        ))}
+      </ul>
+
+      {err && <p className="text-xs" style={{ color: '#ef4444' }}>{err}</p>}
       {msg && <p className="text-xs" style={{ color: 'var(--accent)' }}>{msg}</p>}
+
+      {editing && (
+        <McpModal
+          initial={editing.index === null ? emptyEntry() : servers[editing.index]}
+          existingNames={servers
+            .filter((_, i) => i !== editing.index)
+            .map(s => s.name)}
+          saving={saving}
+          onCancel={() => setEditing(null)}
+          onSave={async (entry) => {
+            const ok = await onSaveEntry(entry, editing.index)
+            if (ok) setEditing(null)
+          }}
+        />
+      )}
+
+      {confirmRemove !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.5)' }}
+          onClick={() => !saving && setConfirmRemove(null)}
+        >
+          <div
+            className="rounded p-6 max-w-md w-full"
+            style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold mb-2" style={{ color: '#ef4444' }}>
+              Remove {servers[confirmRemove].name}?
+            </h2>
+            <p className="text-sm mb-4" style={{ color: 'var(--muted)' }}>
+              The MCP server will be removed from this instance and restarted
+              without it. Users will lose access to its tools.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmRemove(null)}
+                disabled={saving}
+                className="text-sm px-3 py-1 rounded"
+                style={{ border: '1px solid var(--border)' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void onRemove(confirmRemove)}
+                disabled={saving}
+                className="text-sm px-3 py-1 rounded"
+                style={{ background: '#ef4444', color: 'white' }}
+              >
+                {saving ? 'Removing…' : 'Remove'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function McpRow({
+  entry,
+  onEdit,
+  onRemove,
+}: {
+  entry: McpServerEntry
+  onEdit: () => void
+  onRemove: () => void
+}) {
+  const transport = transportOf(entry)
+  const envEntries = Object.entries(entry.env ?? {})
+
+  return (
+    <li
+      className="rounded border px-4 py-3 flex flex-col gap-2"
+      style={{ borderColor: 'var(--border)', background: 'var(--card)' }}
+    >
+      <div className="flex items-center gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-semibold truncate">
+            {entry.name || <span style={{ color: 'var(--muted)' }}>(unnamed)</span>}
+            <span
+              className="ml-2 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded"
+              style={{ background: 'var(--bg)', color: 'var(--muted)', border: '1px solid var(--border)' }}
+            >
+              {transport}
+            </span>
+            {!entry.enabled && (
+              <span
+                className="ml-2 text-[10px] uppercase tracking-wider"
+                style={{ color: 'var(--muted)' }}
+              >
+                disabled
+              </span>
+            )}
+          </div>
+          <div
+            className="text-xs font-mono truncate"
+            style={{ color: 'var(--muted)' }}
+          >
+            {transport === 'http'
+              ? (entry.url ?? '(no url)')
+              : [entry.command, ...(entry.args ?? [])].filter(Boolean).join(' ') || '(no command)'}
+          </div>
+        </div>
+        <button
+          onClick={onEdit}
+          className="text-xs px-2 py-1 rounded"
+          style={{ border: '1px solid var(--border)' }}
+        >
+          Edit
+        </button>
+        <button
+          onClick={onRemove}
+          className="text-xs px-2 py-1 rounded flex items-center gap-1"
+          style={{ border: '1px solid var(--border)', color: '#ef4444' }}
+        >
+          <Trash2 size={12} /> Remove
+        </button>
+      </div>
+
+      {envEntries.length > 0 && (
+        <div className="flex flex-col gap-1 pt-1 border-t" style={{ borderColor: 'var(--border)' }}>
+          <div className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
+            env
+          </div>
+          <ul className="list-none p-0 m-0 flex flex-col gap-0.5">
+            {envEntries.map(([k, v]) => (
+              <EnvRow key={k} name={k} value={v} />
+            ))}
+          </ul>
+        </div>
+      )}
+    </li>
+  )
+}
+
+function EnvRow({ name, value }: { name: string; value: string }) {
+  const [shown, setShown] = useState(false)
+  return (
+    <li className="flex items-center gap-2 text-xs font-mono">
+      <span style={{ color: 'var(--accent)' }}>{name}</span>
+      <span style={{ color: 'var(--muted)' }}>=</span>
+      <span className="flex-1 truncate" style={{ color: 'var(--text)' }}>
+        {shown ? value : '••••••••'}
+      </span>
+      <button
+        type="button"
+        onClick={() => setShown(s => !s)}
+        className="p-1 rounded"
+        style={{ color: 'var(--muted)' }}
+        title={shown ? 'Hide' : 'Show'}
+      >
+        {shown ? <EyeOff size={12} /> : <Eye size={12} />}
+      </button>
+    </li>
+  )
+}
+
+function McpModal({
+  initial,
+  existingNames,
+  saving,
+  onCancel,
+  onSave,
+}: {
+  initial: McpServerEntry
+  existingNames: string[]
+  saving: boolean
+  onCancel: () => void
+  onSave: (entry: McpServerEntry) => void | Promise<void>
+}) {
+  const [draft, setDraft] = useState<McpServerEntry>(() => ({
+    ...initial,
+    transport_type: initial.transport_type ?? transportOf(initial),
+    args: initial.args ?? [],
+    env: initial.env ?? {},
+  }))
+  const [localErr, setLocalErr] = useState<string | null>(null)
+
+  // Stdio: keep args as a single space-separated string in the form.
+  const [argsText, setArgsText] = useState<string>((initial.args ?? []).join(' '))
+
+  // Env list — sorted by insertion order via array of tuples to allow blank keys.
+  const [envPairs, setEnvPairs] = useState<Array<{ key: string; value: string; shown: boolean }>>(
+    () => Object.entries(initial.env ?? {}).map(([k, v]) => ({ key: k, value: v, shown: false })),
+  )
+
+  const transport: Transport = draft.transport_type === 'http' ? 'http' : 'stdio'
+
+  function handleSubmit() {
+    setLocalErr(null)
+    const name = draft.name.trim()
+    if (!name) {
+      setLocalErr('Name is required.')
+      return
+    }
+    if (existingNames.includes(name)) {
+      setLocalErr('Name must be unique.')
+      return
+    }
+
+    let entry: McpServerEntry
+    if (transport === 'http') {
+      const url = (draft.url ?? '').trim()
+      if (!url) {
+        setLocalErr('URL is required for http transport.')
+        return
+      }
+      entry = {
+        name,
+        transport_type: 'http',
+        command: '',
+        args: [],
+        env: null,
+        url,
+        headers: draft.headers ?? null,
+        tool_timeout: draft.tool_timeout ?? null,
+        enabled: draft.enabled,
+      }
+    } else {
+      const command = draft.command.trim()
+      if (!command) {
+        setLocalErr('Command is required for stdio transport.')
+        return
+      }
+      const args = argsText.trim() === '' ? [] : argsText.trim().split(/\s+/)
+      const envObj: Record<string, string> = {}
+      for (const { key, value } of envPairs) {
+        const k = key.trim()
+        if (!k) continue
+        envObj[k] = value
+      }
+      entry = {
+        name,
+        transport_type: 'stdio',
+        command,
+        args,
+        env: Object.keys(envObj).length > 0 ? envObj : null,
+        url: null,
+        headers: null,
+        tool_timeout: draft.tool_timeout ?? null,
+        enabled: draft.enabled,
+      }
+    }
+
+    void onSave(entry)
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: 'rgba(0,0,0,0.5)' }}
+      onClick={() => !saving && onCancel()}
+    >
+      <div
+        className="rounded p-6 max-w-lg w-full max-h-[90vh] overflow-y-auto flex flex-col gap-4"
+        style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-lg font-semibold">
+          {initial.name ? 'Edit MCP Server' : 'Add MCP Server'}
+        </h2>
+
+        <AdminField
+          label="Name"
+          value={draft.name}
+          onChange={v => setDraft(d => ({ ...d, name: v }))}
+          placeholder="my-mcp"
+        />
+
+        <div className="flex flex-col gap-1">
+          <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
+            Transport
+          </label>
+          <select
+            value={transport}
+            onChange={e => setDraft(d => ({ ...d, transport_type: e.target.value as Transport }))}
+            className="rounded-lg px-3 py-2 text-sm outline-none border"
+            style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
+          >
+            <option value="stdio">stdio (command)</option>
+            <option value="http">http (url)</option>
+          </select>
+        </div>
+
+        {transport === 'http' ? (
+          <AdminField
+            label="URL"
+            value={draft.url ?? ''}
+            onChange={v => setDraft(d => ({ ...d, url: v }))}
+            placeholder="https://example.com/mcp"
+          />
+        ) : (
+          <>
+            <AdminField
+              label="Command"
+              value={draft.command}
+              onChange={v => setDraft(d => ({ ...d, command: v }))}
+              placeholder="uvx"
+            />
+            <AdminField
+              label="Args (space-separated)"
+              value={argsText}
+              onChange={setArgsText}
+              placeholder="minimax-mcp --flag value"
+            />
+
+            {/* env editor */}
+            <div className="flex flex-col gap-1">
+              <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
+                Env
+              </label>
+              <div className="flex flex-col gap-1">
+                {envPairs.map((p, i) => (
+                  <div key={i} className="flex items-center gap-1">
+                    <input
+                      type="text"
+                      value={p.key}
+                      onChange={e => setEnvPairs(prev => prev.map((x, j) => j === i ? { ...x, key: e.target.value } : x))}
+                      placeholder="KEY"
+                      className="w-32 rounded-lg px-2 py-1.5 text-xs font-mono outline-none border"
+                      style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
+                    />
+                    <span style={{ color: 'var(--muted)' }}>=</span>
+                    <input
+                      type={p.shown ? 'text' : 'password'}
+                      value={p.value}
+                      onChange={e => setEnvPairs(prev => prev.map((x, j) => j === i ? { ...x, value: e.target.value } : x))}
+                      placeholder="value"
+                      className="flex-1 rounded-lg px-2 py-1.5 text-xs font-mono outline-none border"
+                      style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setEnvPairs(prev => prev.map((x, j) => j === i ? { ...x, shown: !x.shown } : x))}
+                      className="p-1 rounded"
+                      style={{ color: 'var(--muted)' }}
+                      title={p.shown ? 'Hide' : 'Show'}
+                    >
+                      {p.shown ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEnvPairs(prev => prev.filter((_, j) => j !== i))}
+                      className="p-1 rounded"
+                      style={{ color: '#ef4444' }}
+                      title="Remove"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => setEnvPairs(prev => [...prev, { key: '', value: '', shown: false }])}
+                  className="self-start text-xs px-2 py-1 rounded flex items-center gap-1"
+                  style={{ border: '1px solid var(--border)', color: 'var(--muted)' }}
+                >
+                  <Plus size={12} /> Add env var
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        <div className="flex items-center gap-2">
+          <input
+            id="mcp-enabled"
+            type="checkbox"
+            checked={draft.enabled}
+            onChange={e => setDraft(d => ({ ...d, enabled: e.target.checked }))}
+          />
+          <label htmlFor="mcp-enabled" className="text-xs" style={{ color: 'var(--muted)' }}>
+            Enabled
+          </label>
+        </div>
+
+        {localErr && <p className="text-xs" style={{ color: '#ef4444' }}>{localErr}</p>}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={saving}
+            className="text-sm px-3 py-1 rounded"
+            style={{ border: '1px solid var(--border)' }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="text-sm px-3 py-1 rounded font-semibold"
+            style={{ background: 'var(--accent)', color: '#000' }}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
