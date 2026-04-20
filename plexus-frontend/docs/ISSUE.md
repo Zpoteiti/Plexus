@@ -4,7 +4,6 @@ Open, deferred, and closed issues for the frontend. Updated by `/wrap-up` at the
 
 ## Open
 <!-- Active issues that need attention this session or next -->
-- [ ] **Frontend cleanup pass** — backend side of the post-M2 cleanup is complete; frontend calls need to catch up. See plexus-server/docs/ISSUE.md Open for the full scope (P4.6 image-drop to workspace PUT + base64; P7.5 Settings device-config editor with fs_policy typed-confirm; P9.1 Workspace.tsx `.attachments/` collapse + MEMORY.md/SKILL.md inline; P9.2 Admin Server-MCPs tab; P3.7 route migration from `/api/workspace/file?path=` to `/api/workspace/files/{*path}`).
 
 ## Deferred
 <!-- Acknowledged but intentionally postponed — include context and date -->
@@ -12,6 +11,7 @@ Open, deferred, and closed issues for the frontend. Updated by `/wrap-up` at the
 
 ## Closed
 <!-- Resolved issues — keep for historical context -->
+- [x] **Frontend cleanup pass (FR2/FR2b/FR3/FR4/FR5)** — chat image-drop now PUTs to workspace `.attachments/` + embeds base64 content blocks; REST-loaded historical messages parse stringified Content::Blocks; Settings device-config editor covers workspace_path/shell_timeout_max/ssrf_whitelist/fs_policy with typed-device-name confirm modal for unrestricted; Workspace.tsx collapses `.attachments/` + renders MEMORY.md/skills/*/SKILL.md as inline markdown with edit mode; Admin.tsx Server MCPs tab with add/edit/remove + env masking. npm typecheck + build green. (commits cf9cf3d..058def2 + a03cf4c, 2026-04-20)
 - [x] Account deletion UI (Settings → Danger Zone) — resolved: Danger Zone + password-confirm modal shipped in ProfileTab (commit 8c2e211, 2026-04-19)
 - [x] Session-list "unread" badge — resolved: Zustand `Session.hasUnread`; session_update handler sets on non-current; Sidebar renders 2x2 accent dot (commit 51d4468, 2026-04-19)
 - [x] ChatInput was text-only, no paperclip/drag-and-drop/paste for file attachments (resolved: Task 15 of inbound-media plan — XHR upload helper with progress, chips UI, 20MB client-side guard, commit c473c18, 2026-04-15)
