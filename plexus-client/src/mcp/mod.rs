@@ -71,6 +71,18 @@ impl McpManager {
             .collect()
     }
 
+    /// Collect per-MCP-server raw tool schemas for `RegisterTools::mcp_schemas`.
+    /// One `McpServerSchemas` entry per live session.
+    pub fn all_mcp_schemas(&self) -> Vec<plexus_common::protocol::McpServerSchemas> {
+        self.sessions
+            .values()
+            .map(|s| plexus_common::protocol::McpServerSchemas {
+                server: s.server_name().to_string(),
+                tools: s.raw_tool_schemas(),
+            })
+            .collect()
+    }
+
     /// Route a tool call to the correct MCP session.
     /// Tool name format: mcp_{server_name}_{tool_name}
     pub async fn call_tool(&self, prefixed: &str, args: Value) -> Result<String, String> {

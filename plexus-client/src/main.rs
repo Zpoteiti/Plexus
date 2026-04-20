@@ -88,22 +88,25 @@ async fn run_session(ws_url: &str, token: &str) -> Result<(), PlexusError> {
     // Collect and send tool names (built-in + MCP) + client-only tool schemas.
     {
         let mut tool_names = registry.tool_names();
-        let mcp_names: Vec<String> = mcp_manager
-            .lock()
-            .await
-            .all_tool_schemas()
-            .into_iter()
-            .filter_map(|s| {
-                s.get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|n| n.as_str())
-                    .map(|s| s.to_string())
-            })
-            .collect();
+        let (mcp_names, mcp_schemas) = {
+            let mgr = mcp_manager.lock().await;
+            let names: Vec<String> = mgr
+                .all_tool_schemas()
+                .into_iter()
+                .filter_map(|s| {
+                    s.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            (names, mgr.all_mcp_schemas())
+        };
         tool_names.extend(mcp_names);
         let msg = ClientToServer::RegisterTools {
             tool_names,
             tool_schemas: crate::tool_schemas::client_tool_schemas(),
+            mcp_schemas,
         };
         let mut s = sink.lock().await;
         send_message(&mut s, &msg).await?;
@@ -218,7 +221,7 @@ async fn message_loop(
                 if mcp_changed && let Some(new_servers) = mcp_servers {
                     let mut mgr = mcp_manager.lock().await;
                     mgr.apply_config(&new_servers).await;
-                    // Re-register tools with updated MCP names
+                    // Re-register tools with updated MCP names + schemas.
                     let mut tool_names = registry.tool_names();
                     let mcp_names: Vec<String> = mgr
                         .all_tool_schemas()
@@ -231,9 +234,11 @@ async fn message_loop(
                         })
                         .collect();
                     tool_names.extend(mcp_names);
+                    let mcp_schemas = mgr.all_mcp_schemas();
                     let msg = ClientToServer::RegisterTools {
                         tool_names,
                         tool_schemas: crate::tool_schemas::client_tool_schemas(),
+                        mcp_schemas,
                     };
                     let _ = send_message(&mut *sink.lock().await, &msg).await;
                 }
@@ -317,6 +322,20 @@ async fn message_loop(
                         warn!("send FileSendAck failed: {e}");
                     }
                 });
+            }
+            ServerToClient::RegisterToolsError {
+                code,
+                message,
+                conflicts,
+            } => {
+                // Server rejected our RegisterTools frame due to MCP schema
+                // collision (spec §4.6 / FR6). The offending MCP entries are
+                // NOT registered. Surface prominently so the user can rename
+                // the MCP or ask the admin to upgrade the shared install.
+                warn!(
+                    "Server rejected tool registration ({code}): {message}; conflicts={}",
+                    serde_json::to_string(&conflicts).unwrap_or_else(|_| "[]".into())
+                );
             }
             ServerToClient::ReadStream { request_id, path } => {
                 // FR1b: server-initiated file streaming. Spawn so the

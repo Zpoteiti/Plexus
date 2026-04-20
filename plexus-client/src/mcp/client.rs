@@ -73,6 +73,29 @@ impl McpSession {
             .collect()
     }
 
+    /// Raw (unprefixed) tool schemas for collision-detection reporting.
+    /// Sent via `ClientToServer::RegisterTools::mcp_schemas` so the server
+    /// can compare MCP schemas across install sites.
+    pub fn raw_tool_schemas(&self) -> Vec<plexus_common::protocol::McpRawTool> {
+        self.tools
+            .iter()
+            .map(|t| {
+                let params = {
+                    let v = serde_json::to_value(&*t.input_schema).unwrap_or_default();
+                    normalize_schema_for_openai(&v)
+                };
+                plexus_common::protocol::McpRawTool {
+                    name: t.name.to_string(),
+                    parameters: params,
+                }
+            })
+            .collect()
+    }
+
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
     /// Call an MCP tool by its original (unprefixed) name.
     pub async fn call_tool(&self, tool_name: &str, args: Value) -> Result<String, String> {
         let timeout = std::time::Duration::from_secs(self.tool_timeout);

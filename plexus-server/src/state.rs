@@ -27,6 +27,12 @@ pub struct DeviceConnection {
     /// (e.g. `shell`). Merged per-device by `tools_registry` into the
     /// aggregated tool list, with `device_name` enum injection.
     pub tool_schemas: Vec<Value>,
+    /// Per-MCP-server raw tool schemas reported by the device at
+    /// `RegisterTools` time (spec §4.6). Used by the schema-collision
+    /// check to compare incoming schemas against other install sites on
+    /// the same user. Only non-conflicting schemas are cached here —
+    /// conflicting entries are rejected before this field is populated.
+    pub mcp_schemas: Vec<plexus_common::protocol::McpServerSchemas>,
 }
 
 pub struct AppState {

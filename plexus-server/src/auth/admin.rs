@@ -5,6 +5,7 @@ use crate::config::LlmConfig;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
+use axum::response::IntoResponse;
 use axum::routing::{delete, get};
 use axum::{Json, Router};
 use plexus_common::errors::{ApiError, ErrorCode};
@@ -169,8 +170,121 @@ async fn put_server_mcp(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Json(req): Json<McpConfigUpdate>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     admin_claims(&headers, &state)?;
+
+    // FR6 / spec §4.6: introspect each new MCP entry, then compare its
+    // tool schemas against every other live install (other server-side
+    // MCPs in the same batch + every per-user-device MCP currently in
+    // the device cache). Any collision returns 409 with a structured
+    // `conflicts[]` body; introspection failure returns 400. Only on
+    // clean validation do we persist + reinitialize.
+    let incoming_names: std::collections::HashSet<String> =
+        req.mcp_servers.iter().map(|e| e.name.clone()).collect();
+
+    // Existing baseline = (a) server-side MCPs NOT being replaced in this
+    // batch + (b) every device's cached mcp_schemas across all users.
+    let mut existing: Vec<crate::mcp::wrap::McpInstall> = Vec::new();
+    {
+        let server_mcp = state.server_mcp.read().await;
+        for (server_name, tools) in server_mcp.raw_tool_schemas_by_server() {
+            if incoming_names.contains(&server_name) {
+                continue;
+            }
+            existing.push(crate::mcp::wrap::McpInstall {
+                install_site: plexus_common::consts::SERVER_DEVICE_NAME.to_string(),
+                mcp_server_name: server_name,
+                tools,
+            });
+        }
+    }
+    for entry in state.devices.iter() {
+        let conn = entry.value();
+        let installs =
+            crate::mcp::wrap::installs_from_reported_schemas(&conn.device_name, &conn.mcp_schemas);
+        existing.extend(installs);
+    }
+
+    // Introspect every enabled entry. Disabled entries are persisted
+    // as-is (they won't be started) but still collision-checked so a
+    // future enable doesn't surprise the user.
+    let mut introspected: Vec<(String, Vec<(String, serde_json::Value)>)> = Vec::new();
+    let mut within_batch: Vec<crate::mcp::wrap::McpInstall> = Vec::new();
+    let mut all_conflicts: Vec<serde_json::Value> = Vec::new();
+
+    for entry in &req.mcp_servers {
+        let tools = match crate::server_mcp::introspect_entry(entry).await {
+            Ok(t) => t,
+            Err(e) => {
+                return Err(ApiError::new(
+                    ErrorCode::ValidationFailed,
+                    format!("MCP introspection failed: {e}"),
+                ));
+            }
+        };
+        let incoming_install = crate::mcp::wrap::McpInstall {
+            install_site: plexus_common::consts::SERVER_DEVICE_NAME.to_string(),
+            mcp_server_name: entry.name.clone(),
+            tools: tools.clone(),
+        };
+
+        // Collision check: (a) vs existing baseline, (b) vs earlier
+        // entries in THIS batch (catches two admin-supplied MCPs that
+        // collide with each other).
+        let mut diffs = crate::mcp::wrap::diff_mcp_schema_collisions(&existing, &incoming_install);
+        diffs.extend(crate::mcp::wrap::diff_mcp_schema_collisions(
+            &within_batch,
+            &incoming_install,
+        ));
+
+        if !diffs.is_empty() {
+            for d in diffs {
+                all_conflicts.push(serde_json::json!({
+                    "mcp_server": entry.name,
+                    "tool": d.tool,
+                    "existing_schema": d.existing_schema,
+                    "new_schema": d.new_schema,
+                    "where_installed": d.where_installed,
+                }));
+            }
+        }
+
+        within_batch.push(incoming_install);
+        introspected.push((entry.name.clone(), tools));
+    }
+
+    if !all_conflicts.is_empty() {
+        // 409 body shape: flat {code, message} so the existing
+        // `ApiError::IntoResponse` serialization stays consistent for
+        // clients that just read `message`. Structured `conflicts` are
+        // appended alongside so the frontend can optionally render a
+        // per-tool diff.
+        let mut conflict_servers: Vec<String> = Vec::new();
+        for c in &all_conflicts {
+            if let Some(s) = c.get("mcp_server").and_then(|v| v.as_str())
+                && !conflict_servers.iter().any(|x| x == s)
+            {
+                conflict_servers.push(s.to_string());
+            }
+        }
+        let body = serde_json::json!({
+            "code": ErrorCode::Conflict.as_str(),
+            "message": format!(
+                "MCP schema collision on server(s): {}. Rename the install or ask an admin to upgrade.",
+                conflict_servers.join(", ")
+            ),
+            "error": "mcp_schema_collision",
+            "conflicts": all_conflicts,
+        });
+        return Ok((
+            axum::http::StatusCode::CONFLICT,
+            [("content-type", "application/json")],
+            serde_json::to_string(&body).unwrap_or_default(),
+        )
+            .into_response());
+    }
+
+    // Introspection clean — persist + reinitialize.
     let json = serde_json::to_string(&req.mcp_servers)
         .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
     crate::db::system_config::set(&state.db, "server_mcp_config", &json)
@@ -184,7 +298,8 @@ async fn put_server_mcp(
         .await;
     // Server MCP tools are shared — invalidate cache for all users
     state.tool_schema_cache.clear();
-    Ok(Json(serde_json::json!({ "mcp_servers": req.mcp_servers })))
+    let _ = introspected; // tool list reuse is a future optimization
+    Ok(Json(serde_json::json!({ "mcp_servers": req.mcp_servers })).into_response())
 }
 
 // -- List Users (Admin) --

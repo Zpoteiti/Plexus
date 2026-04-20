@@ -446,6 +446,7 @@ mod tests {
                 last_seen: std::sync::Arc::new(AtomicI64::new(0)),
                 tools: vec!["shell".into()],
                 tool_schemas: vec![fake_client_shell_schema()],
+                mcp_schemas: Vec::new(),
             },
         );
         state
