@@ -83,12 +83,14 @@ export interface DeviceToken {
   last_used: string | null
 }
 
-// Per-device filesystem policy
-export interface DevicePolicy {
+// Per-device config (GET /api/devices/{name}/config response)
+export interface DeviceConfig {
+  device_name: string
   fs_policy: { mode: 'sandbox' | 'unrestricted' }
   workspace_path: string
-  shell_timeout: number
+  shell_timeout_max: number
   ssrf_whitelist: string[]
+  mcp_servers: McpServerEntry[]
 }
 
 // MCP server config entry (used by both server and client MCP)

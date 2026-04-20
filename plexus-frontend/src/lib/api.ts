@@ -9,6 +9,21 @@ async function getAuthStore() {
   return _authStore ??= (await import('../store/auth')).useAuthStore
 }
 
+// Server returns { error: { code, message } }. For VALIDATION_FAILED the
+// message is a structured string like "field errors: foo=reason; bar=reason".
+// ApiError preserves both so callers that care can parse field errors.
+export class ApiError extends Error {
+  readonly status: number
+  readonly code: string
+
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
 async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
   const useAuthStore = await getAuthStore()
   const token = useAuthStore.getState().token
@@ -25,14 +40,16 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
 
   if (res.status === 401) {
     useAuthStore.getState().logout()
-    throw new Error('Session expired — please log in again')
+    throw new ApiError(401, 'AUTH_FAILED', 'Session expired — please log in again')
   }
 
   if (!res.ok) {
     const json = await res.json().catch(() => ({})) as Record<string, unknown>
     const errObj = json?.['error'] as Record<string, unknown> | undefined
-    const msg = errObj?.['message']
-    throw new Error(typeof msg === 'string' ? msg : `Request failed: HTTP ${res.status}`)
+    const code = typeof errObj?.['code'] === 'string' ? errObj['code'] as string : 'UNKNOWN'
+    const msgRaw = errObj?.['message']
+    const msg = typeof msgRaw === 'string' ? msgRaw : `Request failed: HTTP ${res.status}`
+    throw new ApiError(res.status, code, msg)
   }
 
   // Some endpoints return 204 No Content

@@ -1,13 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowLeft } from 'lucide-react'
-import { api } from '../lib/api'
+import { api, ApiError } from '../lib/api'
 import { useAuthStore } from '../store/auth'
 import type {
   User,
   Device,
   DeviceToken,
-  DevicePolicy,
+  DeviceConfig,
   McpServerEntry,
   DiscordConfig,
   TelegramConfig,
@@ -252,14 +252,35 @@ function ProfileTab() {
 
 // ── Devices Tab ───────────────────────────────────────────────────────────────
 
+// Fields a user can PATCH on a device config.
+type EditableField = 'workspace_path' | 'shell_timeout_max' | 'ssrf_whitelist' | 'fs_policy'
+
+// Parse the server's VALIDATION_FAILED message — shape:
+//   "field errors: workspace_path=not absolute; shell_timeout_max=out of range (10-1800)"
+// — into a per-field error map the UI can render inline.
+function parseValidationMessage(msg: string): Partial<Record<EditableField, string>> {
+  const out: Partial<Record<EditableField, string>> = {}
+  const body = msg.replace(/^field errors:\s*/, '')
+  for (const part of body.split(';')) {
+    const trimmed = part.trim()
+    if (!trimmed) continue
+    const eq = trimmed.indexOf('=')
+    if (eq < 0) continue
+    const key = trimmed.slice(0, eq).trim() as EditableField
+    const val = trimmed.slice(eq + 1).trim()
+    if (key === 'workspace_path' || key === 'shell_timeout_max' || key === 'ssrf_whitelist' || key === 'fs_policy') {
+      out[key] = val
+    }
+  }
+  return out
+}
+
 function DevicesTab() {
   const [devices, setDevices] = useState<Device[]>([])
   const [tokens, setTokens] = useState<DeviceToken[]>([])
   const [newTokenName, setNewTokenName] = useState('')
   const [createdToken, setCreatedToken] = useState('')
   const [expandedDevice, setExpandedDevice] = useState<string | null>(null)
-  const [policies, setPolicies] = useState<Record<string, DevicePolicy>>({})
-  const [mcpConfigs, setMcpConfigs] = useState<Record<string, string>>({})
   const [msg, setMsg] = useState('')
 
   useEffect(() => { void refresh() }, [])
@@ -284,35 +305,6 @@ function DevicesTab() {
   async function deleteToken(token: string) {
     await api.delete(`/api/device-tokens/${token}`)
     void refresh()
-  }
-
-  async function expandDevice(name: string) {
-    setExpandedDevice(expandedDevice === name ? null : name)
-    if (!policies[name]) {
-      const [policy, mcp] = await Promise.all([
-        api.get<DevicePolicy>(`/api/devices/${name}/policy`),
-        api.get<{ mcp_servers: McpServerEntry[] }>(`/api/devices/${name}/mcp`),
-      ])
-      setPolicies(p => ({ ...p, [name]: policy }))
-      setMcpConfigs(m => ({ ...m, [name]: JSON.stringify(mcp.mcp_servers, null, 2) }))
-    }
-  }
-
-  async function savePolicy(name: string) {
-    const policy = policies[name]
-    if (!policy) return
-    await api.patch(`/api/devices/${name}/policy`, { fs_policy: policy.fs_policy })
-    setMsg(`Policy saved for ${name}`)
-  }
-
-  async function saveMcp(name: string) {
-    try {
-      const parsed = JSON.parse(mcpConfigs[name] ?? '[]') as McpServerEntry[]
-      await api.put(`/api/devices/${name}/mcp`, { mcp_servers: parsed })
-      setMsg(`MCP saved for ${name}`)
-    } catch {
-      setMsg('Invalid JSON')
-    }
   }
 
   return (
@@ -356,7 +348,7 @@ function DevicesTab() {
         {devices.map(d => (
           <div key={d.device_name} className="border rounded-lg overflow-hidden mb-2" style={{ borderColor: 'var(--border)' }}>
             <button
-              onClick={() => expandDevice(d.device_name)}
+              onClick={() => setExpandedDevice(expandedDevice === d.device_name ? null : d.device_name)}
               className="w-full flex items-center justify-between px-4 py-3 text-sm hover:bg-[#1a2332] transition-colors"
             >
               <div className="flex items-center gap-2">
@@ -374,50 +366,446 @@ function DevicesTab() {
               </span>
             </button>
 
-            {expandedDevice === d.device_name && policies[d.device_name] && (
-              <div className="px-4 pb-4 flex flex-col gap-4 border-t" style={{ borderColor: 'var(--border)' }}>
-                <div className="mt-3">
-                  <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
-                    Filesystem Policy
-                  </label>
-                  <select
-                    value={policies[d.device_name].fs_policy.mode}
-                    onChange={e => setPolicies(p => ({
-                      ...p,
-                      [d.device_name]: {
-                        ...p[d.device_name],
-                        fs_policy: { mode: e.target.value as 'sandbox' | 'unrestricted' },
-                      },
-                    }))}
-                    className="mt-1 w-full rounded-lg px-3 py-2 text-sm outline-none border"
-                    style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
-                  >
-                    <option value="sandbox">Sandbox (workspace only)</option>
-                    <option value="unrestricted">Unrestricted (full access)</option>
-                  </select>
-                  <SaveButton onClick={() => savePolicy(d.device_name)} label="Save Policy" loading={false} />
-                </div>
-
-                <div>
-                  <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
-                    MCP Servers (JSON)
-                  </label>
-                  <textarea
-                    value={mcpConfigs[d.device_name] ?? '[]'}
-                    onChange={e => setMcpConfigs(m => ({ ...m, [d.device_name]: e.target.value }))}
-                    rows={6}
-                    className="mt-1 w-full rounded-lg p-3 text-xs font-mono resize-y outline-none border"
-                    style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
-                  />
-                  <SaveButton onClick={() => saveMcp(d.device_name)} label="Save MCP" loading={false} />
-                </div>
-              </div>
+            {expandedDevice === d.device_name && (
+              <DeviceConfigEditor
+                deviceName={d.device_name}
+                onSaved={(m) => setMsg(m)}
+              />
             )}
           </div>
         ))}
       </Section>
 
       {msg && <p className="text-xs" style={{ color: 'var(--accent)' }}>{msg}</p>}
+    </div>
+  )
+}
+
+// ── Device config editor (per-row expander) ───────────────────────────────────
+
+function DeviceConfigEditor({
+  deviceName,
+  onSaved,
+}: {
+  deviceName: string
+  onSaved: (msg: string) => void
+}) {
+  const [server, setServer] = useState<DeviceConfig | null>(null)
+  const [draft, setDraft] = useState<DeviceConfig | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<EditableField, string>>>({})
+  const [topError, setTopError] = useState<string | null>(null)
+  const [confirmUnrestricted, setConfirmUnrestricted] = useState(false)
+
+  // MCP JSON editor — unchanged from old flow.
+  const [mcpJson, setMcpJson] = useState<string>('[]')
+  const [mcpMsg, setMcpMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const cfg = await api.get<DeviceConfig>(`/api/devices/${deviceName}/config`)
+        if (cancelled) return
+        setServer(cfg)
+        setDraft(cfg)
+        setMcpJson(JSON.stringify(cfg.mcp_servers ?? [], null, 2))
+      } catch (e) {
+        if (cancelled) return
+        setLoadError(e instanceof Error ? e.message : 'Failed to load config')
+      }
+    })()
+    return () => { cancelled = true }
+  }, [deviceName])
+
+  // Shallow per-field diff — only send what actually changed.
+  const diff = useMemo(() => {
+    if (!server || !draft) return {} as Partial<Record<EditableField, unknown>>
+    const out: Partial<Record<EditableField, unknown>> = {}
+    if (draft.workspace_path !== server.workspace_path) out.workspace_path = draft.workspace_path
+    if (draft.shell_timeout_max !== server.shell_timeout_max) out.shell_timeout_max = draft.shell_timeout_max
+    if (JSON.stringify(draft.ssrf_whitelist) !== JSON.stringify(server.ssrf_whitelist)) out.ssrf_whitelist = draft.ssrf_whitelist
+    if (draft.fs_policy.mode !== server.fs_policy.mode) out.fs_policy = draft.fs_policy
+    return out
+  }, [server, draft])
+
+  const hasChanges = Object.keys(diff).length > 0
+  const dangerousFlip = draft != null
+    && server != null
+    && draft.fs_policy.mode === 'unrestricted'
+    && server.fs_policy.mode !== 'unrestricted'
+
+  async function doSave() {
+    if (!hasChanges) return
+    setSaving(true)
+    setTopError(null)
+    setFieldErrors({})
+    try {
+      const updated = await api.patch<DeviceConfig>(`/api/devices/${deviceName}/config`, diff)
+      setServer(updated)
+      setDraft(updated)
+      setMcpJson(JSON.stringify(updated.mcp_servers ?? [], null, 2))
+      onSaved(`Config saved for ${deviceName}`)
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'VALIDATION_FAILED') {
+        const parsed = parseValidationMessage(e.message)
+        if (Object.keys(parsed).length > 0) {
+          setFieldErrors(parsed)
+        } else {
+          setTopError(e.message)
+        }
+      } else {
+        setTopError(e instanceof Error ? e.message : 'Save failed')
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function handleSaveClick() {
+    if (dangerousFlip) {
+      setConfirmUnrestricted(true)
+      return
+    }
+    void doSave()
+  }
+
+  function handleCancel() {
+    if (!server) return
+    setDraft(server)
+    setFieldErrors({})
+    setTopError(null)
+  }
+
+  async function saveMcp() {
+    setMcpMsg(null)
+    let parsed: McpServerEntry[]
+    try {
+      parsed = JSON.parse(mcpJson) as McpServerEntry[]
+    } catch {
+      setMcpMsg('Invalid JSON')
+      return
+    }
+    try {
+      await api.put(`/api/devices/${deviceName}/mcp`, { mcp_servers: parsed })
+      setMcpMsg('MCP saved')
+      // Pull fresh config so mcp_servers stays in sync with server state.
+      const cfg = await api.get<DeviceConfig>(`/api/devices/${deviceName}/config`)
+      setServer(cfg)
+      setDraft(d => d ? { ...d, mcp_servers: cfg.mcp_servers } : d)
+    } catch (e) {
+      setMcpMsg(e instanceof Error ? e.message : 'Save failed')
+    }
+  }
+
+  if (loadError) {
+    return (
+      <div className="px-4 py-3 border-t text-xs" style={{ borderColor: 'var(--border)', color: '#ef4444' }}>
+        {loadError}
+      </div>
+    )
+  }
+  if (!draft || !server) {
+    return (
+      <div className="px-4 py-3 border-t text-xs" style={{ borderColor: 'var(--border)', color: 'var(--muted)' }}>
+        Loading…
+      </div>
+    )
+  }
+
+  return (
+    <div className="px-4 pb-4 flex flex-col gap-4 border-t" style={{ borderColor: 'var(--border)' }}>
+      {/* workspace_path */}
+      <div className="mt-3 flex flex-col gap-1">
+        <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
+          Workspace Path
+        </label>
+        <input
+          type="text"
+          value={draft.workspace_path}
+          onChange={e => setDraft({ ...draft, workspace_path: e.target.value })}
+          placeholder={`/home/<user>/.plexus/workspace/${deviceName}`}
+          className="rounded-lg px-3 py-2 text-sm outline-none border font-mono"
+          style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
+        />
+        {fieldErrors.workspace_path && (
+          <span className="text-xs" style={{ color: '#ef4444' }}>{fieldErrors.workspace_path}</span>
+        )}
+        <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+          Absolute path on the client (must start with <code>/</code>).
+        </span>
+      </div>
+
+      {/* shell_timeout_max */}
+      <div className="flex flex-col gap-1">
+        <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
+          Shell Timeout Max (seconds)
+        </label>
+        <input
+          type="number"
+          min={10}
+          max={1800}
+          value={draft.shell_timeout_max}
+          onChange={e => setDraft({ ...draft, shell_timeout_max: parseInt(e.target.value || '0', 10) })}
+          className="rounded-lg px-3 py-2 text-sm outline-none border"
+          style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
+        />
+        {fieldErrors.shell_timeout_max && (
+          <span className="text-xs" style={{ color: '#ef4444' }}>{fieldErrors.shell_timeout_max}</span>
+        )}
+        <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+          Cap for agent-requested timeouts; agent may pass lower. Range: 10–1800.
+        </span>
+      </div>
+
+      {/* ssrf_whitelist */}
+      <div className="flex flex-col gap-1">
+        <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
+          SSRF Whitelist (CIDRs)
+        </label>
+        <CidrChipInput
+          values={draft.ssrf_whitelist}
+          onChange={(next) => setDraft({ ...draft, ssrf_whitelist: next })}
+        />
+        {fieldErrors.ssrf_whitelist && (
+          <span className="text-xs" style={{ color: '#ef4444' }}>{fieldErrors.ssrf_whitelist}</span>
+        )}
+        <span className="text-[10px]" style={{ color: 'var(--muted)' }}>
+          CIDRs that punch holes in default RFC-1918 block on this device.
+        </span>
+      </div>
+
+      {/* fs_policy */}
+      <div className="flex flex-col gap-1">
+        <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
+          Filesystem Policy
+        </label>
+        <select
+          value={draft.fs_policy.mode}
+          onChange={e => setDraft({ ...draft, fs_policy: { mode: e.target.value as 'sandbox' | 'unrestricted' } })}
+          className="rounded-lg px-3 py-2 text-sm outline-none border"
+          style={{
+            background: 'var(--bg)',
+            color: draft.fs_policy.mode === 'unrestricted' ? '#ef4444' : 'var(--text)',
+            borderColor: 'var(--border)',
+          }}
+        >
+          <option value="sandbox">Sandbox (workspace only)</option>
+          <option value="unrestricted">Unrestricted (full access)</option>
+        </select>
+        {fieldErrors.fs_policy && (
+          <span className="text-xs" style={{ color: '#ef4444' }}>{fieldErrors.fs_policy}</span>
+        )}
+        {dangerousFlip && (
+          <span className="text-[10px]" style={{ color: '#ef4444' }}>
+            Requires typed confirmation when you save.
+          </span>
+        )}
+      </div>
+
+      {topError && (
+        <p className="text-xs" style={{ color: '#ef4444' }}>{topError}</p>
+      )}
+
+      {/* Save / Cancel */}
+      <div className="flex gap-2">
+        <SaveButton
+          onClick={handleSaveClick}
+          label={hasChanges ? 'Save Config' : 'No Changes'}
+          loading={saving}
+        />
+        <button
+          onClick={handleCancel}
+          disabled={!hasChanges || saving}
+          className="px-4 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wider transition-colors disabled:opacity-40"
+          style={{ border: '1px solid var(--border)', color: 'var(--muted)' }}
+        >
+          Cancel
+        </button>
+      </div>
+
+      {/* MCP Servers (JSON blob — retained from old UI) */}
+      <div className="pt-2">
+        <label className="text-xs uppercase tracking-wider" style={{ color: 'var(--muted)' }}>
+          MCP Servers (JSON)
+        </label>
+        <textarea
+          value={mcpJson}
+          onChange={e => setMcpJson(e.target.value)}
+          rows={6}
+          className="mt-1 w-full rounded-lg p-3 text-xs font-mono resize-y outline-none border"
+          style={{ background: 'var(--bg)', color: 'var(--text)', borderColor: 'var(--border)' }}
+        />
+        <div className="flex items-center gap-3">
+          <SaveButton onClick={saveMcp} label="Save MCP" loading={false} />
+          {mcpMsg && <span className="text-xs" style={{ color: mcpMsg.startsWith('MCP saved') ? 'var(--accent)' : '#ef4444' }}>{mcpMsg}</span>}
+        </div>
+      </div>
+
+      {confirmUnrestricted && (
+        <ConfirmTypedModal
+          title="Allow unrestricted filesystem access?"
+          warning={
+            <>
+              Agent will have full access to <strong>{deviceName}</strong>.
+              Files outside your workspace, system files, credentials —
+              all readable and writable by the agent.
+            </>
+          }
+          match={deviceName}
+          confirmLabel="Allow Unrestricted"
+          busy={saving}
+          onCancel={() => setConfirmUnrestricted(false)}
+          onConfirm={async () => {
+            setConfirmUnrestricted(false)
+            await doSave()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ── Chip-style CIDR input ─────────────────────────────────────────────────────
+
+function CidrChipInput({
+  values,
+  onChange,
+}: {
+  values: string[]
+  onChange: (next: string[]) => void
+}) {
+  const [buf, setBuf] = useState('')
+
+  function commit() {
+    const v = buf.trim()
+    if (!v) return
+    if (values.includes(v)) { setBuf(''); return }
+    onChange([...values, v])
+    setBuf('')
+  }
+
+  function remove(i: number) {
+    const next = values.slice()
+    next.splice(i, 1)
+    onChange(next)
+  }
+
+  return (
+    <div
+      className="rounded-lg px-2 py-1.5 border flex flex-wrap items-center gap-1"
+      style={{ background: 'var(--bg)', borderColor: 'var(--border)' }}
+    >
+      {values.map((v, i) => (
+        <span
+          key={`${v}-${i}`}
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono"
+          style={{ background: 'var(--card)', color: 'var(--text)', border: '1px solid var(--border)' }}
+        >
+          {v}
+          <button
+            onClick={() => remove(i)}
+            className="text-red-400 hover:text-red-300"
+            aria-label={`Remove ${v}`}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      <input
+        type="text"
+        value={buf}
+        onChange={e => setBuf(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter' || e.key === ',' || e.key === ' ') {
+            e.preventDefault()
+            commit()
+          } else if (e.key === 'Backspace' && buf === '' && values.length > 0) {
+            remove(values.length - 1)
+          }
+        }}
+        onBlur={commit}
+        placeholder={values.length === 0 ? '10.0.0.0/8' : ''}
+        className="flex-1 min-w-[8rem] bg-transparent outline-none text-sm font-mono py-0.5"
+        style={{ color: 'var(--text)' }}
+      />
+    </div>
+  )
+}
+
+// ── Typed-confirmation modal (reusable Danger Zone pattern) ───────────────────
+
+function ConfirmTypedModal({
+  title,
+  warning,
+  match,
+  confirmLabel,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  title: string
+  warning: React.ReactNode
+  match: string
+  confirmLabel: string
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const [typed, setTyped] = useState('')
+  const confirmed = typed === match
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: 'rgba(0,0,0,0.5)' }}
+      onClick={() => !busy && onCancel()}
+    >
+      <div
+        className="rounded p-6 max-w-md w-full"
+        style={{ background: 'var(--card)', border: '1px solid var(--border)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-lg font-semibold mb-2" style={{ color: '#ef4444' }}>{title}</h2>
+        <p className="text-sm mb-4" style={{ color: 'var(--muted)' }}>
+          {warning}
+        </p>
+        <p className="text-xs mb-2" style={{ color: 'var(--muted)' }}>
+          Type <code style={{ color: 'var(--text)' }}>{match}</code> to confirm.
+        </p>
+        <input
+          type="text"
+          autoFocus
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          disabled={busy}
+          className="w-full px-3 py-2 rounded text-sm font-mono mb-3"
+          style={{
+            background: 'var(--card)',
+            color: 'var(--text)',
+            border: '1px solid var(--border)',
+          }}
+        />
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            className="text-sm px-3 py-1 rounded"
+            style={{ border: '1px solid var(--border)' }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={busy || !confirmed}
+            className="text-sm px-3 py-1 rounded disabled:opacity-40"
+            style={{ background: '#ef4444', color: 'white' }}
+          >
+            {busy ? 'Working…' : confirmLabel}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
