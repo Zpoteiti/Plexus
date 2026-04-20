@@ -4,6 +4,7 @@ mod env;
 mod guardrails;
 mod heartbeat;
 mod mcp;
+mod read_stream;
 mod sandbox;
 mod tool_schemas;
 mod tools;
@@ -118,6 +119,7 @@ async fn run_session(ws_url: &str, token: &str) -> Result<(), PlexusError> {
         Arc::clone(&missed_acks),
         dead_signal.clone(),
     );
+    let stream_semaphore = read_stream::new_stream_semaphore();
     let result = message_loop(
         &mut stream,
         &sink,
@@ -126,12 +128,14 @@ async fn run_session(ws_url: &str, token: &str) -> Result<(), PlexusError> {
         &registry,
         &mcp_manager,
         &dead_signal,
+        &stream_semaphore,
     )
     .await;
     hb.cancel();
     result
 }
 
+#[allow(clippy::too_many_arguments)] // collaborators; session-scoped, not worth bundling
 async fn message_loop(
     stream: &mut connection::WsStream,
     sink: &Arc<Mutex<WsSink>>,
@@ -140,6 +144,7 @@ async fn message_loop(
     registry: &Arc<tools::ToolRegistry>,
     mcp_manager: &Arc<Mutex<mcp::McpManager>>,
     dead_signal: &CancellationToken,
+    stream_semaphore: &Arc<tokio::sync::Semaphore>,
 ) -> Result<(), PlexusError> {
     loop {
         let msg = tokio::select! {
@@ -311,6 +316,21 @@ async fn message_loop(
                     if let Err(e) = send_message(&mut *sink.lock().await, &resp).await {
                         warn!("send FileSendAck failed: {e}");
                     }
+                });
+            }
+            ServerToClient::ReadStream { request_id, path } => {
+                // FR1b: server-initiated file streaming. Spawn so the
+                // message loop isn't blocked for the duration of the
+                // read. Concurrency is bounded by `stream_semaphore`
+                // (MAX_CONCURRENT_STREAMS permits); saturation yields
+                // an immediate StreamError to the server.
+                let sink_ws: Arc<dyn read_stream::FrameSink> = Arc::new(read_stream::WsFrameSink {
+                    sink: Arc::clone(sink),
+                });
+                let config = Arc::clone(config);
+                let sem = Arc::clone(stream_semaphore);
+                tokio::spawn(async move {
+                    read_stream::handle(sink_ws, config, sem, request_id, path).await;
                 });
             }
             other => {
