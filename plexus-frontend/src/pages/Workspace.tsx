@@ -1,11 +1,23 @@
 import { useEffect, useState, type ChangeEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, ChevronRight, ChevronDown, File, Folder } from 'lucide-react';
+import { ArrowLeft, ChevronRight, ChevronDown, File, Folder, Paperclip } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { api } from '../lib/api';
 import type { WorkspaceFile, WorkspaceQuota } from '../lib/types';
 import { ConfirmModal } from '../components/ConfirmModal';
+import MarkdownContent from '../components/MarkdownContent';
 import { useAuthStore } from '../store/auth';
+
+/**
+ * Paths rendered as styled markdown (with remark-gfm + syntax highlighting)
+ * instead of the barebones ReactMarkdown used for other .md files. These are
+ * the files the user edits most frequently, so polish matters.
+ */
+function isSpecialMarkdownPath(path: string): boolean {
+  if (path === 'MEMORY.md') return true;
+  if (/^skills\/[^/]+\/SKILL\.md$/.test(path)) return true;
+  return false;
+}
 
 export default function Workspace() {
   const navigate = useNavigate();
@@ -190,6 +202,21 @@ function buildTree(entries: WorkspaceFile[]): TreeNode[] {
   return root.children;
 }
 
+function countSubtree(node: TreeNode): { files: number; bytes: number } {
+  let files = 0;
+  let bytes = 0;
+  const visit = (n: TreeNode) => {
+    if (n.is_dir) {
+      for (const c of n.children) visit(c);
+    } else {
+      files += 1;
+      bytes += n.size_bytes;
+    }
+  };
+  visit(node);
+  return { files, bytes };
+}
+
 function TreeView({
   entries,
   selected,
@@ -200,7 +227,62 @@ function TreeView({
   onSelect: (path: string) => void;
 }) {
   const tree = buildTree(entries);
-  return <TreeNodeList nodes={tree} depth={0} selected={selected} onSelect={onSelect} />;
+  // Split out `.attachments/` — ephemeral chat-drop storage rendered as a
+  // single collapsible summary row instead of cluttering the main tree.
+  const attachments = tree.find((n) => n.path === '.attachments' && n.is_dir) ?? null;
+  const rest = tree.filter((n) => n.path !== '.attachments');
+  return (
+    <>
+      <TreeNodeList nodes={rest} depth={0} selected={selected} onSelect={onSelect} />
+      {attachments && attachments.children.length > 0 && (
+        <AttachmentsSummary node={attachments} selected={selected} onSelect={onSelect} />
+      )}
+    </>
+  );
+}
+
+function AttachmentsSummary({
+  node,
+  selected,
+  onSelect,
+}: {
+  node: TreeNode;
+  selected: string;
+  onSelect: (path: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const { files, bytes } = countSubtree(node);
+  const isSelected = selected === node.path;
+  return (
+    <ul className="list-none p-0 m-0 mt-1">
+      <li>
+        <div
+          className="flex items-center gap-1 px-1 py-0.5 rounded cursor-pointer"
+          style={{
+            paddingLeft: '4px',
+            background: isSelected ? 'var(--accent)' : 'transparent',
+            color: isSelected ? 'var(--bg)' : 'var(--muted)',
+            opacity: isSelected ? 1 : 0.75,
+            fontStyle: 'italic',
+          }}
+          onClick={() => {
+            setOpen(!open);
+            onSelect(node.path);
+          }}
+          title="Ephemeral chat-drop attachments (30-day TTL). Managed by the agent."
+        >
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <Paperclip size={12} />
+          <span className="text-sm">
+            Attachments ({files} {files === 1 ? 'file' : 'files'}, {formatBytes(bytes)})
+          </span>
+        </div>
+        {open && node.children.length > 0 && (
+          <TreeNodeList nodes={node.children} depth={1} selected={selected} onSelect={onSelect} />
+        )}
+      </li>
+    </ul>
+  );
 }
 
 function TreeNodeList({
@@ -390,6 +472,7 @@ function ContentPane({
   const isEditable = text !== null;
   const inEditMode = editBuf !== null;
   const isMarkdown = path.toLowerCase().endsWith('.md');
+  const isSpecialMd = isSpecialMarkdownPath(path);
   const filename = path.split('/').pop() ?? path;
 
   return (
@@ -451,8 +534,24 @@ function ContentPane({
               border: '1px solid var(--border)',
             }}
           />
+        ) : isSpecialMd && text !== null ? (
+          // MEMORY.md / skills/<name>/SKILL.md — full-fidelity render using the
+          // shared MarkdownContent component (remark-gfm + code highlighting).
+          // Inline CSS carries typography since @tailwindcss/typography isn't
+          // installed (prose classes would be a no-op).
+          <div
+            style={{
+              background: 'var(--card)',
+              padding: '1.5rem',
+              borderRadius: '4px',
+              lineHeight: 1.6,
+              fontSize: '14px',
+            }}
+          >
+            <MarkdownContent content={text} />
+          </div>
         ) : isMarkdown && text !== null ? (
-          <div className="prose prose-invert max-w-none">
+          <div className="max-w-none">
             <ReactMarkdown>{text}</ReactMarkdown>
           </div>
         ) : text !== null ? (
