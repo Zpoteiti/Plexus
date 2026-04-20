@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { api } from '../lib/api'
 import { wsManager, WsStatus } from '../lib/ws'
+import { parseContentBlocks } from '../lib/content-blocks'
 import type { UploadedAttachment } from '../lib/upload'
 import type {
   Session,
@@ -149,14 +150,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     )
 
     // Filter to only user and assistant text messages — tool calls and tool
-    // results are internal LLM context and should never be shown in the UI
+    // results are internal LLM context and should never be shown in the UI.
+    //
+    // `ApiMessage.content` is always a string on the wire, but user messages
+    // with attachments were persisted as a JSON-stringified
+    // `Content::Blocks` array (spec §2.1). Run the detect+parse helper so
+    // image blocks route through the ContentBlock[] renderer instead of
+    // showing raw JSON (FR2b).
     const msgs: ChatMessage[] = apiMsgs
       .filter(m => m.role === 'user' || (m.role === 'assistant' && !m.tool_name && m.content?.trim()))
       .map(m => ({
         id: m.message_id,
         session_id: m.session_id,
         role: m.role as 'user' | 'assistant',
-        content: m.content,
+        content: parseContentBlocks(m.content),
         created_at: m.created_at,
       }))
 
