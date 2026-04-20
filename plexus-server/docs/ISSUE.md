@@ -7,32 +7,38 @@ Open, deferred, and closed issues for the server crate. Updated by `/wrap-up` at
 
 ## Deferred
 <!-- Acknowledged but intentionally postponed — include context and date -->
-- [ ] Manual E2E smoke tests for inbound-media (context: Task 18 of plans/2026-04-15-inbound-media.md — Discord/Telegram photo + voice, browser drag+paste, strip-retry, context rebuild. Requires live bots; not a code task, 2026-04-16)
-- [ ] Manual E2E smoke tests for cross-channel addressing (context: Task CC-7 of plans/2026-04-16-cross-channel-addressing.md — cron across browser reconnect, Discord→Telegram cross-channel, non-partner guard, live browser notification, 2026-04-16)
-- [ ] Manual smoke for graceful-shutdown extension (context: code landed in commit 4496acf — bots + per-session run_session now observe `state.shutdown.cancelled()`. Needs live SIGTERM test with Discord/Telegram bots running to confirm the "bot shutting down" / "agent loop shutting down" logs fire; not yet exercised, 2026-04-19)
-- [ ] Manual E2E smoke tests for /api/device-stream + FR2 image-drop + FR3 device-config editor + FR5 Admin MCP tab + FR6 MCP collision (context: FR batch shipped 2026-04-20; backend + frontend green on typecheck/build/clippy; live stack smoke deferred, 2026-04-20)
+
+### Manual smoke tests (require live bots / API keys, not code tasks)
+- [ ] Manual E2E smoke tests for inbound-media (context: Task 18 of plans/2026-04-15-inbound-media.md — Discord/Telegram photo + voice, browser drag+paste, strip-retry, context rebuild; 2026-04-16)
+- [ ] Manual E2E smoke tests for cross-channel addressing (context: Task CC-7 of plans/2026-04-16-cross-channel-addressing.md — cron across browser reconnect, Discord→Telegram cross-channel, non-partner guard, live browser notification; 2026-04-16)
+- [ ] Manual smoke for graceful-shutdown extension (context: code landed in commit 4496acf; needs live SIGTERM test with Discord/Telegram bots running; 2026-04-19)
+- [ ] Manual E2E smoke tests for FR batch — /api/device-stream + FR2 image-drop + FR3 device-config editor + FR5 Admin MCP tab + FR6 MCP collision (context: FR batch shipped 2026-04-20; backend + frontend green on typecheck/build/clippy; live stack smoke deferred, 2026-04-20)
+
+### Workspace (Plan B polish)
+- [ ] **File rename endpoint** — spec §7.2 lists rename as a UI action, but §7.3's endpoint list omitted it. v1 requires delete + re-upload. Re-add a `POST /api/workspace/rename` with `{from, to}` if users ask.
+- [ ] **Bulk file operations** — multi-file select, bulk delete, bulk move. Single-file ops only in v1.
+- [ ] **File-type coverage for inline preview** — SVG, HEIC, PDF, and video files currently fall through to the binary-metadata branch. Extending inline preview requires type-specific renderers (`<object>` for PDF, `<video>` for video, etc.).
+- [ ] **Server-pushed tree invalidation** — the tree refetches on every user mutation in this tab, but an agent write (e.g., dream creating a new skill) doesn't push an invalidation. A WebSocket event or SSE push would let the tree auto-refresh while the page is open.
+
+### Heartbeat (Plan E) — scale / observability
+- [ ] **Heartbeat multi-server deduplication** — in-process tick loop refires per server. Single-node unaffected; multi-server needs leader-election or a pg advisory lock held across the tick iteration.
+- [ ] **Heartbeat session retention / log UI** — `heartbeat:{user_id}` sessions + messages accumulate indefinitely. Spec §9.7 mentions a future "Heartbeat Log" frontend page; no GC policy ships in M2.
+- [ ] **Heartbeat Phase 2 error retry** — Phase 2 errors log and exit; `last_heartbeat_at` stays advanced. No retry; next window gets a fresh shot. Acceptable as autonomous-best-effort, but noted for observability work.
+- [ ] **Heartbeat observability** — a consistently-skipping Phase 1 (e.g. broken LLM config) is silent beyond `info!` logs. A metrics-based alert would surface regressions.
+- [ ] **Heartbeat delivery-path test coverage** — `publish_final_heartbeat`'s Discord/Telegram precedence paths only have the silent/no-config test (E-6). Covering the notify:true branches requires either a real LLM + real DB fixture or a test-double evaluator abstraction.
+
+### Dream (Plan D) — scale / observability
+- [ ] **Dream end-to-end integration testing.** Unit tests cover the idle-check short-circuit, the allowlist matrix, and `PromptMode::Dream` context-builder output. True end-to-end tests (full Phase 1 + Phase 2 against a real LLM, verifying directives are applied to `MEMORY.md`/skills) need either a mock LLM fixture or a staging environment with an API key.
+- [ ] **Dream session retention / GC.** `dream:*` sessions + their messages accumulate in the DB. No retention policy yet.
+- [ ] **Observability for dream degradation.** A broken LLM causes dream to silently skip with a `warn!` every 2h per user. Consider a health-check endpoint exposing `dream_phase1_last_successful_at` per user, or a prometheus counter.
+- [ ] **Tail-drop on 200-message cap.** `PHASE1_MESSAGE_CAP = 200` drops the 201st..Nth messages of a window; `last_dream_at` advances to NOW so those messages are outside the next window too. Consider advancing to the 200th message's `created_at` instead of NOW when the cap fires.
 
 ## Accepted Limitations
 <!-- Design decisions, not TODOs — kept for discoverability -->
 - **No server-side Whisper / ASR.** Spec decision 2026-04-15: voice notes save to workspace as-is; users wire their own transcription via `file_transfer` to a client with whisper-cpp or similar.
 - **Last-admin invariant not enforced** (ADR-33). Admin can delete their own account with a warn log; if they were the only admin, re-bootstrap requires direct DB access. Accepted for small deployments.
 - **Mid-ReAct-turn image re-read.** Post-Task-19 rehydrates from DB JSON; no known failure case. Watchlist only.
-
-### Workspace Frontend (Plan B)
-
-- **File rename endpoint** — spec §7.2 lists rename as a UI action, but §7.3's endpoint list omitted it. v1 requires delete + re-upload. Re-add a `POST /api/workspace/rename` with `{from, to}` if users ask.
-- **Frontend test harness** — `plexus-frontend` has no Vitest/Jest/RTL/Playwright setup. Plan B's verification is manual smoke + visual review. Wiring up Vitest + React Testing Library is a post-M2 effort.
-- **Bulk file operations** — multi-file select, bulk delete, bulk move. Single-file ops only in v1.
-- **File-type coverage for inline preview** — SVG, HEIC, PDF, and video files currently fall through to the binary-metadata branch. Extending inline preview requires type-specific renderers (`<object>` for PDF, `<video>` for video, etc.).
-- **Server-pushed tree invalidation** — the tree refetches on every mutation initiated by the user in this tab, but an agent write (e.g., dream creating a new skill) doesn't push an invalidation. A WebSocket event or SSE push would let the tree auto-refresh while the page is open.
-
-### Heartbeat (Plan E)
-
-- **Heartbeat multi-server deduplication** — the in-process tick loop refires per server. Single-node deployments are unaffected; multi-server needs either a leader-election pattern or a pg advisory lock held across the tick iteration. Tracked for post-M2.
-- **Heartbeat session retention / log UI** — `heartbeat:{user_id}` sessions and messages accumulate indefinitely. Spec §9.7 mentions a future "Heartbeat Log" frontend page; no GC policy ships in M2.
-- **Heartbeat Phase 2 error retry** — Phase 2 errors log and exit; `last_heartbeat_at` stays advanced. No retry; next window gets a fresh shot. Acceptable as autonomous-best-effort, but noted for observability work.
-- **Heartbeat observability** — a consistently-skipping Phase 1 (e.g. broken LLM config) is silent beyond `info!` logs. A metrics-based alert would surface regressions; deferred.
-- **Heartbeat delivery-path test coverage** — `publish_final_heartbeat`'s Discord/Telegram precedence paths only have the silent/no-config test (E-6). Covering the notify:true branches requires either a real LLM + real DB fixture or a test-double evaluator abstraction. Deferred.
+- **Frontend test harness** — `plexus-frontend` has no Vitest/Jest/RTL/Playwright setup. Plan B's verification is manual smoke + visual review. Wiring up is a post-M2 effort if the surface grows.
 
 ## Closed
 <!-- Resolved issues — keep for historical context -->
@@ -59,10 +65,3 @@ Open, deferred, and closed issues for the server crate. Updated by `/wrap-up` at
 - [x] No inbound-media support on any channel (resolved: full pipeline shipped — channel adapters download → file_store → InboundEvent.media → build_user_content produces OpenAI content blocks → persisted as Content::Blocks JSON in DB. Images render inline for VLMs; non-images flow through file_transfer. Commits fda851b..e848798, 2026-04-15/16)
 - [x] No cross-channel addressing ("reminder on Telegram from a Discord session" silently fails) (resolved: ADR-31 + ADR-32 — Discord DM cache, Telegram DM via partner_telegram_id, gateway via session_update frame; `## Channels` system-prompt section exposes addressable chat_id shapes. Commits ba56f34..176961f, 2026-04-16)
 - [x] 20+ compile warnings from stale scaffolding (resolved across the session — most via deletion, remaining ones via field-level `#[allow(dead_code)]` on SessionHandle.user_id; build is now zero-warning, 2026-04-16)
-
-## Plan D follow-ups (deferred)
-
-- [ ] **Dream end-to-end integration testing.** Unit tests cover the idle-check short-circuit, the allowlist matrix, and the `PromptMode::Dream` context-builder output shape. True end-to-end tests (full Phase 1 + Phase 2 against a real LLM, verifying directives are applied to `MEMORY.md`/skills) are deferred — they need either a mock LLM fixture or a staging environment with an API key.
-- [ ] **Dream session retention / GC.** `dream:*` sessions + their messages accumulate in the DB. No retention policy yet. If table size becomes a concern at scale, a periodic "prune dream sessions older than N days" task is the likely answer.
-- [ ] **Observability for dream degradation.** Today a broken LLM causes dream to silently skip with a `warn!` every 2h per user. Consider adding a health-check endpoint exposing `dream_phase1_last_successful_at` per user, or a prometheus counter, so operators notice.
-- [ ] **Tail-drop on 200-message cap.** `PHASE1_MESSAGE_CAP = 200` drops the 201st..Nth messages of a window from consolidation; `last_dream_at` advances to NOW so those messages are outside the next window too. Consider advancing to the 200th message's `created_at` instead of NOW when the cap fires.
