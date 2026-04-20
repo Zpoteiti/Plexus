@@ -105,6 +105,16 @@ export default function Workspace() {
   );
 }
 
+/**
+ * URL-encode each path segment while preserving `/` separators. The backend
+ * route is `/api/workspace/files/{*path}` — axum's catch-all captures the raw
+ * path string including slashes, so we encode per-segment instead of the
+ * whole thing.
+ */
+function encodePath(path: string): string {
+  return path.split('/').map(encodeURIComponent).join('/');
+}
+
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -304,7 +314,7 @@ function ContentPane({
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`, {
+      const res = await fetch(`/api/workspace/files/${encodePath(path)}`, {
         headers: { Authorization: `Bearer ${useAuthStore.getState().token ?? ''}` },
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -339,7 +349,7 @@ function ContentPane({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(path)}`, {
+      const res = await fetch(`/api/workspace/files/${encodePath(path)}`, {
         method: 'PUT',
         headers: { Authorization: `Bearer ${useAuthStore.getState().token ?? ''}` },
         body: editBuf,
@@ -358,7 +368,7 @@ function ContentPane({
   async function doDelete() {
     setDeleting(true);
     try {
-      const url = `/api/workspace/file?path=${encodeURIComponent(path)}&recursive=true`;
+      const url = `/api/workspace/files/${encodePath(path)}?recursive=true`;
       const res = await fetch(url, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${useAuthStore.getState().token ?? ''}` },

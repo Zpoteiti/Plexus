@@ -8,6 +8,7 @@ import Sidebar from '../components/Sidebar'
 import DeviceStatusBar from '../components/DeviceStatusBar'
 import MessageList from '../components/MessageList'
 import ChatInput from '../components/ChatInput'
+import type { UploadedAttachment } from '../lib/upload'
 
 export default function Chat() {
   const { sessionId } = useParams<{ sessionId: string }>()
@@ -67,9 +68,9 @@ export default function Chat() {
     cron: 'Cron',
   }
 
-  function handleSend(content: string, media: string[]) {
+  function handleSend(content: string, attachments: UploadedAttachment[]) {
     if (!sessionId || isReadOnly) return
-    sendMessage(sessionId, content, media)
+    sendMessage(sessionId, content, attachments)
   }
 
   const hasMessages = messages.length > 0

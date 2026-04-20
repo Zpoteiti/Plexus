@@ -17,13 +17,42 @@ export interface Session {
   hasUnread: boolean
 }
 
-// Single chat message (user or assistant) — client-side representation
+// --- Anthropic-style content blocks (spec §2.1) ---
+//
+// User messages with attachments carry an array of content blocks. Assistant
+// messages (today) come back as a plain string from the server; the client
+// stores both shapes on `ChatMessage.content`.
+
+export interface TextBlock {
+  type: 'text'
+  text: string
+}
+
+export interface ImageBlockSource {
+  type: 'base64'
+  media_type: string
+  data: string
+}
+
+export interface ImageBlock {
+  type: 'image'
+  source: ImageBlockSource
+  /** Non-standard, plexus-specific: workspace-relative path where the file lives. */
+  workspace_path?: string
+  /** Optional filename for alt text / downloads. */
+  filename?: string
+}
+
+export type ContentBlock = TextBlock | ImageBlock
+
+// Single chat message (user or assistant) — client-side representation.
+// `content` may be a plain string (assistant replies, legacy user text) or an
+// array of content blocks (user messages with image attachments).
 export interface ChatMessage {
   id: string          // client UUID (optimistic) or server message_id
   session_id: string
   role: 'user' | 'assistant'
-  content: string
-  media?: string[]
+  content: string | ContentBlock[]
   created_at: string
 }
 

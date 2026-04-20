@@ -1,18 +1,23 @@
 import { useState, useRef, KeyboardEvent, ClipboardEvent, DragEvent } from 'react'
 import { Send, Paperclip, X } from 'lucide-react'
-import { uploadFile, MAX_UPLOAD_BYTES, UploadResult } from '../lib/upload'
+import {
+  MAX_UPLOAD_BYTES,
+  uploadChatImage,
+  type UploadedAttachment,
+} from '../lib/upload'
 
 interface Chip {
   key: string
+  msgId: string         // per-attachment UUID; feeds the workspace path
   file: File
-  progress: number
-  fileId?: string
+  uploading: boolean
+  attachment?: UploadedAttachment
   error?: string
   controller: AbortController
 }
 
 interface Props {
-  onSend: (content: string, media: string[]) => void
+  onSend: (content: string, attachments: UploadedAttachment[]) => void
   disabled?: boolean
 }
 
@@ -23,7 +28,7 @@ export default function ChatInput({ onSend, disabled }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  const anyUploading = chips.some(c => c.progress < 100 && !c.error)
+  const anyUploading = chips.some(c => c.uploading && !c.error)
 
   function updateChip(key: string, patch: Partial<Chip>) {
     setChips(prev => prev.map(c => (c.key === key ? { ...c, ...patch } : c)))
@@ -45,30 +50,27 @@ export default function ChatInput({ onSend, disabled }: Props) {
         continue
       }
       const key = `${Date.now()}-${Math.random()}`
+      const msgId = crypto.randomUUID()
       const controller = new AbortController()
-      const chip: Chip = { key, file, progress: 0, controller }
+      const chip: Chip = { key, msgId, file, uploading: true, controller }
       setChips(prev => [...prev, chip])
-      uploadFile(
-        file,
-        pct => updateChip(key, { progress: pct }),
-        controller.signal,
-      )
-        .then((res: UploadResult) => {
-          updateChip(key, { progress: 100, fileId: res.file_id })
+      uploadChatImage(file, msgId, controller.signal)
+        .then((att) => {
+          updateChip(key, { uploading: false, attachment: att })
         })
         .catch((e: Error) => {
-          updateChip(key, { error: e.message })
+          updateChip(key, { uploading: false, error: e.message })
         })
     }
   }
 
   function submit() {
     const trimmed = value.trim()
-    const media = chips
-      .filter(c => c.fileId && !c.error)
-      .map(c => `/api/files/${c.fileId}`)
-    if ((!trimmed && media.length === 0) || disabled || anyUploading) return
-    onSend(trimmed, media)
+    const attachments: UploadedAttachment[] = chips
+      .map(c => c.attachment)
+      .filter((a): a is UploadedAttachment => !!a)
+    if ((!trimmed && attachments.length === 0) || disabled || anyUploading) return
+    onSend(trimmed, attachments)
     setValue('')
     setChips([])
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
@@ -120,6 +122,8 @@ export default function ChatInput({ onSend, disabled }: Props) {
     setDragging(false)
   }
 
+  const readyCount = chips.filter(c => c.attachment && !c.error).length
+
   return (
     <div
       className={`flex flex-col gap-2 rounded-xl border p-3 ${isDragging ? 'ring-2' : ''}`}
@@ -140,13 +144,13 @@ export default function ChatInput({ onSend, disabled }: Props) {
               key={c.key}
               className="flex items-center gap-1 px-2 py-1 rounded text-xs"
               style={{ background: 'var(--muted)' }}
-              title={c.error || `${c.progress}%`}
+              title={c.error ?? (c.uploading ? 'Uploading…' : 'Ready')}
             >
               <span style={{ color: 'var(--text)' }}>{c.file.name}</span>
               {c.error ? (
                 <span style={{ color: '#ef4444' }}>⚠</span>
-              ) : c.progress < 100 ? (
-                <span style={{ color: 'var(--muted-fg)' }}>{c.progress}%</span>
+              ) : c.uploading ? (
+                <span style={{ color: 'var(--muted-fg)' }}>…</span>
               ) : (
                 <span style={{ color: 'var(--accent)' }}>✓</span>
               )}
@@ -198,7 +202,7 @@ export default function ChatInput({ onSend, disabled }: Props) {
           disabled={
             disabled ||
             anyUploading ||
-            (!value.trim() && chips.filter(c => c.fileId && !c.error).length === 0)
+            (!value.trim() && readyCount === 0)
           }
           className="p-1.5 rounded-lg transition-all disabled:opacity-30"
           style={{ color: 'var(--accent)' }}
