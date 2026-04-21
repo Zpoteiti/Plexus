@@ -346,7 +346,7 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 ### ADR-038 · Shared tool schemas live in `plexus-common`
 
 **Status:** accepted
-**Decision:** File tools used by BOTH server and client executors (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_dir`, `glob`, `grep`) have their canonical JSON schemas in `plexus-common/src/tool_schemas/`. Both server and client crates import these.
+**Decision:** File tools used by BOTH server and client executors (`read_file`, `write_file`, `edit_file`, `delete_file`, `delete_folder`, `list_dir`, `glob`, `grep`) have their canonical JSON schemas in `plexus-common/src/tool_schemas/`. Both server and client crates import these.
 
 ### ADR-039 · Client-only tools live in `plexus-client`
 
@@ -436,13 +436,14 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 | write_file | no | 30s internal | — |
 | edit_file | no | 30s internal | — |
 | delete_file | no | 10s internal | — |
+| delete_folder | no | 60s internal | — |
 | list_dir | no | 10s internal | — |
 | glob | no | 30s internal | — |
 | grep | no | 60s internal | — |
 | message | no | 30s internal | — |
 | web_fetch | no | 30s total, 10s connect | — |
 | cron | no | 10s (DB op) | — |
-| file_transfer | no | stall-detect: abort if no bytes in 30s | — |
+| file_transfer | no | stall-detect: abort if no bytes in 30s; same-device move is atomic (instant) | — |
 | MCP tools | depends on MCP's own schema | varies | rmcp session timeout |
 
 - **Runaway guardrail** is the iteration hard cap (ADR-036, 200) + trap detection. Not per-call timeouts.
@@ -495,6 +496,130 @@ pub trait Tool: Send + Sync {
 **Registry shape:** `HashMap<&'static str, Arc<dyn Tool>>` per crate (server + client each register their own). Schema merging at session tool-schema-build time (ADR-071) pulls from both plus cached device advertisements.
 
 **Consequences:** Each tool is a testable unit. Default-methods pattern means tools only override what's different from defaults (most tools just need name/schema/execute). Cross-cutting concerns (truncation, timeout, permission pre-check) can be added via default methods later without breaking implementers.
+
+### ADR-078 · Quota: one global value + per-user usage counter
+
+**Status:** accepted
+**Context:** Plexus hosts user workspaces on disk. Without bounds, an agent or user can fill the volume and break the service for everyone. Prior Plexus had no quota at all. Nanobot runs single-user and didn't need one.
+**Decision:**
+- **One global quota value.** Stored in `system_config` under key `quota_bytes`. Admin-editable via admin UI; takes effect immediately for all users. No per-user override. Default: 5 GB.
+- **Per-user tracking.** `users.bytes_used` column maintained by `workspace_fs` on every write/delete.
+- **Two-layer check before every write (enforced at the single workspace_fs choke point per ADR-045):**
+  1. **Lock rule:** if `bytes_used > quota_bytes`, all writes/edits/adds are rejected with `WorkspaceError::SoftLocked`. Only `delete_file` and `delete_folder` are allowed. Lock auto-lifts as soon as a delete pulls usage back under quota — no explicit unlock step.
+  2. **Single-op cap:** any single operation bigger than 80% of `quota_bytes` is rejected with `WorkspaceError::UploadTooLarge`. Applies to `write_file` content size, positive `edit_file` delta, and per-file or total folder bytes in `file_transfer` writes whose destination is the server.
+- **What counts.** Every byte inside `{workspace_root}/{user_id}/` — SOUL.md, MEMORY.md, `skills/**`, `.attachments/**`, arbitrary user files. No exemptions.
+- **Read API.** `GET /api/workspace/quota` → `{ quota_bytes, bytes_used, locked }`. Admin sets global via `PATCH /api/admin/config`.
+
+**Consequences:** One admin knob for all users; simple mental model. One enforcement choke point. Predictable degradation — "workspace full, delete files to continue" — surfaced uniformly to agent (as a tool error per ADR-031) and UI (as a lock flag + error variant).
+
+### ADR-079 · Nightly `du`-based quota reconciliation
+
+**Status:** accepted
+**Context:** `users.bytes_used` is maintained by workspace_fs on every write. Drift can occur if a write succeeds but the DB update fails (crash between the two), or if a bug adds a write path that bypasses workspace_fs.
+**Decision:** A tokio background task runs daily at 03:00 server local time. For each user, runs `du -sb {workspace_root}/{user_id}` and overwrites `users.bytes_used` with the result. Drift above 1 MB from the prior value is logged as a `WARN` — signal that a write path missed workspace_fs.
+**Consequences:** At 1K users, sequential walk completes in a small fraction of a minute (bounded by disk I/O). Drift warnings surface bypass bugs without blocking the fix. No real-time accuracy cost: the counter is eventually correct.
+
+### ADR-080 · Chat-drop attachments degrade gracefully under quota lock
+
+**Status:** accepted
+**Context:** A user can hit their quota mid-conversation, then send a Discord/Telegram message with an image attachment. The attachment write would hit `SoftLocked`. Dropping the entire message would lose the user's text and make the agent miss the turn.
+**Decision:** When a channel adapter receives an inbound message with attachments while the user is over quota:
+- The text portion of the message is delivered normally to the session.
+- Each attachment is silently dropped from the workspace write.
+- A system note is appended to the user's text block: `[attachment skipped: workspace over quota]`.
+
+The agent sees the note in context, can reference it in its reply, and the user can delete files and resend.
+**Consequences:** Messages are never lost wholesale. The "you are over quota" signal surfaces through the conversation itself, not as an out-of-band error. Identical note format across channels.
+
+### ADR-081 · `.attachments/` TTL sweeper
+
+**Status:** accepted
+**Context:** Chat-drop images land in `{workspace_root}/{user_id}/.attachments/{msg_id}/{filename}` (ADR-044). Without cleanup, these accumulate forever and silently consume quota.
+**Decision:** A tokio background task runs every 6 hours. Walks each user's `.attachments/` tree. Any file whose mtime is older than 30 days is deleted through workspace_fs (so `bytes_used` updates and the skills cache stays consistent for free). Sequential across users.
+**Consequences:** Users don't manage attachment hygiene manually. The 30-day retention gives ample time for the agent to reference a recent upload. Sweep passes are idempotent — a late run catches up without double-counting.
+
+### ADR-082 · SKILL.md format + write-time validation
+
+**Status:** accepted
+**Context:** Skills are metadata + markdown instructions; the loader (ADR-024) needs a machine-readable format for each skill's name, description, and always-on status.
+**Decision:**
+- **Format:** YAML frontmatter at the top of SKILL.md, then markdown body. Mirrors Claude Code / nanobot convention.
+  ```markdown
+  ---
+  name: weekly-digest
+  description: Summarize last 7 days of Discord into MEMORY.md
+  always_on: false
+  ---
+  ...markdown body...
+  ```
+- **Required frontmatter fields:** `name` (string), `description` (string).
+- **Optional frontmatter fields:** `always_on` (boolean, defaults to `false`).
+- **Folder name must match frontmatter `name`.** A skill at `skills/weekly-digest/SKILL.md` MUST have `name: weekly-digest` in frontmatter. Mismatch is invalid.
+- **Write-time validation.** `workspace_fs` runs the SKILL.md validator ONLY when the destination path matches `skills/*/SKILL.md` (exactly one level deep, exact filename). Writes to `skills/{name}/FORMS.md` or any other supporting file pass through untouched.
+- **On validation failure:** write is rejected with `WorkspaceError::InvalidSkillFormat`. The agent/user must fix the file before re-saving, or save under a different filename (which won't be scanned).
+
+**Consequences:** Malformed SKILL.md files can never exist in a scanner path; the loader never has to handle invalid input at read time. A skill's identity is its folder — displayed name and storage path can't diverge.
+
+### ADR-083 · Skill discovery scans exactly one level deep
+
+**Status:** accepted
+**Decision:** At agent-loop start, the skills loader enumerates `skills/*/SKILL.md` — exactly one level deep. Any SKILL.md at `skills/foo/bar/SKILL.md` or deeper is NOT discovered. Supporting files can live at any depth under `skills/{name}/` (e.g. `skills/pdf-skill/scripts/fill_form.py`); only the top-level SKILL.md drives discovery.
+**Consequences:** Flat, predictable skill namespace. No recursion cost at load time. Skill authors organize the internals of their folder however they like — nested scripts, reference docs, assets, all invisible to the scanner.
+
+### ADR-084 · Skill install paths: user browser + agent `file_transfer`
+
+**Status:** accepted
+**Context:** Skills need a path from "somewhere external" to `skills/{name}/` on the server workspace. Prior Plexus considered a dedicated `install_skill` server tool that would clone from git URLs or unpack tarballs.
+**Decision:** Two paths, both reusing existing infrastructure:
+1. **User upload/edit via the browser.** The frontend edits workspace files through the standard `/api/workspace/files/{path}` REST surface. Users can drop in a pre-authored SKILL.md, flip `always_on`, or manage supporting files. All writes go through workspace_fs → quota + SKILL.md validation apply.
+2. **Agent `file_transfer` from a connected client.** Typical flow: user installs the skill on a client machine via the skill author's installer (e.g. `npx plexus-skills-install pdf-skill` on their laptop). The user then tells the agent to install it. Agent uses `file_transfer` to copy the files from the client workspace into `{workspace_root}/{user_id}/skills/pdf-skill/` on the server. Same quota + validation rules.
+
+Rejected: a dedicated `install_skill` server tool. Would require URL allowlisting, tarball-security handling, and a private-repo auth story. The `file_transfer` pattern reuses the existing sandbox + credential model on the client side, leaving server surface minimal.
+**Consequences:** One fewer server tool. No network-fetching code on the server. Skills can originate from any source (git, npm, custom installers, hand-authored) as long as they end up on a connected device before transfer.
+
+### ADR-085 · Skills cache mirrors `tools_registry`
+
+**Status:** accepted
+**Decision:** `workspace_fs` maintains a per-user skills cache: `DashMap<user_id, Vec<SkillInfo>>`. Populated lazily at agent-loop start (when `ContextInputs.skills` is assembled) if the entry is absent. Invalidated by any write/delete under `skills/` via the single-write-path guarantee (ADR-045). Stale-read tolerance matches ADR-071: a single turn may see an outdated skill list, and the agent self-corrects on the next iteration.
+**Consequences:** One parse per skill per cache lifecycle. Minimal overhead on the hot path (context build). Cache consistency bounded by one turn — same envelope as the tools cache.
+
+### ADR-086 · `delete_folder` shared tool (recursive, no flag)
+
+**Status:** accepted
+**Context:** Server has no shell (ADR-072), so without a dedicated primitive, deleting a folder requires N `delete_file` calls. Painful for skill uninstall (several supporting files) and general workspace cleanup. Folder deletion via the workspace browser has the same problem.
+**Decision:** New shared tool `delete_folder(device, path)`. Always recursive — deletes the folder and every file/subfolder inside. No flag; a non-recursive variant (`rmdir` on empty dirs only) is too niche for v1.
+- **Schema in `plexus-common/src/tools/`** alongside the other shared tools (ADR-038). `device` enum is injected at merge time (ADR-071).
+- **Implementations in both `plexus-server` and `plexus-client`.**
+- **Server implementation** routes through workspace_fs: sums bytes to be deleted recursively, calls `tokio::fs::remove_dir_all`, applies one `bytes_used -= total` DB update, invalidates the skills cache if any path was under `skills/`. Lock auto-lifts if this brings usage back under quota.
+- **Client implementation** is bounded by the client's `fs_policy`. In `sandbox` mode, removal is restricted to inside `workspace_path`. In `unrestricted` mode, it follows whatever path the agent provides.
+- **Rejects** if `path` is a file (error directs to `delete_file`) or does not exist.
+
+**Consequences:** Shared tool count goes from 7 to 8. Clean folder-uninstall story for skills and general cleanup. Blast radius is bounded to the user's own workspace (server side) or the client's sandboxed workspace (client side with `fs_policy=sandbox`).
+
+### ADR-087 · `file_transfer` unified with `mode`; folder semantics are recursive
+
+**Status:** accepted
+**Context:** Originally `file_transfer` was a cross-device-only copy primitive. A separate `move_file` was considered for same-device rename. Keeping them separate felt cleaner conceptually, but a unified tool is fewer tool slots for the agent to learn and reuses the cross-device byte-moving machinery for all file relocations.
+**Decision:**
+- **Schema: five required fields** — `src_device`, `src_path`, `dst_device`, `dst_path`, `mode`. `mode` enum: `"copy" | "move"`.
+- **Behavior matrix:**
+  - Same-device `copy`: native filesystem copy on that device.
+  - Same-device `move`: atomic rename (`tokio::fs::rename`).
+  - Cross-device `copy`: server orchestrates streaming pull-and-push over the device WebSocket; source remains intact.
+  - Cross-device `move`: same stream copy, then delete source only on successful write. If delete fails after a successful copy, both copies exist and the tool result flags a warning. The inverse (neither copy exists) cannot happen — we order copy-then-delete.
+- **Folder semantics.** If `src_path` points to a folder, the operation is recursive. Same-device folder moves remain atomic (single directory-entry rename). Cross-device folder transfers stream each entry; mid-transfer failure triggers partial-dst cleanup.
+- **Rejection cases.** `dst_path` already exists → reject (no implicit overwrite). `src_path` does not exist → reject. Symlink-outside-workspace checks apply per each side's `fs_policy`.
+- **Quota.** Applies when `dst_device="server"`. Single-op cap (ADR-078) uses total bytes being written (folder sum for recursive). Move from server refunds on successful delete.
+- **SKILL.md validation.** A transfer whose `dst_path` matches `skills/*/SKILL.md` runs the ADR-082 validator before the write commits; malformed content is rejected.
+
+**Consequences:** One tool covers rename, move, copy, install-from-client, and cross-device staging. Agents learn one schema. No separate `move_file` tool. `file_transfer` remains server-owned (ADR-040) because only the server can orchestrate cross-device byte streaming, but its targets can be any connected device including the server itself.
+
+### ADR-088 · `write_file` implicitly creates parent directories
+
+**Status:** accepted
+**Context:** Server has no shell, and the shared tool surface has no explicit mkdir. Without auto-creation, saving `skills/new-skill/SKILL.md` would require a precondition step (create folder) that doesn't exist as a tool call.
+**Decision:** `write_file(path, content)` applies `mkdir -p` semantics on the path's parent directory — equivalent to `tokio::fs::create_dir_all(path.parent())` before the write. Behavior identical on server and client. Subject to the normal workspace-bounds checks (`fs_policy`) and quota guardrails.
+**Consequences:** Agents and users never have to think about folder creation. Saves `skills/my-new-skill/SKILL.md` in a single call. Empty folders don't exist as first-class entities — they're always a byproduct of some file living there. Deleting the last file leaves the folder behind (harmless, `delete_folder` can clean up later).
 
 ---
 
@@ -691,7 +816,7 @@ Admin can delete their own account with a warn log. If they were the only admin,
 Manual smoke testing in v1. Wire up later if frontend complexity grows.
 
 ### ADR-067 · No bulk file operations / file rename endpoint
-Single-file ops only. Delete + re-upload serves the rename case. Revisit on user demand.
+**Status:** superseded by ADR-087. Originally "single-file ops only; delete + re-upload for rename." Rename/move (including folder rename) is now supported via `file_transfer` with `mode=move` — same-device move is an atomic `tokio::fs::rename`. Bulk operations remain out of scope.
 
 ### ADR-068 · No server-pushed workspace tree invalidation
 When an agent writes a file, the open Workspace tab doesn't auto-refresh. User reload or navigate triggers refetch. WS/SSE push can be added if the UX friction is real.
