@@ -405,14 +405,14 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 
 **Status:** accepted
 **Context:** Prior Plexus had `/api/files` (ephemeral upload cache, 24h TTL) running parallel to `/api/workspace/files/` (durable user tree). Two storage systems for files caused drift across message-send, context-load, and channel delivery.
-**Decision:** Workspace is canonical for files the agent operates on. No `/api/files`, no `file_store.rs`. Chat-drop images land at `workspace/.attachments/{msg_id}/{filename}` — a reserved directory with 30-day TTL sweep, counts toward quota.
+**Decision:** Workspace is canonical for files the agent operates on. No `/api/files`, no `file_store.rs`. Chat-drop images land at `workspace/.attachments/{msg_id}/{filename}` — a reserved directory that counts toward quota like any other workspace content.
 **Consequences:** One file model for agent-accessible files. All inbound/outbound media the agent reads/writes flows through workspace paths. Discord/Telegram adapters read workspace files directly for delivery (no staging cache). Device-origin files: the agent uses `file_transfer` to stage to server first, or the server relays via `GET /api/device-stream/{device_name}/{path}` (SSE-compatible for browser display).
 
 **Adjunct — images are stored in BOTH workspace and DB, serving different purposes:**
-- **Workspace file** at `.attachments/{msg_id}/{filename}` — the agent's file tools (`read_file`, `file_transfer`, etc.) operate on this copy. Subject to 30-day TTL sweep (ADR-081) and quota accounting (ADR-078).
+- **Workspace file** at `.attachments/{msg_id}/{filename}` — the agent's file tools (`read_file`, `file_transfer`, etc.) operate on this copy. Counts toward quota (ADR-078). Persists until the user or agent deletes it — there is no server-side retention sweep (see ADR-081).
 - **DB base64 inside the message content block** (per ADR-059) — the durable conversation-replay source. Image bytes live inline in the JSONB as `data:{mime};base64,...` URLs, matching the provider API shape so the LLM call is a pass-through with no marshaling.
 
-After the 30-day sweep removes the workspace file, conversation history remains fully functional: frontend renders the base64 directly, LLM requests still include the image, only the agent's ability to `read_file` that specific path is lost (covered by the path-text marker in ADR-027 if the agent needs to reason about provenance).
+If the user or agent later deletes a workspace attachment (to reclaim quota), conversation history remains fully functional: frontend renders the base64 directly, LLM requests still include the image, only the agent's ability to `read_file` that specific path is lost (covered by the path-text marker in ADR-027 if the agent needs to reason about provenance).
 
 ### ADR-045 · `workspace_fs` is the single write path server-side
 
@@ -537,12 +537,16 @@ pub trait Tool: Send + Sync {
 The agent sees the note in context, can reference it in its reply, and the user can delete files and resend.
 **Consequences:** Messages are never lost wholesale. The "you are over quota" signal surfaces through the conversation itself, not as an out-of-band error. Identical note format across channels.
 
-### ADR-081 · `.attachments/` TTL sweeper
+### ADR-081 · No server-side `.attachments/` sweeper — users manage their own quota
 
-**Status:** accepted
-**Context:** Chat-drop images land in `{workspace_root}/{user_id}/.attachments/{msg_id}/{filename}` (ADR-044). Without cleanup, these accumulate forever and silently consume quota.
-**Decision:** A tokio background task runs every 6 hours. Walks each user's `.attachments/` tree. Any file whose mtime is older than 30 days is deleted through workspace_fs (so `bytes_used` updates and the skills cache stays consistent for free). Sequential across users.
-**Consequences:** Users don't manage attachment hygiene manually. The 30-day retention gives ample time for the agent to reference a recent upload. Sweep passes are idempotent — a late run catches up without double-counting.
+**Status:** rejected (initially proposed as a 30-day TTL sweeper; withdrawn)
+**Context:** Chat-drop images land in `{workspace_root}/{user_id}/.attachments/{msg_id}/{filename}` (ADR-044). Without cleanup, these accumulate monotonically and consume quota. A tokio background sweeper (every 6 hours, 30-day mtime threshold) was proposed.
+**Decision:** No server-side sweeper. The user is responsible for managing their own workspace usage. If `.attachments/` fills their quota, the soft-lock behavior from ADR-078 surfaces the problem through the UI (`GET /api/workspace/quota` shows `locked: true`) and through agent tool errors (`WorkspaceError::SoftLocked`). From there the user — or the agent, on the user's behalf — deletes old attachments via the workspace browser or `delete_file` / `delete_folder` tools.
+**Consequences:**
+- Zero server-side auto-deletion. Every byte on a user's workspace is there because the user or their agent put it there and hasn't removed it.
+- Simpler server — no background task, no drift between filesystem mtimes and DB `bytes_used`, no ordering concerns with in-flight conversations.
+- Pairs cleanly with base64-in-DB (ADR-059): even if the user aggressively cleans `.attachments/` to reclaim quota, conversation history still renders and replays.
+- Users who want automatic retention can build it via the agent + cron (ADR-053) — e.g., "every Sunday, delete attachments older than 30 days." That's a user-level policy, not a platform behavior.
 
 ### ADR-082 · SKILL.md format + write-time validation
 
@@ -734,7 +738,7 @@ User, assistant, and tool messages all use the same block schema.
 - No translation between DB storage and LLM request — content blocks go out to the provider as-stored.
 - History replay is full-fidelity for VLMs and for non-VLMs (vision-retry strips `image_url` blocks per ADR-026, leaving path-text markers per ADR-027).
 - Frontend can render images by emitting the base64 data URL directly — no extra fetch.
-- Durable after `.attachments/` sweep (ADR-081): conversation history continues to render correctly even when the workspace copy is gone.
+- Durable if the workspace attachment is deleted: conversation history continues to render correctly even when the workspace copy is gone (user-initiated cleanup, per ADR-044 + ADR-081).
 - DB rows with images can be large (MBs). Message storage grows with images independently of workspace quota. For v1 this is acceptable; if DB bloat becomes a real concern, a future optimization is to strip `image_url` blocks from compacted rows (keep text/path markers) — tracked as a future enhancement, not a v1 constraint.
 
 ### ADR-060 · No `users.soul`, `users.memory_text`, `users.ssrf_whitelist`
