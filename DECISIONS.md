@@ -203,6 +203,7 @@ enum Outbound {
 2. Load history from DB, JIT-repair unpaired tool_use (ADR-014)
 3. Build context (pure function, ADR-022)
 4. Check compaction threshold; compact if needed; continue
+4a. Fetch tool schemas from `tools_registry::get_tool_schemas(user_id)` — usually a cache hit; rebuilt lazily on device/MCP state changes (ADR-071)
 5. Call LLM (provider handles vision retry internally, ADR-026)
 6. Persist assistant response
 7. If no tool_use blocks → publish Final, exit
@@ -265,6 +266,9 @@ pub struct ContextInputs<'a> {
 **Decision:**
 - **Stage 1** (user-turn boundary): compact the range `[after system prompt ... before latest user message]` into a single compressed message. Target: 12k tokens.
 - **Stage 2** (mid-turn): if history still exceeds threshold after stage 1, compact `[latest user message + accumulated tool/assistant within current turn]` into another 12k-target summary.
+
+**Units clarification:** the 16k threshold and 12k target are **tokens** (measured via tiktoken-rs per ADR-025). This is separate from tool result caps (ADR-076), which are **characters** — roughly 4× smaller in token terms. A max-size tool output (16k chars ≈ 4k tokens) uses ~¼ of the compaction headroom, so ~4 such outputs fit before stage-1 compact fires. Mid-turn accumulation of many tool results is what stage 2 handles.
+
 **Consequences:** Handles both long histories and long agentic runs. Compressed messages are stored in DB with a flag to prevent re-summarization. Stage 2 is rare in practice (needs 30+ tool calls in one turn) but correct when needed.
 
 ### ADR-029 · Serial tool dispatch; DB is mid-turn source of truth
@@ -355,13 +359,13 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 **Status:** accepted
 **Decision:** `message`, `web_fetch`, `cron`, `file_transfer` are plexus-server-owned and defined there.
 
-### ADR-041 · `device_name` routes file tool calls
+### ADR-041 · `device_name` routes file tool calls (injected at merge)
 
 **Status:** accepted
-**Decision:** Every file tool schema includes `device_name: String` (enum: `"server"` + connected devices). Server's `tools_registry` dispatches:
+**Decision:** Source tool schemas (in `plexus-common/src/tools/`, `plexus-client/src/tools/`, or MCP wraps) are nanobot-shape and **do not include `device_name`**. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects the `device_name` enum (per ADR-071) into the agent-visible schema. Dispatch:
 - `device_name="server"` → `workspace_fs` directly
 - otherwise → WebSocket `ToolCall` frame to the named device
-**Consequences:** One tool name, one schema, per-call device selection. Agent sees `edit_file` not `edit_file_server` vs `edit_file_laptop`.
+**Consequences:** Source schemas stay pristine and testable against nanobot fixtures. `device_name` only appears in the post-merge schema the LLM sees. Agent sees `edit_file` not `edit_file_server` vs `edit_file_laptop`.
 
 ### ADR-071 · Tools with the same name + schema are merged; `device_name` enum lists install sites
 
@@ -380,6 +384,8 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 - **MCP tools** (`mcp_{server}_{tool}`): collision-checked at install (ADR-049); schemas guaranteed identical across sites when install succeeds. Enum lists all install sites of this MCP server.
 
 **Canonical schema comparison:** compare the schema after normalizing whitespace, property ordering, and OpenAI-compatibility transforms. Use a stable JSON canonicalization (e.g. sorted keys, trimmed descriptions).
+
+**Stale-read tolerance:** the agent loop reads `tools_registry` at the start of each iteration (ADR-021 step 4a). A cache invalidation during iteration N may not be reflected in N's LLM call; iteration N+1 will see fresh schemas. Bad tool calls caused by stale reads produce `tool_result { is_error: true }` per ADR-031, and the agent adapts on the next iteration. Tightening this window (generation counters, mid-iteration re-reads) is not worth the complexity — the tool-error pathway is the authoritative correctness guarantee, since devices can disappear mid-dispatch regardless of cache consistency.
 
 **Consequences:** Agent sees one tool per capability, with a clear enum of where it can run. Tool-registry cache invalidates on any device connect/disconnect or config change that affects schema reporting. Collision detection is load-bearing for both MCP (ADR-049) and shared file tools (catches bugs where server and client drift).
 
@@ -414,6 +420,82 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 **Decision:** `WorkspaceError`, `ToolError`, `AuthError`, `ProtocolError`, `McpError`, `NetworkError`. Each implements `fn code(&self) -> ErrorCode`. HTTP mapping (`ApiError → StatusCode`) lives in `plexus-server` but wraps these. Server layer does NOT define new error types.
 **Consequences:** One source of truth for what can go wrong. Wire-level `ErrorCode` enum remains stable across versions. `QuotaError` is flattened into `WorkspaceError` (`UploadTooLarge`, `SoftLocked`).
 
+### ADR-075 · Tool timeouts are decentralized; agent may override where the schema advertises
+
+**Status:** accepted
+**Context:** Nanobot's tool timeout model (confirmed empirically). Tools that have legitimately variable duration (shell commands, some MCPs) expose `timeout` as a schema parameter the agent can set within bounds. Tools with bounded scope (file ops, web_fetch, message, cron) enforce fixed internal timeouts with no agent override.
+**Decision:**
+- **No central dispatcher-level timeout wrapper.** Each tool owns its timeout enforcement in its own `execute()`.
+- **Tools expose `timeout` in their schema only when it makes sense.** The agent sees `timeout` as an integer param with documented min/max where exposed.
+- **Per-tool defaults for Plexus:**
+
+| Tool | Agent can override | Default | Max |
+|---|---|---|---|
+| shell | yes | 60s | `device.shell_timeout_max` |
+| read_file | no | 30s internal | — |
+| write_file | no | 30s internal | — |
+| edit_file | no | 30s internal | — |
+| delete_file | no | 10s internal | — |
+| list_dir | no | 10s internal | — |
+| glob | no | 30s internal | — |
+| grep | no | 60s internal | — |
+| message | no | 30s internal | — |
+| web_fetch | no | 30s total, 10s connect | — |
+| cron | no | 10s (DB op) | — |
+| file_transfer | no | stall-detect: abort if no bytes in 30s | — |
+| MCP tools | depends on MCP's own schema | varies | rmcp session timeout |
+
+- **Runaway guardrail** is the iteration hard cap (ADR-036, 200) + trap detection. Not per-call timeouts.
+
+**Consequences:** Simpler dispatch layer. Each tool's timeout is self-documenting in its own code + schema. shell is the primary agent-tunable case; other file-ops and server-only tools pick sensible internal limits. file_transfer's stall-detection covers the unbounded-legitimate-case (10 GB over slow link).
+
+### ADR-076 · Tool result cap: 16k chars global default + per-tool override; head-only truncation
+
+**Status:** accepted
+**Context:** Nanobot's pattern. Prevents a single tool run from flooding agent context while giving tools with legitimate high-output needs (file read) room to breathe.
+**Decision:**
+- **Global default: 16,000 characters** per tool_result (counted via `chars().count()`, UTF-8-aware).
+- **Per-tool override via `Tool::max_output_chars()`** default method. Example: `read_file` overrides to 128,000.
+- **Head-only truncation.** If output exceeds cap: emit `output.chars().take(cap).collect::<String>() + "\n... (truncated)"`. No head+tail split — errors and useful signal appear at the start of virtually every tool output shape.
+- **Truncation helper lives in `plexus-common`** (single implementation, no duplication).
+
+**Units clarification:** this cap is **characters**, not tokens. Roughly 4× smaller in token terms (16k chars ≈ 4k tokens for English/code). Compaction threshold (ADR-028) is in tokens; these are different budgets.
+
+**Consequences:** One tool call can't blow up context. Truncation is centralized and predictable. Future tools with special needs (large binary dumps, wide tables) can override.
+
+### ADR-077 · `Tool` trait pattern with default methods
+
+**Status:** accepted
+**Context:** Nanobot uses an abstract base class (`Tool` ABC) with default methods and per-tool overrides. Rust's trait system gives us the same shape natively.
+**Decision:**
+```rust
+// plexus-common/src/tools/mod.rs
+pub const DEFAULT_MAX_TOOL_RESULT_CHARS: usize = 16_000;
+
+#[async_trait::async_trait]
+pub trait Tool: Send + Sync {
+    /// Tool name as it appears in the schema (e.g., "read_file", "shell").
+    fn name(&self) -> &str;
+
+    /// JSON Schema for the tool parameters. Nanobot-shape; device_name
+    /// is injected at merge time (ADR-041, ADR-071), not here.
+    fn schema(&self) -> serde_json::Value;
+
+    /// Per-tool result cap. Default matches global (ADR-076).
+    fn max_output_chars(&self) -> usize {
+        DEFAULT_MAX_TOOL_RESULT_CHARS
+    }
+
+    /// Execute the tool call with validated args and an execution context
+    /// (user_id, session_id, device_name, state refs).
+    async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResult;
+}
+```
+
+**Registry shape:** `HashMap<&'static str, Arc<dyn Tool>>` per crate (server + client each register their own). Schema merging at session tool-schema-build time (ADR-071) pulls from both plus cached device advertisements.
+
+**Consequences:** Each tool is a testable unit. Default-methods pattern means tools only override what's different from defaults (most tools just need name/schema/execute). Cross-cutting concerns (truncation, timeout, permission pre-check) can be added via default methods later without breaking implementers.
+
 ---
 
 ## 6. MCP
@@ -428,7 +510,8 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 ### ADR-048 · MCP tool naming: `mcp_{server}_{tool}`
 
 **Status:** accepted
-**Decision:** Every MCP tool is prefixed with `mcp_<server_name>_<tool_name>` before being registered with the agent. The tool schema gains a `device_name` enum listing all install sites (server + connected devices that also have this MCP).
+**Decision:** The MCP wrap step prefixes each MCP-provided tool name with `mcp_<server_name>_<tool_name>`. Nothing else is injected at wrap time — source schema stays unchanged. The `device_name` enum is added later at merge time per ADR-071, consistent with ADR-041.
+**Consequences:** Wrap is pure name-rewriting; merge is where cross-site schema comparison + device_name injection happens. Cleanly separates concerns.
 
 ### ADR-049 · MCP schema-collision is rejected at install time
 
