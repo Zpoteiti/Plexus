@@ -314,11 +314,11 @@ Otherwise the loop continues.
 **Decision:** When a new InboundMessage arrives for a session that is currently processing, `publish_inbound` enqueues into the session's pending queue (created at agent-loop spawn). At the iteration boundary (after tools are persisted, before next build_context), the agent loop drains the queue and persists each as a role="user" message. The next iteration's LLM call sees the new messages naturally.
 **Consequences:** Users can redirect mid-turn ("wait, do Y instead") without waiting for the current turn to finish. No special plumbing — just drain at boundary.
 
-### ADR-035 · User stop button: cancel flag + injected user message
+### ADR-035 · User stop button: cancel flag + persisted user message
 
 **Status:** accepted
-**Decision:** Frontend offers a stop button. `POST /api/sessions/{id}/cancel` sets `session.cancel_requested: AtomicBool`. At the next iteration boundary, the agent loop observes the flag, injects a synthetic user message `"[User pressed stop]"` into the pending queue, and exits the loop. DB may end with unpaired tool_use; ADR-014 repair handles it on resume.
-**Consequences:** No separate cancel pipeline. Stop produces a natural user-turn boundary the agent observes. Next inbound resumes cleanly with context of the interruption.
+**Decision:** Frontend offers a stop button. `POST /api/sessions/{id}/cancel` sets `session.cancel_requested: AtomicBool`. At the next iteration boundary, the agent loop observes the flag, INSERTs `"[User pressed stop]"` as `role=user` directly into `messages` (per ADR-032's persist-on-every-state-transition rule), and exits the loop. DB may end with unpaired tool_use from the interrupted turn; ADR-014 repair handles it on resume.
+**Consequences:** No separate cancel pipeline. The stop marker is a normal user-turn row. Next inbound for this session loads history from DB, sees the stop marker, and the agent picks up the interruption context cleanly — no in-memory state needed to "remember" that the user stopped.
 
 ### ADR-036 · Hard cap 200 iterations + trap-in-loop detection
 
@@ -720,7 +720,7 @@ Rejected: a dedicated `install_skill` server tool. Would require URL allowlistin
 ### ADR-058 · Every user-referencing FK has `ON DELETE CASCADE` inline
 
 **Status:** accepted
-**Decision:** Cascades defined at table-create time, not via `ALTER TABLE` migrations. Account deletion is a single `DELETE FROM users WHERE id = $1` that cleans up devices, device_tokens, sessions, messages, cron_jobs, discord_configs, telegram_configs automatically.
+**Decision:** Cascades defined at table-create time, not via `ALTER TABLE` migrations. Account deletion is a single `DELETE FROM users WHERE id = $1` that cleans up devices (tokens are inline per ADR-091), sessions, messages, cron_jobs, discord_configs, telegram_configs automatically.
 
 ### ADR-059 · Messages store provider-shape content blocks as JSONB; images inline as base64 data URLs
 
@@ -746,6 +746,50 @@ User, assistant, and tool messages all use the same block schema.
 **Status:** accepted
 **Decision:** SOUL.md and MEMORY.md are files in the user's workspace, not DB columns. Per-user SSRF whitelist doesn't exist server-side (ADR-052); only per-device whitelists.
 **Consequences:** Editable by the agent via file tools without specialty endpoints. Inspectable on disk. Versioned naturally via git if the user cares.
+
+### ADR-089 · Message role enum is `user | assistant | tool`; compaction summaries use an inline flag
+
+**Status:** accepted
+**Context:** Compaction summaries (ADR-028) need to be distinguishable from regular history so the next compaction pass skips them and the context builder knows where the "fold point" is. A synthetic role like `compaction_summary` would break the pass-through-to-provider storage (ADR-059), since OpenAI/Anthropic chat APIs only accept `user`, `assistant`, `tool`.
+**Decision:**
+- `messages.role` column is strictly one of `user`, `assistant`, `tool`. No synthetic role values.
+- Compaction summaries are inserted with `role='assistant'` plus `is_compaction_summary BOOLEAN NOT NULL DEFAULT FALSE` set to true on that specific row.
+- **Context builder:** loads the most recent row where `is_compaction_summary=true` (if any), then every message newer than it. Pre-summary rows are not loaded but remain in DB for audit.
+- **Compaction pass:** skips rows where `is_compaction_summary=true` so a summary never gets re-summarized.
+**Consequences:** Content JSONB is pass-through to the provider — the summary appears as a regular assistant message in the LLM request. The flag is a purely internal marker, never serialized outside DB. No special provider-side handling.
+
+### ADR-090 · Per-channel bot configs live in their own tables
+
+**Status:** accepted
+**Context:** Discord, Telegram, and any future messaging channel each carry several fields (bot token, partner chat identifier, channel-specific flags). Inlining these as columns on `users` is feasible but bloats the users row, couples unrelated fields together, and has to change every time a new channel is added.
+**Decision:** Each connected-channel type owns its own table: `discord_configs`, `telegram_configs`, etc. Each has `user_id` as FK (ON DELETE CASCADE per ADR-058), the channel's `bot_token`, a partner-identifier field (`partner_chat_id`), and whatever channel-specific settings the integration needs. Users table stays thin — no inline channel fields.
+**Consequences:** Adding a new channel = adding a new table, no users-schema change, no migration pressure on unrelated features. Channel config is naturally scoped: a user with Discord configured but no Telegram has a row in `discord_configs` and none in `telegram_configs`. Account deletion cascades to all channel tables automatically.
+
+### ADR-091 · Device identity: `token` is PK, `(user_id, name)` is UNIQUE, user-initiated regenerate only
+
+**Status:** accepted
+**Context:** Devices need an internal identifier (for handshake auth + row identity) and an external reference (for URLs, tool routing, system-prompt device enum). Early idea was "device id = device token" so only one field exists. But if the token is the identifier, `PATCH /api/devices/{token}/config` embeds the auth secret in URL paths, which end up in access logs, reverse-proxy traces, browser history, and debugging tools. That's a token-leak hazard even for self-hosted deployments.
+**Decision:**
+- **`devices.token`** — random secret. Primary key of the row. Acts as the canonical internal device identifier (for direct lookups, future FK references, etc.). Stored in plaintext (it IS the credential, not a credential wrapper).
+- **`devices.name`** — user-assigned friendly label ("laptop", "desktop"). Required. UNIQUE within a user via a `UNIQUE (user_id, name)` constraint.
+- **Handshake auth:** client sends `Authorization: Bearer <token>` on WebSocket connect. Server looks up the device by `token` (primary key). If found and not banned, connection proceeds.
+- **REST admin endpoints:** use the friendly name. `PATCH /api/devices/{name}/config`, `DELETE /api/devices/{name}`, `GET /api/devices/{name}`. JWT supplies user_id; server looks up by `(user_id, name)`. Token never appears in URLs.
+- **Agent tool calls:** the `device` argument uses the friendly name ("laptop"). Server routes by `(session.user_id, name)` lookup. Token stays invisible to the agent.
+- **No automatic token rotation.** User triggers regenerate explicitly from the settings UI ("regenerate token" button). Regenerate overwrites the `token` column, disconnects the currently-connected device (handshake auth will no longer find the old token), and displays the new token to the user once. The user pastes the new value into the client config. No mid-job expiration, no rotation scheduler.
+
+**Consequences:**
+- Tokens never appear in URLs, logs, or any agent-visible surface.
+- Two users can both name a device "laptop" — the scoping via `user_id` keeps names friendly without collision risk.
+- One row per device. No separate `device_tokens` table.
+- Regenerate is the user's explicit action; we never surprise them with token changes.
+- A lost/leaked token is fixed by pressing regenerate, not by opaque rotation machinery.
+
+### ADR-092 · No heartbeat state is persisted
+
+**Status:** accepted
+**Context:** Heartbeat Phase 1 (ADR-054) runs each tick and decides skip-or-run based on current time and `HEARTBEAT.md`. A "last Phase 1 decision" column or table was considered to let admins audit tick behavior.
+**Decision:** No persisted heartbeat state. No `users.last_heartbeat_phase1_at`, no `heartbeat_state` table. Phase 1 is stateless — each tick reads current context and decides fresh.
+**Consequences:** Restart doesn't carry heartbeat baggage. If Phase 1 fires Phase 2, the only persistence is the resulting heartbeat-session message history (via the normal message-bus path, ADR-010). Admin audit of Phase 1 behavior must come from logs, not DB queries. Acceptable: heartbeats are infrequent and user-scoped, not a compliance surface.
 
 ---
 
