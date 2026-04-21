@@ -405,8 +405,14 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 
 **Status:** accepted
 **Context:** Prior Plexus had `/api/files` (ephemeral upload cache, 24h TTL) running parallel to `/api/workspace/files/` (durable user tree). Two storage systems for files caused drift across message-send, context-load, and channel delivery.
-**Decision:** Workspace is canonical. No `/api/files`, no `file_store.rs`. Chat-drop images land at `workspace/.attachments/{msg_id}/{filename}` — a reserved directory with 30-day TTL sweep, counts toward quota.
-**Consequences:** One file model. All inbound/outbound media flows through workspace paths. Discord/Telegram adapters read workspace files directly for delivery (no staging cache). Device-origin files: the agent uses `file_transfer` to stage to server first, or the server relays via `GET /api/device-stream/{device_name}/{path}` (SSE-compatible for browser display).
+**Decision:** Workspace is canonical for files the agent operates on. No `/api/files`, no `file_store.rs`. Chat-drop images land at `workspace/.attachments/{msg_id}/{filename}` — a reserved directory with 30-day TTL sweep, counts toward quota.
+**Consequences:** One file model for agent-accessible files. All inbound/outbound media the agent reads/writes flows through workspace paths. Discord/Telegram adapters read workspace files directly for delivery (no staging cache). Device-origin files: the agent uses `file_transfer` to stage to server first, or the server relays via `GET /api/device-stream/{device_name}/{path}` (SSE-compatible for browser display).
+
+**Adjunct — images are stored in BOTH workspace and DB, serving different purposes:**
+- **Workspace file** at `.attachments/{msg_id}/{filename}` — the agent's file tools (`read_file`, `file_transfer`, etc.) operate on this copy. Subject to 30-day TTL sweep (ADR-081) and quota accounting (ADR-078).
+- **DB base64 inside the message content block** (per ADR-059) — the durable conversation-replay source. Image bytes live inline in the JSONB as `data:{mime};base64,...` URLs, matching the provider API shape so the LLM call is a pass-through with no marshaling.
+
+After the 30-day sweep removes the workspace file, conversation history remains fully functional: frontend renders the base64 directly, LLM requests still include the image, only the agent's ability to `read_file` that specific path is lost (covered by the path-text marker in ADR-027 if the agent needs to reason about provenance).
 
 ### ADR-045 · `workspace_fs` is the single write path server-side
 
@@ -525,7 +531,7 @@ pub trait Tool: Send + Sync {
 **Context:** A user can hit their quota mid-conversation, then send a Discord/Telegram message with an image attachment. The attachment write would hit `SoftLocked`. Dropping the entire message would lose the user's text and make the agent miss the turn.
 **Decision:** When a channel adapter receives an inbound message with attachments while the user is over quota:
 - The text portion of the message is delivered normally to the session.
-- Each attachment is silently dropped from the workspace write.
+- Each attachment is dropped entirely — no workspace file is written AND no base64 `image_url` block is inserted into `messages.content` (the DB-side of ADR-059 is also skipped). The agent sees no image at all for that message.
 - A system note is appended to the user's text block: `[attachment skipped: workspace over quota]`.
 
 The agent sees the note in context, can reference it in its reply, and the user can delete files and resend.
@@ -712,11 +718,24 @@ Rejected: a dedicated `install_skill` server tool. Would require URL allowlistin
 **Status:** accepted
 **Decision:** Cascades defined at table-create time, not via `ALTER TABLE` migrations. Account deletion is a single `DELETE FROM users WHERE id = $1` that cleans up devices, device_tokens, sessions, messages, cron_jobs, discord_configs, telegram_configs automatically.
 
-### ADR-059 · Messages store Anthropic-style content blocks as JSONB
+### ADR-059 · Messages store provider-shape content blocks as JSONB; images inline as base64 data URLs
 
 **Status:** accepted
-**Decision:** `messages.content JSONB` holds the array of content blocks (text, image, tool_use, tool_result). Both user and assistant messages can be multimodal. Tool messages too.
-**Consequences:** No lossy text-only representation. History replay is full-fidelity for VLMs and for non-VLMs (with path-text fallback, ADR-027).
+**Decision:** `messages.content JSONB` holds the array of content blocks. Block shapes mirror the OpenAI/Anthropic chat-completions request body exactly — storing what the LLM will receive so the request body is a pass-through with no translation.
+
+Canonical block types:
+- **text:** `{"type": "text", "text": "..."}`
+- **image:** `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` — bytes inline as base64 data URL, not a path. The workspace copy at `.attachments/` (ADR-044) is for the agent's file tools; the DB copy is for durable conversation replay.
+- **tool_use / tool_result:** per the provider's tool spec.
+
+User, assistant, and tool messages all use the same block schema.
+
+**Consequences:**
+- No translation between DB storage and LLM request — content blocks go out to the provider as-stored.
+- History replay is full-fidelity for VLMs and for non-VLMs (vision-retry strips `image_url` blocks per ADR-026, leaving path-text markers per ADR-027).
+- Frontend can render images by emitting the base64 data URL directly — no extra fetch.
+- Durable after `.attachments/` sweep (ADR-081): conversation history continues to render correctly even when the workspace copy is gone.
+- DB rows with images can be large (MBs). Message storage grows with images independently of workspace quota. For v1 this is acceptable; if DB bloat becomes a real concern, a future optimization is to strip `image_url` blocks from compacted rows (keep text/path markers) — tracked as a future enhancement, not a v1 constraint.
 
 ### ADR-060 · No `users.soul`, `users.memory_text`, `users.ssrf_whitelist`
 
