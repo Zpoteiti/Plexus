@@ -61,6 +61,7 @@ npm install && npm run build
 # Set required env vars (or use a .env file)
 export DATABASE_URL=postgres://user:pass@localhost/plexus
 export JWT_SECRET=your-jwt-secret-at-least-32-chars
+export ADMIN_TOKEN=your-admin-secret
 export SERVER_PORT=8080
 export PLEXUS_WORKSPACE_ROOT=/var/lib/plexus/workspaces
 
@@ -72,9 +73,11 @@ The server is a single binary serving everything: REST API, SSE streams for the 
 
 ### 3. Set up via the web UI
 
-Open `http://localhost:8080` in your browser. The first user to register becomes the admin and is guided through the setup wizard:
+Open `http://localhost:8080` in your browser. Anyone registering with the matching `ADMIN_TOKEN` becomes an admin; multiple admins are possible — just share the token with whoever should have admin rights. Regular users register without the token.
 
-1. **Register** your admin account
+First-time admin flow:
+
+1. **Register** your admin account, supplying the `ADMIN_TOKEN`
 2. **Configure LLM** — point to any OpenAI-compatible API (OpenAI, Anthropic via proxy, local models, etc.)
 3. **Set workspace defaults** — personal quota, shared workspace cap, and other platform settings
 4. **Create your first device** — give it a name (e.g. "laptop") and copy the generated token to connect a client
