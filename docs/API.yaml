@@ -1,0 +1,1403 @@
+openapi: 3.1.0
+info:
+  title: Plexus HTTP API
+  version: 0.1.0
+  description: |
+    REST + SSE surface exposed by `plexus-server`. Pairs with
+    [DECISIONS.md](DECISIONS.md) and [TOOLS.md](TOOLS.md).
+
+    **Design principle:** every user-meaningful agent capability has a matching
+    REST endpoint over the same underlying abstractions (workspace_fs, cron
+    scheduler, etc.). REST and tools are two entrances for two different
+    callers (human-via-browser vs. agent-via-LLM) hitting the same service
+    layer.
+
+    **Parallel with tools (see TOOLS.md):**
+
+    | Agent tool | REST equivalent | Notes |
+    |---|---|---|
+    | `read_file` | `GET /api/workspace/files/{path}` | Absolute workspace path |
+    | `write_file` | `PUT /api/workspace/files/{path}` | Implicit mkdir -p |
+    | `edit_file` | `PATCH /api/workspace/files/{path}` | Body: old_text/new_text/replace_all |
+    | `delete_file` | `DELETE /api/workspace/files/{path}` | Always allowed (quota release) |
+    | `delete_folder` | `DELETE /api/workspace/folders/{path}` | Recursive, no flag |
+    | `list_dir` | `GET /api/workspace/list/{path}` | Query: recursive, max_entries |
+    | `glob` | `GET /api/workspace/glob` | Query: pattern, path |
+    | `grep` | `GET /api/workspace/grep` | Query: pattern, path, mode |
+    | `file_transfer` | `POST /api/workspace/transfer` | Body matches tool args |
+    | `cron` | `POST /api/cron` + CRUD | Full schedule management |
+    | `web_fetch` | — | No REST parallel (browser fetches directly) |
+    | `message` | — | No REST parallel (browser composes via chat) |
+    | `shell` | — | No REST parallel (rare UI need in v1) |
+
+    **Auth model:**
+
+    - `ADMIN_TOKEN` env var: permanent secret. Anyone who presents it during
+      registration becomes admin. Multiple admins are supported — share the
+      token with teammates who should have admin rights.
+    - All other endpoints use JWT, delivered either via `HttpOnly` cookie
+      (browser) or `Authorization: Bearer <jwt>` (programmatic).
+    - Admin-only endpoints require the JWT's `is_admin` claim.
+
+    **Wire conventions:**
+
+    - JSON bodies everywhere except file reads, which return raw file bytes
+      with an appropriate `Content-Type`.
+    - Errors always return a JSON body: `{code, message}`. `code` values come
+      from the `ErrorCode` enum in `plexus-common/src/errors/`.
+    - Timestamps are ISO 8601 with timezone offset.
+    - UUIDs unless noted.
+
+    **Not in this spec:**
+
+    - Discord and Telegram ingress. Those are internal adapter modules inside
+      `plexus-server`, not public HTTP endpoints. The only public ingress for
+      chat messages is `POST /api/sessions/{id}/messages` (browser) plus the
+      `WS /ws/device` handshake for devices.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://plexus.example.com
+    description: Production (behind TLS reverse proxy)
+
+tags:
+  - name: Auth
+    description: Registration, login, session management
+  - name: Me
+    description: The authenticated user's own account
+  - name: Sessions
+    description: Chat sessions + messages + SSE stream
+  - name: Workspaces
+    description: Personal + shared workspace management
+  - name: Workspace Files
+    description: File operations — mirror the agent's shared file tools
+  - name: Devices
+    description: Registering and configuring client devices
+  - name: Channels
+    description: Discord / Telegram bot configurations per user
+  - name: Cron
+    description: Scheduled agent invocations
+  - name: Admin
+    description: Admin-only — system config, user management, server-side MCPs
+
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+
+paths:
+  #
+  # --- Auth ---
+  #
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new account
+      description: |
+        Creates a new user and their auto-created personal workspace.
+        If `admin_token` in the body matches `ADMIN_TOKEN` env var, the
+        new user is created with `is_admin=true`. Otherwise a regular
+        user. On success, returns the JWT and sets the auth cookie.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                name: { type: string }
+                admin_token:
+                  type: string
+                  description: Optional. Present it to claim `is_admin`.
+      responses:
+        '201':
+          description: Created
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: Sets the `plexus_session` HttpOnly cookie.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jwt: { type: string }
+                  user: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: Email already in use.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200':
+          description: OK
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jwt: { type: string }
+                  user: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (clear session cookie)
+      responses:
+        '204':
+          description: Cookie cleared.
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+
+  #
+  # --- Me ---
+  #
+  /api/me:
+    get:
+      tags: [Me]
+      summary: Get the authenticated user's profile
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      tags: [Me]
+      summary: Update profile (name, email, password)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+    delete:
+      tags: [Me]
+      summary: Delete own account (cascades to all user data)
+      description: |
+        Cascades to devices, sessions, messages, cron_jobs, discord_configs,
+        telegram_configs, and personal workspace files (ADR-058).
+        Shared workspace memberships are removed; shared workspaces the user
+        was in persist for other members.
+      responses:
+        '204': { description: Account deleted. }
+
+  #
+  # --- Sessions ---
+  #
+  /api/sessions:
+    get:
+      tags: [Sessions]
+      summary: List the user's chat sessions
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Session' }
+
+  /api/sessions/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Sessions]
+      summary: Get a single session
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Sessions]
+      summary: Delete a session and its message history
+      responses:
+        '204': { description: Deleted. }
+
+  /api/sessions/{id}/messages:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Sessions]
+      summary: List messages in a session
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Message' }
+    post:
+      tags: [Sessions]
+      summary: Send a user message to this session (fire-and-forget, ADR-013)
+      description: |
+        Returns `202 Accepted` immediately after persisting the user
+        message and spawning the agent task. Subscribe to
+        `GET /api/sessions/{id}/stream` to receive the agent's reply
+        events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  description: Anthropic-style content blocks (text + image_url). Strings are accepted as shorthand for a single text block.
+                  oneOf:
+                    - { type: string }
+                    - type: array
+                      items: { $ref: '#/components/schemas/ContentBlock' }
+      responses:
+        '202':
+          description: Accepted — message persisted, agent task spawned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message_id: { type: string }
+
+  /api/sessions/{id}/stream:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Sessions]
+      summary: SSE stream of agent events for this session (ADR-003)
+      description: |
+        Opens a Server-Sent Events stream. The server holds the
+        connection open and writes `event: <name>\ndata: <json>\n\n`
+        chunks as the agent produces them. Cookie auth works because
+        EventSource includes credentials with `withCredentials: true`.
+
+        Event names (see `SseEvent*` schemas):
+
+        - `hint` — mechanical tool-dispatch hint (ADR-017).
+        - `final` — completed assistant message (ADR-015).
+        - `session_update` — session state transitions (cancel, etc.).
+        - `kick` — server-initiated termination.
+
+        OpenAPI does not model SSE first-class; event payloads are
+        described under `components.schemas`.
+      responses:
+        '200':
+          description: SSE stream opened.
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /api/sessions/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Sessions]
+      summary: Stop button — request cancellation at next iteration boundary (ADR-035)
+      description: |
+        Sets the session's `cancel_requested` flag. At the next
+        iteration boundary, the agent loop inserts
+        `"[User pressed stop]"` as a user message and exits. DB may
+        end with unpaired tool_use; ADR-014 JIT-repair handles it on
+        resume.
+      responses:
+        '202':
+          description: Cancellation requested.
+
+  #
+  # --- Workspaces ---
+  #
+  /api/workspaces:
+    get:
+      tags: [Workspaces]
+      summary: List workspaces the user has access to (personal + shared)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Workspace' }
+    post:
+      tags: [Workspaces]
+      summary: Create a shared workspace (caller auto-added to allow-list)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, quota_bytes]
+              properties:
+                name:
+                  type: string
+                  description: Globally unique name. Used as the first path segment in workspace file paths.
+                quota_bytes:
+                  type: integer
+                  format: int64
+                  description: Requested quota. Server caps at the admin-set shared-workspace ceiling.
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Workspace' }
+        '409':
+          description: Name already in use.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  /api/workspaces/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Workspaces]
+      summary: Get a workspace's details
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Workspaces]
+      summary: Update a shared workspace (rename, change quota)
+      description: |
+        Any member of the allow-list can rename or change the quota cap
+        (ADR-flat-permissions). Renaming changes the workspace's path
+        segment — existing tool calls and stored references to the old
+        path will break. Use with care.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                quota_bytes: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/workspaces/{name}/members:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Workspaces]
+      summary: List allow-list for a shared workspace
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WorkspaceMember' }
+    post:
+      tags: [Workspaces]
+      summary: Add a user to the allow-list
+      description: Any existing member can add new members. Caller looks up by email or user_id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              oneOf:
+                - { required: [user_id], properties: { user_id: { type: string } } }
+                - { required: [email], properties: { email: { type: string, format: email } } }
+      responses:
+        '201':
+          description: Member added.
+          content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceMember' } } }
+
+  /api/workspaces/{name}/members/{user_id}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+      - name: user_id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [Workspaces]
+      summary: Remove a user from the allow-list
+      description: |
+        Any member can remove anyone (including themselves). Removing
+        the last member triggers automatic workspace deletion (files
+        purged, quota released).
+      responses:
+        '204': { description: Removed. }
+
+  /api/workspace/quota:
+    get:
+      tags: [Workspaces]
+      summary: Authenticated user's personal quota state (ADR-078)
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Quota' }
+
+  #
+  # --- Workspace Files ---
+  #
+  # NOTE on path params: the server accepts a URL-encoded absolute path as a
+  # single `{path}` path-param. Clients should encode `/` as `%2F` inside the
+  # param value, OR the server can route via a wildcard and keep slashes raw.
+  # Implementation choice — the OpenAPI shape is the same either way.
+  #
+  /api/workspace/files/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        description: Absolute workspace path. First segment names the workspace (personal user_id or shared workspace name). Must be accessible to the authenticated user.
+        schema: { type: string }
+    get:
+      tags: [Workspace Files]
+      summary: Read file contents (mirrors `read_file` tool)
+      parameters:
+        - { name: start_line, in: query, schema: { type: integer, minimum: 1 } }
+        - { name: end_line,   in: query, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: OK — returns file bytes. Content-Type per detected file type (text/plain, application/json, image/*, application/octet-stream).
+          content:
+            '*/*':
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [Workspace Files]
+      summary: Write file contents (mirrors `write_file` tool); creates parents
+      description: |
+        Full-content replace. Accepts `application/octet-stream` for raw
+        bytes or `application/json` with `{content: string}` for text.
+        Implicit `mkdir -p` on the parent path (ADR-088). Runs through
+        workspace_fs — quota check + SKILL.md validation (ADR-082) apply.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string }
+      responses:
+        '204': { description: Written. }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Quota lock (SoftLocked) or operation exceeds 80% single-op cap (UploadTooLarge).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: Invalid SKILL.md format.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    patch:
+      tags: [Workspace Files]
+      summary: Edit file via fuzzy match (mirrors `edit_file` tool)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_text, new_text]
+              properties:
+                old_text: { type: string, description: Empty + non-existent path = create file. }
+                new_text: { type: string }
+                replace_all: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Edit applied.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  replacements: { type: integer }
+        '409':
+          description: Ambiguous (multiple matches + replace_all=false) or quota.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: No match, or invalid SKILL.md after edit.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    delete:
+      tags: [Workspace Files]
+      summary: Delete a single file (mirrors `delete_file`)
+      description: Always allowed regardless of quota lock state. Refunds quota.
+      responses:
+        '204': { description: Deleted. }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Path is a directory — use `DELETE /api/workspace/folders/{path}`.
+
+  /api/workspace/folders/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [Workspace Files]
+      summary: Recursively delete a folder (mirrors `delete_folder`, ADR-086)
+      responses:
+        '204': { description: Deleted. }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Path is a file — use `DELETE /api/workspace/files/{path}`.
+
+  /api/workspace/list/{path}:
+    parameters:
+      - name: path
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Workspace Files]
+      summary: List directory contents (mirrors `list_dir`)
+      parameters:
+        - { name: recursive,   in: query, schema: { type: boolean, default: false } }
+        - { name: max_entries, in: query, schema: { type: integer, default: 200, minimum: 1 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: '#/components/schemas/ListDirEntry' }
+                  truncated: { type: boolean }
+                  total: { type: integer }
+
+  /api/workspace/glob:
+    get:
+      tags: [Workspace Files]
+      summary: Find files by glob pattern (mirrors `glob`)
+      parameters:
+        - { name: pattern, in: query, required: true, schema: { type: string } }
+        - { name: path,    in: query, required: true, schema: { type: string }, description: Absolute base directory. }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+
+  /api/workspace/grep:
+    get:
+      tags: [Workspace Files]
+      summary: Content search (mirrors `grep`)
+      parameters:
+        - { name: pattern, in: query, required: true, schema: { type: string } }
+        - { name: path,    in: query, required: true, schema: { type: string } }
+        - name: output_mode
+          in: query
+          schema:
+            type: string
+            enum: [content, files_with_matches, count]
+            default: files_with_matches
+        - { name: case_insensitive, in: query, schema: { type: boolean, default: false } }
+        - { name: context, in: query, schema: { type: integer, default: 0 } }
+        - { name: glob, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /api/workspace/transfer:
+    post:
+      tags: [Workspace Files]
+      summary: Copy or move a file/folder between devices (mirrors `file_transfer`)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TransferRequest' }
+      responses:
+        '200':
+          description: Transfer completed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bytes_transferred: { type: integer, format: int64 }
+                  warnings:
+                    type: array
+                    items: { type: string }
+                    description: Non-fatal issues (e.g. cross-device move's delete-after-copy failed).
+        '409':
+          description: Destination exists, quota lock, or operation exceeds single-op cap.
+
+  #
+  # --- Devices ---
+  #
+  /api/devices:
+    get:
+      tags: [Devices]
+      summary: List user's devices
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Device' }
+    post:
+      tags: [Devices]
+      summary: Register a new device (returns the token ONCE)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Friendly label (e.g. "laptop"). Unique within the user's devices.
+                workspace_path: { type: string }
+                fs_policy:
+                  type: string
+                  enum: [sandbox, unrestricted]
+                  default: sandbox
+                shell_timeout_max:
+                  type: integer
+                  default: 300
+                ssrf_whitelist:
+                  type: array
+                  items: { type: string }
+                mcp_servers: { type: object, additionalProperties: true }
+      responses:
+        '201':
+          description: |
+            Device created. The response includes the token ONCE — it is
+            never returned again. Lost tokens require `POST /api/devices/{name}/regenerate-token`.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Device'
+                  - type: object
+                    required: [token]
+                    properties:
+                      token:
+                        type: string
+                        description: Bearer token the device sends at WebSocket handshake. Shown once.
+
+  /api/devices/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Devices]
+      summary: Get a device
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } }
+    patch:
+      tags: [Devices]
+      summary: Update device config (fs_policy, timeouts, SSRF, MCPs)
+      description: |
+        Changes are pushed to the connected device (if online) as a
+        `ServerToClient::ConfigUpdate` frame (ADR-050). Setting
+        `fs_policy` to `unrestricted` requires typed-device-name
+        confirmation in the UI (ADR-051); this endpoint accepts the
+        flip but the UI is expected to enforce confirmation before
+        calling it.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fs_policy: { type: string, enum: [sandbox, unrestricted] }
+                shell_timeout_max: { type: integer }
+                ssrf_whitelist:
+                  type: array
+                  items: { type: string }
+                mcp_servers: { type: object, additionalProperties: true }
+                workspace_path: { type: string }
+      responses:
+        '200':
+          description: Updated.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } }
+    delete:
+      tags: [Devices]
+      summary: Remove a device (revokes its token)
+      responses:
+        '204': { description: Removed. }
+
+  /api/devices/{name}/regenerate-token:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Devices]
+      summary: Regenerate the device's auth token
+      description: |
+        Invalidates the old token, returns a new one (shown once). The
+        connected device will be disconnected on its next handshake
+        attempt; user must update client config with the new token.
+      responses:
+        '200':
+          description: New token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token]
+                properties:
+                  token: { type: string }
+
+  #
+  # --- Channels ---
+  #
+  /api/channels/discord:
+    get:
+      tags: [Channels]
+      summary: Get the user's Discord config
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/DiscordConfig' } } }
+        '404':
+          description: No Discord config set.
+    put:
+      tags: [Channels]
+      summary: Set or update the user's Discord config
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bot_token, partner_chat_id]
+              properties:
+                bot_token: { type: string }
+                partner_chat_id: { type: string }
+      responses:
+        '200':
+          description: Saved.
+          content: { application/json: { schema: { $ref: '#/components/schemas/DiscordConfig' } } }
+    delete:
+      tags: [Channels]
+      summary: Remove the user's Discord config
+      responses:
+        '204': { description: Removed. }
+
+  /api/channels/telegram:
+    get:
+      tags: [Channels]
+      summary: Get the user's Telegram config
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/TelegramConfig' } } }
+        '404':
+          description: No Telegram config set.
+    put:
+      tags: [Channels]
+      summary: Set or update the user's Telegram config
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bot_token, partner_chat_id]
+              properties:
+                bot_token: { type: string }
+                partner_chat_id: { type: string }
+      responses:
+        '200':
+          description: Saved.
+          content: { application/json: { schema: { $ref: '#/components/schemas/TelegramConfig' } } }
+    delete:
+      tags: [Channels]
+      summary: Remove the user's Telegram config
+      responses:
+        '204': { description: Removed. }
+
+  #
+  # --- Cron ---
+  #
+  /api/cron:
+    get:
+      tags: [Cron]
+      summary: List the user's cron jobs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CronJob' }
+    post:
+      tags: [Cron]
+      summary: Create a cron job (mirrors `cron` tool, ADR-053)
+      description: |
+        The job inherits the caller's current channel + chat_id at
+        creation time. Each firing synthesizes an `InboundMessage`
+        into a dedicated cron session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [schedule, description]
+              properties:
+                schedule:
+                  type: string
+                  description: Cron expression ("0 9 * * *") or natural language ("every Monday at 10am").
+                description:
+                  type: string
+                  description: Becomes the synthesized user message at firing time.
+                one_shot:
+                  type: boolean
+                  default: false
+                channel:
+                  type: string
+                  description: Optional override; defaults to the caller's current session channel.
+                chat_id:
+                  type: string
+                  description: Optional override; defaults to the caller's current session chat_id.
+      responses:
+        '201':
+          description: Created.
+          content: { application/json: { schema: { $ref: '#/components/schemas/CronJob' } } }
+
+  /api/cron/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Cron]
+      summary: Get a cron job
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/CronJob' } } }
+    patch:
+      tags: [Cron]
+      summary: Update schedule or description
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                schedule: { type: string }
+                description: { type: string }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/CronJob' } } }
+    delete:
+      tags: [Cron]
+      summary: Delete a cron job
+      responses:
+        '204': { description: Deleted. }
+
+  #
+  # --- Admin ---
+  #
+  /api/admin/config:
+    get:
+      tags: [Admin]
+      summary: Get system-wide config (admin only)
+      description: |
+        Returns every row of the `system_config` table. Includes the
+        global `quota_bytes`, LLM provider config, shared-workspace
+        quota ceiling, etc.
+      security:
+        - cookieAuth: [admin]
+        - bearerAuth: [admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '403': { $ref: '#/components/responses/Forbidden' }
+    patch:
+      tags: [Admin]
+      summary: Update system-wide config keys
+      security:
+        - cookieAuth: [admin]
+        - bearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Partial update — keys present are updated, keys absent are untouched.
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: object, additionalProperties: true } } }
+
+  /api/admin/users:
+    get:
+      tags: [Admin]
+      summary: List all users (admin only)
+      security:
+        - cookieAuth: [admin]
+        - bearerAuth: [admin]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/User' }
+
+  /api/admin/users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Admin]
+      summary: Get a user
+      security:
+        - cookieAuth: [admin]
+        - bearerAuth: [admin]
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
+    delete:
+      tags: [Admin]
+      summary: Delete a user (admin only) — cascades to all their resources (ADR-058)
+      security:
+        - cookieAuth: [admin]
+        - bearerAuth: [admin]
+      responses:
+        '204': { description: Deleted. }
+
+  /api/admin/server-mcp:
+    get:
+      tags: [Admin]
+      summary: List server-side (admin-configured) MCPs
+      security:
+        - cookieAuth: [admin]
+        - bearerAuth: [admin]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/McpServerConfig' }
+    put:
+      tags: [Admin]
+      summary: Replace the server-side MCP list (admin only)
+      description: |
+        Collision detection per ADR-049: if any new MCP has a
+        schema-conflicting name against an existing install, returns
+        `409 Conflict` with a structured diff and does not apply
+        any changes.
+      security:
+        - cookieAuth: [admin]
+        - bearerAuth: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: '#/components/schemas/McpServerConfig' }
+      responses:
+        '200':
+          description: Applied.
+        '409':
+          description: Schema collision with an existing MCP install.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: plexus_session
+      description: HttpOnly; Secure; SameSite=Strict JWT cookie set by `/api/auth/login` and `/api/auth/register`.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: For programmatic clients (CLI, scripts). Same JWT as the cookie, just delivered differently (ADR-004).
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+    Offset:
+      name: offset
+      in: query
+      schema: { type: integer, default: 0, minimum: 0 }
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: Missing or invalid authentication.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: Authenticated but not authorized for this resource.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Resource does not exist.
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: |
+            Stable error code from `plexus-common/src/errors/`.
+            Examples: `not_found`, `forbidden`, `soft_locked`,
+            `upload_too_large`, `invalid_skill_format`,
+            `private_address_blocked`, `ambiguous_edit`,
+            `no_match`, `invalid_schedule`, `destination_exists`.
+        message: { type: string }
+
+    User:
+      type: object
+      required: [id, email, name, is_admin, created_at]
+      properties:
+        id: { type: string, description: UUID v4. }
+        email: { type: string, format: email }
+        name: { type: string }
+        is_admin: { type: boolean }
+        bytes_used: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+
+    Session:
+      type: object
+      required: [id, user_id, channel, chat_id, created_at]
+      properties:
+        id: { type: string }
+        user_id: { type: string }
+        session_key:
+          type: string
+          description: Composite key; usually `{channel}:{chat_id}` (ADR-006).
+        channel: { type: string }
+        chat_id: { type: string }
+        last_inbound_at: { type: string, format: date-time }
+        cancel_requested: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    Message:
+      type: object
+      required: [id, session_id, role, content, created_at]
+      properties:
+        id: { type: string }
+        session_id: { type: string }
+        role: { type: string, enum: [user, assistant, tool] }
+        is_compaction_summary:
+          type: boolean
+          description: If true, this assistant row is a compaction summary (ADR-089), not a regular assistant turn.
+        content:
+          type: array
+          items: { $ref: '#/components/schemas/ContentBlock' }
+        created_at: { type: string, format: date-time }
+
+    ContentBlock:
+      description: Anthropic/OpenAI-style content block. See ADR-059.
+      oneOf:
+        - type: object
+          required: [type, text]
+          properties:
+            type: { type: string, enum: [text] }
+            text: { type: string }
+        - type: object
+          required: [type, image_url]
+          properties:
+            type: { type: string, enum: [image_url] }
+            image_url:
+              type: object
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  description: |
+                    Base64 data URL (`data:image/png;base64,...`). See ADR-059.
+                    Images are stored inline in DB; workspace `.attachments/`
+                    copy exists only for the agent's file tools.
+        - type: object
+          required: [type, id, name, input]
+          properties:
+            type: { type: string, enum: [tool_use] }
+            id: { type: string }
+            name: { type: string }
+            input: { type: object, additionalProperties: true }
+        - type: object
+          required: [type, tool_use_id, content]
+          properties:
+            type: { type: string, enum: [tool_result] }
+            tool_use_id: { type: string }
+            content: { type: string }
+            is_error: { type: boolean, default: false }
+
+    Workspace:
+      type: object
+      required: [name, type, quota_bytes, bytes_used]
+      properties:
+        name:
+          type: string
+          description: Personal workspace's name is the user_id; shared workspace's name is globally unique.
+        type: { type: string, enum: [personal, shared] }
+        quota_bytes: { type: integer, format: int64 }
+        bytes_used: { type: integer, format: int64 }
+        locked: { type: boolean, description: bytes_used > quota_bytes. }
+        members:
+          type: array
+          description: Present for shared workspaces.
+          items: { $ref: '#/components/schemas/WorkspaceMember' }
+
+    WorkspaceMember:
+      type: object
+      required: [user_id, email, name]
+      properties:
+        user_id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string }
+
+    Quota:
+      type: object
+      required: [quota_bytes, bytes_used, locked]
+      properties:
+        quota_bytes: { type: integer, format: int64 }
+        bytes_used: { type: integer, format: int64 }
+        locked: { type: boolean }
+
+    Device:
+      type: object
+      required: [name, user_id, fs_policy, workspace_path, created_at]
+      properties:
+        name: { type: string, description: Unique per-user friendly label. }
+        user_id: { type: string }
+        workspace_path: { type: string }
+        fs_policy: { type: string, enum: [sandbox, unrestricted] }
+        shell_timeout_max: { type: integer, description: Seconds. }
+        ssrf_whitelist:
+          type: array
+          items: { type: string }
+        mcp_servers: { type: object, additionalProperties: true }
+        online: { type: boolean }
+        last_seen_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+
+    DiscordConfig:
+      type: object
+      required: [partner_chat_id]
+      properties:
+        partner_chat_id: { type: string }
+        bot_token:
+          type: string
+          description: Write-only. Get responses show a masked form (e.g. `****abc1`); never the full token.
+
+    TelegramConfig:
+      type: object
+      required: [partner_chat_id]
+      properties:
+        partner_chat_id: { type: string }
+        bot_token:
+          type: string
+          description: Write-only. Get responses show a masked form.
+
+    CronJob:
+      type: object
+      required: [id, user_id, schedule, description, channel, chat_id, created_at]
+      properties:
+        id: { type: string }
+        user_id: { type: string }
+        schedule:
+          type: string
+          description: Cron expression after server-side parsing.
+        description: { type: string }
+        channel: { type: string }
+        chat_id: { type: string }
+        one_shot: { type: boolean }
+        last_fired_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    TransferRequest:
+      type: object
+      required: [src_device, src_path, dst_device, dst_path, mode]
+      properties:
+        src_device: { type: string, description: "`server` or a device name." }
+        src_path: { type: string }
+        dst_device: { type: string }
+        dst_path: { type: string }
+        mode: { type: string, enum: [copy, move] }
+
+    ListDirEntry:
+      type: object
+      required: [name, is_dir]
+      properties:
+        name: { type: string, description: Entry name (basename). }
+        is_dir: { type: boolean }
+
+    McpServerConfig:
+      type: object
+      required: [name, command]
+      properties:
+        name:
+          type: string
+          description: Identifier used in wrapped tool names (`mcp_<name>_<tool>`).
+        command:
+          type: array
+          items: { type: string }
+          description: Argv to spawn the MCP subprocess (e.g. `["npx", "@foo/mcp-server"]`).
+        env:
+          type: object
+          additionalProperties: { type: string }
+        description: { type: string }
+
+    #
+    # --- SSE event payloads ---
+    #
+    SseEventHint:
+      description: Emitted once per tool dispatch (ADR-017, ADR-030).
+      type: object
+      required: [kind, text]
+      properties:
+        kind:
+          type: string
+          enum: [tool_dispatch]
+        text:
+          type: string
+          description: E.g., "Executing read_file on server".
+
+    SseEventFinal:
+      description: Emitted when the agent produces a terminal (no-tool_use) assistant response.
+      type: object
+      required: [message_id, content]
+      properties:
+        message_id: { type: string }
+        content:
+          type: array
+          items: { $ref: '#/components/schemas/ContentBlock' }
+
+    SseEventSessionUpdate:
+      description: State transitions (cancellation, etc.).
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [cancel_requested, cancelled, resumed]
+
+    SseEventKick:
+      description: Server-initiated termination of the stream (shutdown, session deleted).
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, enum: [server_shutdown, session_deleted] }
