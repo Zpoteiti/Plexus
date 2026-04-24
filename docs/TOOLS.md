@@ -25,8 +25,9 @@ This is a *design* document. Use it during implementation as the source of truth
 - **Every tool implements the `Tool` trait** (ADR-077): `name`, `schema`, `max_output_chars` (default 16k via the trait), `execute`.
 - **Default result cap is 16,000 characters** (ADR-076). Tools that need more override `max_output_chars`. Truncation is head-only with `\n... (truncated)` marker.
 - **Timeouts are per-tool** (ADR-075). No central dispatcher wrapper. Some tools expose `timeout` in their schema (agent-tunable); others enforce internal-only timeouts.
-- **Paths are absolute** (ADR-043). The first segment of a server-side path identifies the workspace; client-side paths reference the device's local filesystem.
+- **Path policy** (ADR-043): relative paths are accepted and resolve to the **personal workspace on the target device**. On server, that's `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`; on a client, it's the device's `workspace_path`. Absolute paths are also accepted. **Shared workspaces always require absolute paths** (`/production_department/sprint.md`) — they have no implicit relative base.
 - **Workspace writes funnel through `workspace_fs`** server-side (ADR-045). It owns quota check, SKILL.md validation, skills-cache invalidation, and symlink-escape protection.
+- **Every tool result is wrapped** (ADR-095): the content string returned to the LLM is prefixed with `[untrusted tool result]: ` at construction time. Uniform across all tools — web_fetch body, exec stdout, read_file output, MCP response, everything. The wrap is the signal; no system-prompt rule.
 
 ---
 
@@ -34,22 +35,25 @@ This is a *design* document. Use it during implementation as the source of truth
 
 | Name | Type | Source schema in | Implementation in | Purpose |
 |------|------|------------------|-------------------|---------|
-| `read_file` | shared | plexus-common | server + client | Read file content from a device's workspace |
+| `read_file` | shared | plexus-common | server + client | Read file content (text/image/PDF/office doc) |
 | `write_file` | shared | plexus-common | server + client | Write file content; auto-create parent dirs |
 | `edit_file` | shared | plexus-common | server + client | Replace text via 3-level fuzzy match |
-| `delete_file` | shared | plexus-common | server + client | Remove a single file |
-| `delete_folder` | shared | plexus-common | server + client | Recursively remove a folder and contents |
+| `delete_file` | shared | plexus-common | server + client | Remove a single file (Plexus addition) |
+| `delete_folder` | shared | plexus-common | server + client | Recursively remove a folder + contents (Plexus addition) |
 | `list_dir` | shared | plexus-common | server + client | List a directory's entries |
-| `glob` | shared | plexus-common | server + client | Match files by glob pattern |
+| `glob` | shared | plexus-common | server + client | Find files by glob pattern |
 | `grep` | shared | plexus-common | server + client | Search file contents |
-| `message` | server-only | plexus-server | plexus-server | Deliver text/media to a channel chat |
-| `file_transfer` | server-only | plexus-server | plexus-server | Copy or move files within or across devices |
-| `cron` | server-only | plexus-server | plexus-server | Schedule recurring or one-shot agent invocations |
-| `web_fetch` | server-only | plexus-server | plexus-server | HTTP request with RFC-1918 block |
-| `shell` | client-only | plexus-client | plexus-client | Execute a shell command on a device |
-| `mcp_<server>_<tool>` | dynamic | (rmcp) | server or client side that hosts the MCP | Wrapped MCP-provided tool |
+| `notebook_edit` | shared | plexus-common | server + client | Edit Jupyter notebook cells |
+| `message` | server-only | plexus-server | plexus-server | Deliver text/media/buttons to a channel chat |
+| `file_transfer` | server-only | plexus-server | plexus-server | Copy or move files within/across devices (Plexus addition) |
+| `cron` | server-only | plexus-server | plexus-server | Add/list/remove scheduled agent invocations |
+| `web_fetch` | server-only | plexus-server | plexus-server | HTTP fetch with RFC-1918 block |
+| `exec` | client-only | plexus-client | plexus-client | Execute a shell command on a device |
+| `mcp_<server>_<tool>` | dynamic | (rmcp) | wherever the MCP is installed | Wrapped MCP-provided tool |
 
-8 shared + 4 server-only + 1 client-only = 13 first-class tools, plus any number of MCP-wrapped tools.
+9 shared + 4 server-only + 1 client-only = 14 first-class tools, plus any number of MCP-wrapped tools.
+
+Schemas below are the **source** schemas (what gets written in code). The agent sees these plus the merger's additions per ADR-071 (`plexus_device` property on routing-only tools, enum extension on intrinsic-device tools).
 
 ---
 
@@ -67,48 +71,55 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 - Server impl: `plexus-server/src/tools/read_file.rs`
 - Client impl: `plexus-client/src/tools/read_file.rs`
 
-**Purpose:** Read file content. The agent's primary way to inspect any file the user or system has stored.
+**Purpose:** Read a file (text, image, or document). Line-based pagination for large text files; PDF/DOCX/XLSX/PPTX parsing built-in; images returned as `image_url` blocks.
 
-**Source schema:**
+**Source schema (matches nanobot):**
 ```json
 {
   "name": "read_file",
-  "description": "Read the contents of a file. Returns up to ~32k tokens of content; large files may be truncated. Use list_dir / glob / grep for discovery before reading.",
+  "description": "Read a file (text, image, or document). Text output format: LINE_NUM|CONTENT. Images return visual content for analysis. Supports PDF, DOCX, XLSX, PPTX documents. Use offset and limit for large text files. Reads exceeding ~128K chars are truncated.",
   "input_schema": {
     "type": "object",
     "properties": {
       "path": {
         "type": "string",
-        "description": "Absolute path to the file."
+        "description": "The file path to read"
       },
-      "start_line": {
+      "offset": {
         "type": "integer",
-        "description": "Optional 1-indexed line to start from. Default 1.",
+        "description": "Line number to start reading from (1-indexed, default 1)",
         "minimum": 1
       },
-      "end_line": {
+      "limit": {
         "type": "integer",
-        "description": "Optional 1-indexed last line to include (inclusive). Default end of file.",
+        "description": "Maximum number of lines to read (default 2000)",
         "minimum": 1
+      },
+      "pages": {
+        "type": "string",
+        "description": "Page range for PDF files, e.g. '1-5' (default: all, max 20 pages)"
       }
     },
-    "required": ["path"],
-    "additionalProperties": false
+    "required": ["path"]
   }
 }
 ```
 
-**Mechanism:**
-- **Server side:** path resolved against `PLEXUS_WORKSPACE_ROOT`. First path segment names the workspace; user must be authorized for that workspace (their personal workspace, or shared workspace they're a member of). Symlink resolution must remain inside the workspace boundary (ADR-072).
-- **Client side:** path is absolute on the client's filesystem; if `fs_policy="sandbox"`, must resolve inside the device's `workspace_path`.
-- **Blocked device paths** (per nanobot pattern): `/dev/zero`, `/dev/random`, `/dev/urandom`, `/dev/full`, `/dev/stdin/out/err`, `/dev/tty`, `/proc/<pid>/fd/[012]` — refuse read to avoid hangs.
-- **Line slicing** is server-/client-side; `start_line`/`end_line` clamp at the file's actual line count.
-- **Output** is the requested content as UTF-8. Binary content is returned as best-effort UTF-8 with a notice prepended if non-text bytes were present.
+**Mechanism (nanobot-aligned):**
+- Path resolution follows ADR-043: relative paths resolve to the target device's personal workspace root; absolute paths are used as-is. Server-side, absolute is required for shared workspaces.
+- **Default text response:** `limit=2000` lines, output prefixed `LINE_NUM| <line>`. Tail includes `(Showing lines X-Y of Z. Use offset=X+1 to continue.)` — self-documenting pagination.
+- **128k char hard cap** applied on top of line-based limit; safety net for pathological line lengths.
+- **Blocked device paths** (nanobot pattern): `/dev/zero`, `/dev/random`, `/dev/urandom`, `/dev/full`, `/dev/stdin/out/err`, `/dev/tty`, `/proc/<pid>/fd/[012]` — refused to avoid hangs.
+- **PDFs:** text extraction via `pages` arg; max 20 pages per call.
+- **Office docs** (`.docx`/`.xlsx`/`.pptx`): text extraction via built-in parsers.
+- **Images** (detected by mime): returned as `image_url` content blocks, not text.
+- **Dedup:** if the file's `mtime` + `offset` + `limit` are unchanged since the last read, return `[File unchanged since last read: path]` instead of full content — saves tokens on idempotent re-reads.
+- Tool result is wrapped by the shared helper with `[untrusted tool result]: ` per ADR-095 before reaching the LLM.
 
 **Timeout:** 30s internal, no agent override (ADR-075).
-**Result cap:** **128,000 characters** — overrides the global default (ADR-076). Reading a large file is the canonical case where the global 16k is too tight.
+**Result cap:** 128,000 characters (ADR-076 override).
 **Errors:** `WorkspaceError::NotFound`, `WorkspaceError::PermissionDenied`, `WorkspaceError::SymlinkEscape`, `WorkspaceError::BlockedPath`.
-**Related ADRs:** 038 (shared schemas), 041 (device routing), 042 (path policy), 071 (merge), 072 (file ops are byte-level), 076 (result cap override).
+**Related ADRs:** 038, 041, 043, 071, 072, 076, 095.
 
 ---
 
@@ -121,25 +132,24 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 
 **Purpose:** Write or replace a file's full content. Creates the file if it doesn't exist; replaces it entirely if it does.
 
-**Source schema:**
+**Source schema (matches nanobot):**
 ```json
 {
   "name": "write_file",
-  "description": "Write content to a file. Creates the file (and any missing parent directories) if absent; overwrites existing content if present. For partial edits prefer edit_file.",
+  "description": "Write content to a file. Overwrites if the file already exists; creates parent directories as needed. For partial edits, prefer edit_file instead.",
   "input_schema": {
     "type": "object",
     "properties": {
       "path": {
         "type": "string",
-        "description": "Absolute path to the file."
+        "description": "The file path to write to"
       },
       "content": {
         "type": "string",
-        "description": "Full file content as UTF-8."
+        "description": "The content to write"
       }
     },
-    "required": ["path", "content"],
-    "additionalProperties": false
+    "required": ["path", "content"]
   }
 }
 ```
@@ -167,21 +177,20 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 
 **Purpose:** Replace text inside a file using nanobot's 3-level fuzzy matcher. Cheaper than rewriting the whole file with `write_file`. Also serves as a "create new file" shortcut when used with empty `old_text`.
 
-**Source schema:**
+**Source schema (matches nanobot):**
 ```json
 {
   "name": "edit_file",
-  "description": "Replace old_text with new_text in the file. Uses fuzzy matching: exact substring, then line-trimmed match (handles indentation drift), then smart-quote normalization. Set replace_all=true if multiple matches are intentional. Special case: empty old_text on a non-existent file creates the file with new_text.",
+  "description": "Edit a file by replacing old_text with new_text. Tolerates minor whitespace/indentation differences and curly/straight quote mismatches. If old_text matches multiple times, you must provide more context or set replace_all=true. Shows a diff of the closest match on failure.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "path": { "type": "string", "description": "Absolute path to the file." },
-      "old_text": { "type": "string", "description": "Text to find. Empty string + non-existent path = create file." },
-      "new_text": { "type": "string", "description": "Replacement text." },
-      "replace_all": { "type": "boolean", "default": false, "description": "Replace every match instead of erroring on multiple matches." }
+      "path": { "type": "string", "description": "The file path to edit" },
+      "old_text": { "type": "string", "description": "The text to find and replace" },
+      "new_text": { "type": "string", "description": "The text to replace with" },
+      "replace_all": { "type": "boolean", "description": "Replace all occurrences (default false)" }
     },
-    "required": ["path", "old_text", "new_text"],
-    "additionalProperties": false
+    "required": ["path", "old_text", "new_text"]
   }
 }
 ```
@@ -289,27 +298,27 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 - Server impl: `plexus-server/src/tools/list_dir.rs`
 - Client impl: `plexus-client/src/tools/list_dir.rs`
 
-**Purpose:** Enumerate a directory's contents. The agent's primary discovery tool; absolute paths require knowing what's there before reading or writing.
+**Purpose:** Enumerate a directory's contents. The agent's primary discovery tool before reading or writing files.
 
-**Source schema:**
+**Source schema (matches nanobot):**
 ```json
 {
   "name": "list_dir",
-  "description": "List the contents of a directory. Set recursive=true to walk nested structure. Common noise directories (.git, node_modules, __pycache__, etc.) are auto-ignored.",
+  "description": "List the contents of a directory. Set recursive=true to explore nested structure. Common noise directories (.git, node_modules, __pycache__, etc.) are auto-ignored.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "path": { "type": "string", "description": "Absolute path to the directory." },
-      "recursive": { "type": "boolean", "default": false, "description": "Recursively walk nested folders." },
-      "max_entries": { "type": "integer", "default": 200, "minimum": 1, "description": "Maximum entries returned. Output is truncated with a note if exceeded." }
+      "path": { "type": "string", "description": "The directory path to list" },
+      "recursive": { "type": "boolean", "description": "Recursively list all files (default false)" },
+      "max_entries": { "type": "integer", "description": "Maximum entries to return (default 200)", "minimum": 1 }
     },
-    "required": ["path"],
-    "additionalProperties": false
+    "required": ["path"]
   }
 }
 ```
 
 **Mechanism:**
+- Path resolution per ADR-043.
 - **Auto-ignored noise dirs** (mirror of nanobot's list): `.git`, `node_modules`, `__pycache__`, `.venv`, `venv`, `dist`, `build`, `.tox`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.coverage`, `htmlcov`.
 - **Non-recursive output:** entries with a `📁 ` / `📄 ` prefix per entry (visual, LLM-friendly).
 - **Recursive output:** flat list of relative paths, with trailing `/` for directories.
@@ -319,7 +328,7 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 **Timeout:** 10s internal.
 **Result cap:** 16,000 characters.
 **Errors:** `WorkspaceError::NotFound`, `ToolError::NotADirectory`.
-**Related ADRs:** 042 (path policy).
+**Related ADRs:** 043 (path policy), 095 (result wrap).
 
 ---
 
@@ -330,34 +339,66 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 - Server impl: `plexus-server/src/tools/glob.rs`
 - Client impl: `plexus-client/src/tools/glob.rs`
 
-**Purpose:** Find files by name pattern. Faster than recursive `list_dir` when looking for known shapes.
+**Purpose:** Find files by name pattern. Faster than recursive `list_dir` when looking for known shapes. Sorted by modification time (newest first).
 
-**Source schema:**
+**Source schema (matches nanobot, full arg set):**
 ```json
 {
   "name": "glob",
-  "description": "Find files matching a glob pattern (e.g. **/*.rs, src/**/*.{ts,tsx}). Returns paths sorted by modification time, newest first.",
+  "description": "Find files matching a glob pattern (e.g. '*.py', 'tests/**/test_*.py'). Results are sorted by modification time (newest first). Skips .git, node_modules, __pycache__, and other noise directories.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "pattern": { "type": "string", "description": "Glob pattern, can use ** for recursive directory match." },
-      "path": { "type": "string", "description": "Absolute base directory to search under. Required." }
+      "pattern": {
+        "type": "string",
+        "description": "Glob pattern to match, e.g. '*.py' or 'tests/**/test_*.py'",
+        "minLength": 1
+      },
+      "path": {
+        "type": "string",
+        "description": "Directory to search from (default '.')"
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "Legacy alias for head_limit",
+        "minimum": 1,
+        "maximum": 1000
+      },
+      "head_limit": {
+        "type": "integer",
+        "description": "Maximum number of matches to return (default 250)",
+        "minimum": 0,
+        "maximum": 1000
+      },
+      "offset": {
+        "type": "integer",
+        "description": "Skip the first N matching entries before returning results",
+        "minimum": 0,
+        "maximum": 100000
+      },
+      "entry_type": {
+        "type": "string",
+        "enum": ["files", "dirs", "both"],
+        "description": "Whether to match files, directories, or both (default files)"
+      }
     },
-    "required": ["pattern", "path"],
-    "additionalProperties": false
+    "required": ["pattern"]
   }
 }
 ```
 
 **Mechanism:**
-- Implementation uses `glob` crate or similar for pattern matching.
+- `path` defaults to `.` (which per ADR-043 means the target's personal workspace root).
 - Auto-ignores the same noise dirs as `list_dir`.
-- Sorted by modification time, most recent first (helps the agent surface freshly-changed files).
-- Cap at 200 results by default; if exceeded, truncate with note.
+- Results sorted by mtime, newest first.
+- `head_limit` (default 250) caps total results; `offset` skips the first N for paginated scroll-through.
+- `max_results` is a legacy alias for `head_limit`.
+- `entry_type` controls whether the match returns files, directories, or both.
 
 **Timeout:** 30s internal.
 **Result cap:** 16,000 characters.
 **Errors:** `WorkspaceError::NotFound`, `ToolError::InvalidGlob`.
+**Related ADRs:** 043, 095.
 
 ---
 
@@ -368,43 +409,141 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 - Server impl: `plexus-server/src/tools/grep.rs`
 - Client impl: `plexus-client/src/tools/grep.rs`
 
-**Purpose:** Search file contents by regex. Built on ripgrep semantics for speed and respect of ignore files.
+**Purpose:** Regex content search across files. Built on ripgrep semantics for speed and respect of ignore files.
 
-**Source schema:**
+**Source schema (matches nanobot, full arg set):**
 ```json
 {
   "name": "grep",
-  "description": "Search file contents by regex pattern. Powered by ripgrep — supports standard regex, file-type filtering, and ignore-file rules.",
+  "description": "Search file contents with a regex pattern. Default output_mode is files_with_matches (file paths only); use content mode for matching lines with context. Skips binary and files >2 MB. Supports glob/type filtering.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "pattern": { "type": "string", "description": "Regular expression to search for." },
-      "path": { "type": "string", "description": "Absolute path to a file or directory to search in." },
+      "pattern": {
+        "type": "string",
+        "description": "Regex or plain text pattern to search for",
+        "minLength": 1
+      },
+      "path": {
+        "type": "string",
+        "description": "File or directory to search in (default '.')"
+      },
+      "glob": {
+        "type": "string",
+        "description": "Optional file filter, e.g. '*.py' or 'tests/**/test_*.py'"
+      },
+      "type": {
+        "type": "string",
+        "description": "Optional file type shorthand, e.g. 'py', 'ts', 'md', 'json'"
+      },
+      "case_insensitive": {
+        "type": "boolean",
+        "description": "Case-insensitive search (default false)"
+      },
+      "fixed_strings": {
+        "type": "boolean",
+        "description": "Treat pattern as plain text instead of regex (default false)"
+      },
       "output_mode": {
         "type": "string",
         "enum": ["content", "files_with_matches", "count"],
-        "default": "files_with_matches",
-        "description": "content: matching lines with context. files_with_matches: just file paths. count: per-file match counts."
+        "description": "content: matching lines with optional context; files_with_matches: only matching file paths; count: matching line counts per file. Default: files_with_matches"
       },
-      "case_insensitive": { "type": "boolean", "default": false },
-      "context": { "type": "integer", "default": 0, "description": "Lines of context around each match (only used in content mode)." },
-      "glob": { "type": "string", "description": "Optional glob to restrict which files are searched (e.g. *.rs)." }
+      "context_before": {
+        "type": "integer",
+        "description": "Number of lines of context before each match",
+        "minimum": 0,
+        "maximum": 20
+      },
+      "context_after": {
+        "type": "integer",
+        "description": "Number of lines of context after each match",
+        "minimum": 0,
+        "maximum": 20
+      },
+      "max_matches": {
+        "type": "integer",
+        "description": "Legacy alias for head_limit in content mode",
+        "minimum": 1,
+        "maximum": 1000
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "Legacy alias for head_limit in files_with_matches or count mode",
+        "minimum": 1,
+        "maximum": 1000
+      },
+      "head_limit": {
+        "type": "integer",
+        "description": "Maximum number of results to return. In content mode this limits matching line blocks; in other modes it limits file entries. Default 250",
+        "minimum": 0,
+        "maximum": 1000
+      },
+      "offset": {
+        "type": "integer",
+        "description": "Skip the first N results before applying head_limit",
+        "minimum": 0,
+        "maximum": 100000
+      }
     },
-    "required": ["pattern", "path"],
-    "additionalProperties": false
+    "required": ["pattern"]
   }
 }
 ```
 
 **Mechanism:**
-- Implementation wraps `ripgrep` via the `grep`/`grep-regex`/`grep-searcher` crates, OR shells out to `rg` if installed (decide at impl time).
+- Wraps ripgrep (via `grep`/`grep-regex`/`grep-searcher` crates, or shells out to `rg` if installed).
+- Skips binary files and files >2 MB automatically.
 - Respects `.gitignore` and the noise-dir ignore list.
-- `content` mode is the verbose default; nudge the agent toward `files_with_matches` or `count` for broad searches.
-- Cap at 200 results by default.
+- `output_mode=files_with_matches` is the default — favor it for broad searches to stay scoped.
+- `fixed_strings=true` escapes regex metacharacters (treat pattern as literal text).
+- `type` accepts ripgrep's shorthands (e.g. `py`, `ts`, `md`, `json`).
 
 **Timeout:** 60s internal — full-tree regex on large workspaces can take time.
 **Result cap:** 16,000 characters.
 **Errors:** `ToolError::InvalidRegex`, `WorkspaceError::NotFound`.
+**Related ADRs:** 043, 095.
+
+---
+
+### `notebook_edit`
+
+**Lives in:**
+- Schema: `plexus-common/src/tools/notebook_edit.rs`
+- Server impl: `plexus-server/src/tools/notebook_edit.rs`
+- Client impl: `plexus-client/src/tools/notebook_edit.rs`
+
+**Purpose:** Edit a Jupyter notebook (`.ipynb`) cell — replace source, insert a new cell after an index, or delete an existing cell.
+
+**Source schema (matches nanobot):**
+```json
+{
+  "name": "notebook_edit",
+  "description": "Edit a Jupyter notebook (.ipynb) cell. Modes: replace (default) replaces cell content, insert adds a new cell after the target index, delete removes the cell at the index. cell_index is 0-based.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": { "type": "string", "description": "Path to the .ipynb notebook file" },
+      "cell_index": { "type": "integer", "description": "0-based index of the cell to edit", "minimum": 0 },
+      "new_source": { "type": "string", "description": "New source content for the cell" },
+      "cell_type": { "type": "string", "description": "Cell type: 'code' or 'markdown' (default: code)", "enum": ["code", "markdown"] },
+      "edit_mode": { "type": "string", "description": "Mode: 'replace' (default), 'insert' (after target), or 'delete'", "enum": ["replace", "insert", "delete"] }
+    },
+    "required": ["path", "cell_index"]
+  }
+}
+```
+
+**Mechanism:**
+- Parses the notebook JSON, operates on the specified cell, writes the modified notebook back through `workspace_fs` on server (so quota + SKILL.md validation edge cases still apply if someone puts a SKILL.md-shaped file inside a .ipynb, though that's an odd case).
+- `edit_mode=replace` (default): replaces `source` of cell at `cell_index`. `new_source` required in this mode.
+- `edit_mode=insert`: inserts a new cell AFTER `cell_index`. `cell_type` optional (default `code`). `new_source` required.
+- `edit_mode=delete`: removes cell at `cell_index`. `new_source` / `cell_type` ignored.
+
+**Timeout:** 30s internal.
+**Result cap:** 16,000 characters.
+**Errors:** `WorkspaceError::NotFound`, `ToolError::InvalidNotebook`, `ToolError::CellIndexOutOfRange`.
+**Related ADRs:** 043, 095.
 
 ---
 
@@ -416,19 +555,28 @@ These four tools have no client-side counterpart. Their implementations live ent
 
 **Lives in:** `plexus-server/src/tools/message.rs`
 
-**Purpose:** Deliver a text + media payload to a channel chat. The cross-channel reach mechanism (the within-session reply path uses the session's own `channel`/`chat_id` automatically per ADR-020).
+**Purpose:** Send a message to the user, optionally with file attachments or inline keyboard buttons. `content` is required; `channel` and `chat_id` default to the current session's values. Specify them explicitly for cross-channel reach.
 
-**Source schema:**
+**Source schema (matches nanobot, with `plexus_device` added for multi-device media sources):**
 ```json
 {
   "name": "message",
-  "description": "Deliver a message to a specific channel + chat_id. Used for cross-channel reach (e.g., agent on Discord wants to also notify Telegram). For replying within the current conversation, just emit text — routing is automatic. This is the ONLY way to deliver files (images, documents, audio, video) to the user; do NOT use read_file to send files.",
+  "description": "Send a message to the user, optionally with file attachments. This is the ONLY way to deliver files (images, documents, audio, video) to the user. Use the 'media' parameter with file paths to attach files. Do NOT use read_file to send files — that only reads content for your own analysis.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "channel": { "type": "string", "enum": ["discord", "telegram"], "description": "Channel to deliver to." },
-      "chat_id": { "type": "string", "description": "Target chat identifier in the channel's namespace." },
-      "content": { "type": "string", "description": "Message text." },
+      "content": {
+        "type": "string",
+        "description": "The message content to send"
+      },
+      "channel": {
+        "type": "string",
+        "description": "Optional: target channel (telegram, discord, etc.). Defaults to current session's channel."
+      },
+      "chat_id": {
+        "type": "string",
+        "description": "Optional: target chat/user ID. Defaults to current session's chat_id."
+      },
       "plexus_device": {
         "type": "string",
         "enum": ["server"],
@@ -438,30 +586,42 @@ These four tools have no client-side counterpart. Their implementations live ent
       "media": {
         "type": "array",
         "items": { "type": "string" },
-        "default": [],
-        "description": "Optional list of absolute paths on `plexus_device` to attach as media."
+        "description": "Optional: list of file paths to attach (images, audio, documents)"
+      },
+      "buttons": {
+        "type": "array",
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Button label"
+          }
+        },
+        "description": "Optional: inline keyboard buttons as list of rows, each row is list of button labels."
       }
     },
-    "required": ["channel", "chat_id", "content"],
-    "additionalProperties": false
+    "required": ["content"]
   }
 }
 ```
 
-**Merge-time injection:** `plexus_device.enum` is **extended** with currently-connected device names — e.g., post-merge it becomes `["server", "alice-laptop", "alice-phone"]`. Source schema stays as `["server"]` only. Detection is via the `x-plexus-device: true` marker, not enum shape (ADR-071).
+**Merge-time injection:** `plexus_device.enum` is extended with currently-connected device names. Source stays as `["server"]`. Detection via `x-plexus-device: true` marker (ADR-071).
 
 **Mechanism:**
-- Looks up the user's config for the target channel (`discord_configs` / `telegram_configs`); if none, return `ToolError::ChannelNotConfigured`.
+- **Routing (ADR-020):**
+  - If `channel` + `chat_id` omitted → delivers to the current session's channel + chat_id. Equivalent target as a direct text reply, but with access to `media` / `buttons`.
+  - If `channel` + `chat_id` specified → delivers to that target. Cross-channel reach.
+- Looks up the user's config for the target channel (`discord_configs` / `telegram_configs`); if none, returns `ToolError::ChannelNotConfigured`.
 - For each media path:
   - If `plexus_device="server"`: opens via `workspace_fs::read` (validates user authorization, symlink boundary). Handles base64-in-DB images per ADR-059 / ADR-044.
   - If `plexus_device="<client_name>"`: server fetches the file from the named client over the device WebSocket and forwards into the channel adapter. The file is not staged into the workspace (this is direct delivery; use `file_transfer` first if persistence is wanted).
-- Emits as `Outbound::Final` with `channel`/`chat_id` set to the target. The corresponding channel adapter does the actual delivery.
-- Returns delivery status per channel.
+- `buttons` renders as inline keyboard rows on channels that support it (Telegram, Discord's button components); plain text channels ignore the param with no error.
+- Emits as `Outbound::Final` with `channel`/`chat_id` set to the resolved target.
 
 **Timeout:** 30s internal.
 **Result cap:** 16,000 characters.
 **Errors:** `ToolError::ChannelNotConfigured`, `WorkspaceError::NotFound`, `ToolError::DeliveryFailed`.
-**Related ADRs:** 015 (Outbound shape), 020 (routing), 044 (workspace as media source), 090 (channel configs).
+**Related ADRs:** 015 (Outbound shape), 020 (routing + defaults), 044 (workspace as media source), 090 (channel configs), 095 (result wrap).
 
 ---
 
@@ -535,46 +695,72 @@ These four tools have no client-side counterpart. Their implementations live ent
 
 **Lives in:** `plexus-server/src/tools/cron.rs`
 
-**Purpose:** Schedule a recurring or one-shot agent invocation. The job fires by injecting a synthesized user message into a dedicated session per ADR-053.
+**Purpose:** Schedule reminders and recurring tasks. A single tool with an `action` enum — add, list, or remove jobs. Each firing injects a synthesized user message into a dedicated cron session per ADR-053.
 
-**Source schema:**
+**Source schema (matches nanobot):**
 ```json
 {
   "name": "cron",
-  "description": "Schedule an agent invocation. Inserts a cron job that fires on the given schedule and creates a dedicated session for each firing. The reply lands on the channel + chat_id of the conversation where the cron was created (per ADR-053).",
+  "description": "Schedule reminders and recurring tasks. Actions: add, list, remove. If tz is omitted, cron expressions and naive ISO times default to UTC.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "schedule": {
+      "action": {
         "type": "string",
-        "description": "Cron expression (e.g. '0 9 * * *' for daily 9am) or natural-language ('every Monday at 10am'). Server parses both; rejects invalid input."
+        "description": "Action to perform",
+        "enum": ["add", "list", "remove"]
       },
-      "description": {
+      "name": {
         "type": "string",
-        "description": "What the agent should do when the job fires. Becomes the synthesized user message at firing time."
+        "description": "Optional short human-readable label for the job (e.g., 'weather-monitor', 'daily-standup'). Defaults to first 30 chars of message."
       },
-      "one_shot": {
+      "message": {
+        "type": "string",
+        "description": "REQUIRED when action='add'. Instruction for the agent to execute when the job triggers (e.g., 'Send a reminder to WeChat: xxx' or 'Check system status and report'). Not used for action='list' or action='remove'."
+      },
+      "every_seconds": {
+        "type": "integer",
+        "description": "Interval in seconds (for recurring tasks)"
+      },
+      "cron_expr": {
+        "type": "string",
+        "description": "Cron expression like '0 9 * * *' (for scheduled tasks)"
+      },
+      "tz": {
+        "type": "string",
+        "description": "Optional IANA timezone for cron expressions (e.g. 'America/Vancouver'). When omitted with cron_expr, the tool's default timezone applies."
+      },
+      "at": {
+        "type": "string",
+        "description": "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00'). Naive values use the tool's default timezone."
+      },
+      "deliver": {
         "type": "boolean",
-        "default": false,
-        "description": "If true, deletes itself after firing once."
+        "description": "Whether to deliver the execution result to the user channel (default true)",
+        "default": true
+      },
+      "job_id": {
+        "type": "string",
+        "description": "REQUIRED when action='remove'. Job ID to remove (obtain via action='list')."
       }
     },
-    "required": ["schedule", "description"],
-    "additionalProperties": false
+    "required": ["action"],
+    "description": "Action-specific parameters: add requires a non-empty message plus one schedule (every_seconds, cron_expr, or at); remove requires job_id; list only needs action. Per-action requirements are enforced at runtime (see field descriptions) so the top-level schema stays compatible with providers (e.g. OpenAI Codex/Responses) that reject oneOf/anyOf/allOf/enum/not at the root of function parameters."
   }
 }
 ```
 
 **Mechanism:**
-- Inserts a row in `cron_jobs` with `user_id`, `channel`, `chat_id` (both from the calling session per ADR-053), `schedule` (parsed and stored as cron expression), `description`, `one_shot`, `last_fired_at` (NULL initially).
-- A server-side ticker scans `cron_jobs` periodically, fires due jobs by synthesizing an `InboundMessage` with `session_key_override = "cron:<job_id>"` (ADR-010, ADR-012). The synthesized message's content is the `description` field.
-- Each firing creates / continues a dedicated cron session; the reply routes to the channel + chat_id stored on the row.
-- One-shot jobs delete their row after the firing inserts the synthesized message. Recurring jobs update `last_fired_at`.
+- **`action="add"`** — requires `message` plus exactly one of `every_seconds`, `cron_expr`, or `at`. Inserts a row in `cron_jobs` with `user_id`, `channel`, `chat_id` (from the calling session per ADR-053), the schedule parameters, `message`, `name`, `deliver`, `tz`. Returns the created row's `job_id` and a human-readable confirmation.
+- **`action="list"`** — returns a summary of the user's cron jobs: `job_id`, `name`, schedule (as stored), next-fire estimate, `last_fired_at`.
+- **`action="remove"`** — requires `job_id`. Deletes the row (and cancels pending fires).
+- A server-side ticker scans `cron_jobs` periodically, fires due jobs by synthesizing an `InboundMessage` with `session_key_override = "cron:<job_id>"` (ADR-010, ADR-012). The synthesized message's `content` is the job's `message` field. If the job has `at` (one-shot), the row is deleted after firing; otherwise `last_fired_at` updates.
+- Each firing creates / continues a dedicated cron session; the reply routes to the channel + chat_id stored on the row. If `deliver=false`, the result is logged to the cron session but not delivered to the user-facing channel.
 
-**Timeout:** 10s — this is a DB write op, fast.
-**Result cap:** 16,000 characters (typically a short success + the parsed schedule for confirmation).
-**Errors:** `ToolError::InvalidSchedule`, `ToolError::DBError`.
-**Related ADRs:** 010 (autonomous flows), 012 (synthesizers), 053 (cron channel/chat inheritance).
+**Timeout:** 10s — DB write ops, fast.
+**Result cap:** 16,000 characters.
+**Errors:** `ToolError::InvalidSchedule`, `ToolError::MissingRequiredField`, `ToolError::DBError`, `ToolError::CronJobNotFound`.
+**Related ADRs:** 010 (autonomous flows), 012 (synthesizers), 053 (cron channel/chat inheritance), 095 (result wrap).
 
 ---
 
@@ -582,31 +768,31 @@ These four tools have no client-side counterpart. Their implementations live ent
 
 **Lives in:** `plexus-server/src/tools/web_fetch.rs`
 
-**Purpose:** Make an HTTP request from the server. Hardcoded SSRF protection blocks RFC-1918 / link-local / loopback / CGNAT.
+**Purpose:** Fetch a URL and extract readable content (HTML → markdown/text). Hardcoded SSRF protection blocks RFC-1918 / link-local / loopback / CGNAT (ADR-052).
 
-**Source schema:**
+**Source schema (matches nanobot):**
 ```json
 {
   "name": "web_fetch",
-  "description": "Make an HTTP request and return the response. Server-side only; private network IPs are blocked. For network calls inside a private network, run shell on a client device with appropriate ssrf_whitelist instead.",
+  "description": "Fetch a URL and extract readable content (HTML → markdown/text). Output is capped at maxChars (default 50 000). Works for most web pages and docs; may fail on login-walled or JS-heavy sites.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "url": { "type": "string", "description": "Full URL including scheme. Only http:// and https:// allowed." },
-      "method": {
+      "url": {
         "type": "string",
-        "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
-        "default": "GET"
+        "description": "URL to fetch"
       },
-      "headers": {
-        "type": "object",
-        "additionalProperties": { "type": "string" },
-        "description": "Optional request headers."
+      "extractMode": {
+        "type": "string",
+        "enum": ["markdown", "text"],
+        "default": "markdown"
       },
-      "body": { "type": "string", "description": "Optional request body for POST/PUT/PATCH." }
+      "maxChars": {
+        "type": "integer",
+        "minimum": 100
+      }
     },
-    "required": ["url"],
-    "additionalProperties": false
+    "required": ["url"]
   }
 }
 ```
@@ -618,48 +804,47 @@ These four tools have no client-side counterpart. Their implementations live ent
   - Loopback (127.0.0.0/8, ::1)
   - Carrier-grade NAT (100.64.0.0/10)
 - Re-resolves before connecting (mitigates DNS rebinding) and verifies the actual connect-target IP against the blocklist.
-- Uses `reqwest` with explicit timeouts (10s connect, 30s total).
-- Returns `{status, headers, body}`. Body returned as text if Content-Type indicates text/JSON, else as base64 with a notice.
-- Marks the response body as untrusted — the system prompt teaches the agent to treat fetched content as data, not instructions.
+- Fetches via `reqwest`, 10s connect + 30s total timeout. Uses a readability extractor (jina/readability-style) to convert HTML → `extractMode` output. Output capped at `maxChars` (default 50,000, agent-overridable).
+- Tool result content is wrapped per ADR-095 with `[untrusted tool result]: ` before the LLM sees it — uniform with all other tool results.
 
 **Timeout:** 30s total, 10s connect.
-**Result cap:** 16,000 characters.
+**Result cap:** 50,000 characters (tool's own cap via `maxChars`). Shared 16k global cap (ADR-076) doesn't apply — web_fetch's cap is explicit in schema.
 **Errors:** `NetworkError::PrivateAddressBlocked`, `NetworkError::DNSFailed`, `NetworkError::Timeout`, `NetworkError::HttpError`.
-**Related ADRs:** 052 (RFC-1918 block), 074 (untrusted content treatment).
+**Related ADRs:** 052 (RFC-1918 block), 074 (untrusted content treatment), 095 (result wrap).
 
 ---
 
 ## Client-only tools
 
-### `shell`
+### `exec`
 
-**Lives in:** `plexus-client/src/tools/shell.rs`
+**Lives in:** `plexus-client/src/tools/exec.rs`
 
-**Purpose:** Execute a shell command on the device. The agent's escape hatch for everything not covered by file ops (git, build commands, system queries, network from inside a private network, etc.).
+**Purpose:** Execute a shell command on the device. The agent's escape hatch for everything not covered by file ops (git, build commands, system queries, network from inside a private network, etc.). Renamed from `shell` for nanobot alignment.
 
-**Source schema:**
+**Source schema (matches nanobot):**
 ```json
 {
-  "name": "shell",
-  "description": "Execute a shell command on the device. Subject to fs_policy: in sandbox mode, runs inside bwrap with workspace_path as the root. Environment is stripped to a minimal whitelist (PATH, HOME, LANG, TERM).",
+  "name": "exec",
+  "description": "Execute a shell command and return its output. Prefer read_file/write_file/edit_file over cat/echo/sed, and grep/glob over shell find/grep. Use -y or --yes flags to avoid interactive prompts. Output is truncated at 10 000 chars; timeout defaults to 60s.",
   "input_schema": {
     "type": "object",
     "properties": {
-      "cmd": { "type": "string", "description": "Shell command to run. Executed via /bin/sh -c." },
-      "cwd": { "type": "string", "description": "Working directory. Defaults to the device's workspace_path. Must be inside workspace_path in sandbox mode." },
+      "command": { "type": "string", "description": "The shell command to execute" },
+      "working_dir": { "type": "string", "description": "Optional working directory for the command" },
       "timeout": {
         "type": "integer",
-        "description": "Timeout in seconds. Default 60. Max bounded by device.shell_timeout_max (admin-set per device).",
-        "minimum": 1
+        "description": "Timeout in seconds. Increase for long-running commands like compilation or installation (default 60, max 600).",
+        "minimum": 1,
+        "maximum": 600
       }
     },
-    "required": ["cmd"],
-    "additionalProperties": false
+    "required": ["command"]
   }
 }
 ```
 
-**Merge-time injection:** `plexus_device` is added as a brand-new top-level property (carrying `x-plexus-device: true`) with an enum listing **only connected client devices** (no `"server"` — the server is not a code execution environment per ADR-072), and is appended to `required`. If no clients are connected, `shell` is omitted from the merged tool list entirely.
+**Merge-time injection:** `plexus_device` is added as a brand-new top-level property (carrying `x-plexus-device: true`) with an enum listing **only connected client devices** (no `"server"` — the server is not a code execution environment per ADR-072), and is appended to `required`. If no clients are connected, `exec` is omitted from the merged tool list entirely.
 
 **Mechanism:**
 - **fs_policy=sandbox (default, Linux):** wraps the command in `bwrap` per ADR-073:
@@ -670,12 +855,13 @@ These four tools have no client-side counterpart. Their implementations live ent
 - **fs_policy=unrestricted:** runs the command directly with the client process's full privileges. Only set after the user types the device name to confirm (ADR-051).
 - **Environment stripping** applies even in unrestricted mode: only `PATH`, `HOME`, `LANG`, `TERM` pass through. Secrets in `$GITHUB_TOKEN` etc. don't leak into agent-run subprocesses.
 - **Output capture:** combined stdout + stderr. Both streamed; on timeout, process is killed (SIGTERM, then SIGKILL after 1s grace).
-- **Result shape:** `{exit_code, stdout, stderr}` where stdout/stderr are truncated head-only to fit the result cap.
+- **Result shape:** `{exit_code, stdout, stderr}` where stdout/stderr are truncated head-only per the cap.
+- Tool result content is wrapped per ADR-095.
 
-**Timeout:** agent-tunable. Default 60s. Max bounded by `device.shell_timeout_max` (admin-set per device, ADR-050). Schema's `timeout` field is the only agent-overridable timeout in Plexus.
-**Result cap:** 16,000 characters (combined; head-only truncation per ADR-076).
-**Errors:** `ToolError::ShellTimeout`, `ToolError::SandboxFailure`, `ToolError::CwdOutsideWorkspace`.
-**Related ADRs:** 039 (client-only schema), 050 (per-device config), 051 (unrestricted confirmation), 073 (sandbox).
+**Timeout:** agent-tunable via `timeout` field. Default 60s. Max 600s (nanobot-aligned) AND bounded further by `device.shell_timeout_max` (admin-set per device, ADR-050) when that's smaller. This is the only agent-overridable timeout in Plexus.
+**Result cap:** 10,000 characters (nanobot's cap for exec; combined stdout+stderr, head-only truncation).
+**Errors:** `ToolError::ExecTimeout`, `ToolError::SandboxFailure`, `ToolError::CwdOutsideWorkspace`.
+**Related ADRs:** 039 (client-only schema), 050 (per-device config), 051 (unrestricted confirmation), 073 (sandbox), 095 (result wrap).
 
 ---
 
@@ -808,7 +994,7 @@ def build_tool_schemas(user_id):
         inject_device_routing(s, sites=["server"] + connected)
         merged.append(s)
 
-    # 2. Client-only tools (shell) — inject plexus_device, clients only (no "server")
+    # 2. Client-only tools (exec) — inject plexus_device, clients only (no "server")
     if connected:
         for tool in CLIENT_ONLY_TOOLS:
             s = deep_copy(tool.schema)
@@ -865,8 +1051,23 @@ Cache is per-user `DashMap<user_id, Vec<MergedSchema>>`. Invalidates on device c
 
 - Decentralized per-tool (ADR-075). Each tool's `execute()` owns its own `tokio::time::timeout` wrapping.
 - The dispatch layer does not impose a default timeout.
-- Only `shell` (and some MCP tools) expose `timeout` in the schema for agent override; everything else has fixed internal timeouts as listed above.
+- Only `exec` (and some MCP tools) expose `timeout` in the schema for agent override; everything else has fixed internal timeouts as listed above.
 - Runaway protection comes from the iteration hard cap (200, ADR-036) + trap-in-loop detection, NOT per-tool timeouts.
+
+### Untrusted tool result wrap
+
+Every tool result's `content` string is prefixed with `[untrusted tool result]: ` at construction time, before the `tool_result` block reaches the LLM. Uniform across shared tools, server-only tools, client-only tools, and MCP-wrapped tools. Shared helper in `plexus-common/src/tools/result.rs`.
+
+```rust
+// plexus-common/src/tools/result.rs
+pub const UNTRUSTED_TOOL_RESULT_PREFIX: &str = "[untrusted tool result]: ";
+
+pub fn wrap_result(raw: &str) -> String {
+    format!("{UNTRUSTED_TOOL_RESULT_PREFIX}{raw}")
+}
+```
+
+The wrap is the signal. No system-prompt rule needed — the agent learns structurally from seeing the prefix, the same way it learned the channel-inbound wrap `[untrusted message from X]:` (ADR-007). See ADR-095 for the decision rationale.
 
 ### Error model
 
@@ -886,7 +1087,7 @@ The agent sees errors as normal tool results and adapts on the next iteration (A
 
 ## What is explicitly NOT in the tool surface
 
-- **Server-side `shell` / `exec` / `python` / `eval`** — by design, the server is not a code execution environment for the agent (ADR-072). Anything that needs to run is run on a client device.
+- **Server-side `exec` / `python` / `eval`** — by design, the server is not a code execution environment for the agent (ADR-072). Anything that needs to run is run on a client device.
 - **`save_memory` / `edit_memory` / `update_soul`** — specialty tools dropped per Appendix A principle 1 ("generic over specialty"). MEMORY.md and SOUL.md are files, edited via `edit_file` / `write_file`.
 - **`install_skill`** — dropped per ADR-084. Skills are installed via `file_transfer` from a client (where the user runs the installer) or via the web UI.
 - **`read_skill`** — same. Skills are read via `read_file`.

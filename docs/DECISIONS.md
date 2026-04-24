@@ -185,11 +185,18 @@ enum Outbound {
 - **Future channels (SMS, email, etc.):** drop entirely
 **Consequences:** Hints add no clutter to persistent channel histories. Only SSE surfaces them as events because the browser chat UI can benefit.
 
-### ADR-020 · Direct replies route by session's channel+chat_id; `message` tool is for cross-channel
+### ADR-020 · Direct replies route to current session; `message` tool defaults to current session and allows explicit cross-channel override
 
 **Status:** accepted
-**Decision:** When the agent produces a text-only final response, `publish_final` uses the session's own `channel` and `chat_id` (carried from the InboundMessage that created/continued the session). When the agent wants to reach a different channel, it explicitly invokes the `message` tool with target `channel` + `chat_id` read from the Channels section of the system prompt.
-**Consequences:** Agent doesn't need to specify routing for the common case. Cross-channel is explicit, not implicit.
+**Decision:**
+- **Text-only direct reply** (no tool call): `publish_final` uses the session's own `channel` and `chat_id` (carried from the InboundMessage). Most common path.
+- **`message` tool** (nanobot-aligned): `channel` and `chat_id` are OPTIONAL. If omitted, the tool delivers to the current session's channel + chat_id — same target as a direct reply, but gives the agent access to `media` (attachments) and `buttons` (inline keyboards). If specified, the tool delivers to the named channel + chat_id — cross-channel reach.
+
+**Guidance surfaced to the agent** (via system prompt Operating Notes, nanobot-style):
+- Prefer plain text reply for normal conversation turns.
+- Use `message` tool when you need to attach files/media (required — `read_file` doesn't deliver files), send inline buttons, or reach a different channel.
+
+**Consequences:** Agent has one clear "emit text" path (direct reply), one clear "emit rich / cross-channel content" path (`message` tool). Cross-channel stays explicit via params. Attachments always flow through the `message` tool. Aligned with nanobot's message-tool contract.
 
 ---
 
@@ -346,12 +353,12 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 ### ADR-038 · Shared tool schemas live in `plexus-common`
 
 **Status:** accepted
-**Decision:** File tools used by BOTH server and client executors (`read_file`, `write_file`, `edit_file`, `delete_file`, `delete_folder`, `list_dir`, `glob`, `grep`) have their canonical JSON schemas in `plexus-common/src/tool_schemas/`. Both server and client crates import these.
+**Decision:** File tools used by BOTH server and client executors (`read_file`, `write_file`, `edit_file`, `delete_file`, `delete_folder`, `list_dir`, `glob`, `grep`, `notebook_edit`) have their canonical JSON schemas in `plexus-common/src/tool_schemas/`. Both server and client crates import these.
 
 ### ADR-039 · Client-only tools live in `plexus-client`
 
 **Status:** accepted
-**Decision:** `shell` (and any future client-only tools) have their schemas in `plexus-client/src/tool_schemas.rs`. Clients report their tool schemas to the server at handshake time via `ClientToServer::RegisterTools.tool_schemas`.
+**Decision:** `exec` (and any future client-only tools) have their schemas in `plexus-client/src/tool_schemas.rs`. Clients report their tool schemas to the server at handshake time via `ClientToServer::RegisterTools.tool_schemas`.
 **Consequences:** Server doesn't statically depend on plexus-client. Tool schemas cross the crate boundary via protocol (runtime), not imports (compile).
 
 ### ADR-040 · Server-only tools live in `plexus-server`
@@ -362,7 +369,7 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 ### ADR-041 · `plexus_device` routes file tool calls (injected at merge)
 
 **Status:** accepted
-**Decision:** Source tool schemas (in `plexus-common/src/tools/`, `plexus-client/src/tools/`, or MCP wraps) are nanobot-shape. Routing-only tools (shared file tools, shell, MCP) **do not include a `plexus_device` field** in their source schema. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects `plexus_device` (per ADR-071) into the agent-visible schema. Intrinsic-device tools (`file_transfer`, `message`) keep their device fields (`plexus_device` / `plexus_src_device` / `plexus_dst_device`) in source with `enum: ["server"]`; merge extends the enum.
+**Decision:** Source tool schemas (in `plexus-common/src/tools/`, `plexus-client/src/tools/`, or MCP wraps) are nanobot-shape. Routing-only tools (shared file tools, `exec`, MCP) **do not include a `plexus_device` field** in their source schema. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects `plexus_device` (per ADR-071) into the agent-visible schema. Intrinsic-device tools (`file_transfer`, `message`) keep their device fields (`plexus_device` / `plexus_src_device` / `plexus_dst_device`) in source with `enum: ["server"]`; merge extends the enum.
 
 **Why the `plexus_` prefix?** The routing field name must not collide with any tool author's native arg. An MCP tool might legitimately have a `device` argument (e.g., selecting a GPU, audio device, or display). The reserved `plexus_` prefix guarantees the merger's injected property never clobbers a tool's own args.
 
@@ -384,7 +391,7 @@ Dispatch:
 
 **Applies to:**
 - **Shared file tools** (`read_file`, `write_file`, etc.): server schema is canonical (ADR-038). Every connected device reports the same schema. Merge injects `plexus_device` as a new property; enum = `["server", <device_1>, <device_2>, ...]`, appended to `required`.
-- **Client-only tools** (`shell`): schema owned by client (ADR-039), advertised at handshake. Merge injects `plexus_device`; enum = `[<device_1>, <device_2>, ...]` (no "server", per ADR-072).
+- **Client-only tools** (`exec`): schema owned by client (ADR-039), advertised at handshake. Merge injects `plexus_device`; enum = `[<device_1>, <device_2>, ...]` (no "server", per ADR-072).
 - **Server-only tools** (`cron`, `web_fetch`): single install site, no device-routing field.
 - **Intrinsic-device server tools** (`file_transfer`, `message`): source schema already has its device field(s) — `plexus_src_device`/`plexus_dst_device` for `file_transfer`, `plexus_device` for `message` — with `enum: ["server"]` as a stub. Merge **extends** each such enum with connected device names — no new property injected.
 
@@ -403,11 +410,19 @@ Dispatch:
 **Decision:** Matcher levels: (1) exact substring, (2) line-trimmed sliding window (handles indentation drift), (3) smart-quote normalization. Multi-match requires `replace_all=true`. Create-file shortcut: `old_text=""` + file doesn't exist → create with `new_text`.
 **Consequences:** Same matcher on server and client (lives in `plexus-common`). Tool args: `path`, `old_text`, `new_text`, `replace_all`.
 
-### ADR-043 · Agent tool calls use absolute paths; frontend REST uses relative
+### ADR-043 · Tool path policy — relative paths resolve to the target's personal workspace; absolute required for shared workspaces
 
-**Status:** accepted
-**Decision:** Tool arguments carrying file paths MUST be absolute. The system prompt's "Your targets" section lists each target's `workspace_root`. Frontend REST endpoints (e.g., `GET /api/workspace/files/{path:.*}`) accept relative paths since user_id auth supplies the root scope.
-**Consequences:** Agent log traces are unambiguous. No "relative to what?" confusion.
+**Status:** accepted (revised — nanobot alignment pass)
+**Context:** Original decision required absolute paths in all tool args for unambiguity. Matching nanobot's tool surface (its schemas don't distinguish relative/absolute at the schema level) and removing friction for the common case (reading `MEMORY.md`) motivated relaxing this.
+**Decision:**
+
+- **`plexus_device="server"` + relative path** → resolved against the caller's personal workspace root, i.e. `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`. Example: `read_file(plexus_device="server", path="MEMORY.md")` reads `/{user_id}/MEMORY.md`.
+- **`plexus_device="server"` + absolute path** (leading `/`) → used as given. Required for accessing shared workspaces, because shared workspaces have no implicit relative base from the user's point of view. Example: `read_file(plexus_device="server", path="/production_department/sprint.md")`.
+- **`plexus_device="<client>"` + any path** → resolved against the device's `workspace_path` when relative; absolute paths are accepted and, under `fs_policy=sandbox`, must still resolve inside `workspace_path`. Clients are single-workspace, so the distinction is cosmetic.
+
+**Frontend REST endpoints** continue to accept workspace-rooted paths (first segment names the workspace); JWT supplies the user_id scope. No ambiguity because the leading segment is always explicit at the REST surface.
+
+**Consequences:** Agent can reach for `MEMORY.md`, `SOUL.md`, `skills/...` without knowing its own user_id. Shared-workspace access is a minor ceremony (one leading slash + workspace name) that makes cross-workspace calls visually distinct. No "which workspace did they mean?" ambiguity — relative always means personal.
 
 ### ADR-044 · Workspace is the canonical file store; no parallel file cache
 
@@ -445,7 +460,7 @@ If the user or agent later deletes a workspace attachment (to reclaim quota), co
 
 | Tool | Agent can override | Default | Max |
 |---|---|---|---|
-| shell | yes | 60s | `device.shell_timeout_max` |
+| exec | yes | 60s | min(600s, `device.shell_timeout_max`) |
 | read_file | no | 30s internal | — |
 | write_file | no | 30s internal | — |
 | edit_file | no | 30s internal | — |
@@ -462,7 +477,7 @@ If the user or agent later deletes a workspace attachment (to reclaim quota), co
 
 - **Runaway guardrail** is the iteration hard cap (ADR-036, 200) + trap detection. Not per-call timeouts.
 
-**Consequences:** Simpler dispatch layer. Each tool's timeout is self-documenting in its own code + schema. shell is the primary agent-tunable case; other file-ops and server-only tools pick sensible internal limits. file_transfer's stall-detection covers the unbounded-legitimate-case (10 GB over slow link).
+**Consequences:** Simpler dispatch layer. Each tool's timeout is self-documenting in its own code + schema. `exec` is the primary agent-tunable case; other file-ops and server-only tools pick sensible internal limits. file_transfer's stall-detection covers the unbounded-legitimate-case (10 GB over slow link).
 
 ### ADR-076 · Tool result cap: 16k chars global default + per-tool override; head-only truncation
 
@@ -489,7 +504,7 @@ pub const DEFAULT_MAX_TOOL_RESULT_CHARS: usize = 16_000;
 
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
-    /// Tool name as it appears in the schema (e.g., "read_file", "shell").
+    /// Tool name as it appears in the schema (e.g., "read_file", "exec").
     fn name(&self) -> &str;
 
     /// JSON Schema for the tool parameters. Nanobot-shape; `plexus_device`
@@ -823,6 +838,46 @@ The `GET /api/sessions/{id}/messages` endpoint stays but narrows in purpose: it 
 - The original `final` event type dissolves: a terminal assistant message is just a persisted `message` event in the unified model. Transient events (`hint`) remain distinct because they're not persisted.
 - Multi-tab: opening a second tab replays the same history to that subscriber, live events broadcast to all SSE subscribers for the session. No extra coordination needed.
 
+### ADR-094 · Runtime block is persisted per user message as historical metadata
+
+**Status:** accepted
+**Context:** Each inbound user message carries a small `<runtime>` block with time, channel, and chat_id (per SYSTEM_PROMPT.md). Earlier wording left it ambiguous whether this block is part of the persisted message or injected fresh per LLM call. Codex flagged the risk of stale timestamps leaking from old history. The concern dissolves if we treat runtime blocks as timestamped historical metadata — each old runtime block correctly records *when that message arrived*, not "current state."
+**Decision:**
+- The `<runtime>` block is constructed **once**, at user-message ingress time (in the channel adapter or `publish_inbound` path), with then-current time + channel + chat_id.
+- It is prepended to the user's content blocks inside the same `messages.content` JSONB row (per ADR-059), as a text block.
+- It is **immutable** after insert. No later regeneration, no stripping on replay.
+- On history read, the agent sees a chronologically ordered sequence of user messages, each with its own runtime block labeling when it arrived. The most-recent one describes "now"; older ones describe the past.
+
+**Consequences:**
+- Agent naturally understands temporal flow: *"user asked at 10:00, now it's 17:00, they're asking a follow-up"*. Old blocks aren't confusion — they're context.
+- No fresh-injection step per LLM call. Persisted state is the LLM's state.
+- Cache-friendly: a session's history grows by append only; the system prompt + prior history are stable for prompt caching, only the new user message (including its freshly-constructed runtime block) is novel per turn.
+- Multi-iteration turns (tool use loops): the runtime block was set at message arrival; across iterations inside one turn, it stays the same. "Now" only advances when a new user message arrives.
+
+### ADR-095 · All tool results are prefixed with `[untrusted tool result]: ` at construction time
+
+**Status:** accepted
+**Context:** Tool-returned content (web_fetch bodies, shell stdout, MCP responses, even `read_file` output from files of unknown provenance) can carry instructions crafted to hijack the agent. Channel inbound content is already marked untrusted via the `[untrusted message from <name>]:` wrap (ADR-007). Tool output had no analogous structural marker. Codex flagged this as a prompt-injection vector.
+**Decision:** Every `tool_result` content is prefixed with the literal string `[untrusted tool result]: ` at construction time, uniformly across all tools (shared, server-only, client-only, MCP). A shared helper in `plexus-common/src/tools/result.rs` wraps the content before the dispatcher emits the `tool_result` block.
+
+The wrapped shape the LLM sees:
+
+```
+{
+  "type": "tool_result",
+  "tool_use_id": "toolu_xyz",
+  "content": "[untrusted tool result]: <raw bytes the tool returned>"
+}
+```
+
+No system-prompt rule is added. The wrap itself is the signal — the agent learns the convention structurally, the same way it learned the `[untrusted message from X]:` channel wrap (ADR-007). No teaching, no exception rules, no provenance arguments.
+
+**Consequences:**
+- Prompt-injection defense becomes uniform across all untrusted content: channel messages AND tool outputs both arrive structurally wrapped.
+- One codepath wraps everything — no per-tool opt-in, no forgotten tool with raw content.
+- The agent can still *use* information inside tool results; it just doesn't follow instructions embedded there. Same distinction as for channel messages.
+- Compaction, persistence, and LLM-call pass-through all work unchanged — the wrap is just part of the content string.
+
 ---
 
 ## 10. Safety
@@ -839,7 +894,7 @@ The `GET /api/sessions/{id}/messages` endpoint stays but narrows in purpose: it 
 - **`cron`** — schedules future agent invocations. Does not itself execute anything.
 - **`file_transfer`** — moves bytes between server and a device. No execution.
 
-Absent, deliberately: `shell`, `exec`, `python`, `eval`, any code-execution tool.
+Absent, deliberately: `exec`, `python`, `eval`, any code-execution tool (on the SERVER — `exec` is a CLIENT-only tool).
 
 **Consequence:** An agent that writes `rm -rf /` into `~/workspace/evil.sh` cannot trigger its execution on the server. Same for anything in MEMORY.md, SOUL.md, `skills/*/SKILL.md`, `.attachments/`. The server treats all user/agent-provided files as inert data.
 
@@ -856,8 +911,8 @@ Admin is trusted. Agent is not. The shape of "admin explicitly installs; agent c
 **Context:** The client's purpose is precisely the opposite of the server's — it exists to give the agent code-execution capability on the user's device (shell commands, MCP subprocesses, file writes that users will then run themselves). That necessarily creates a risk surface.
 **Decision:** Defense-in-depth with two explicit tiers, user-selected per device:
 
-1. **`fs_policy = "sandbox"` (default).** On Linux, `shell` and client-side MCP subprocesses run inside a `bwrap` jail rooted at the device's `workspace_path`. The jail read-binds `/usr`, `/bin`, `/lib`, `/etc/ssl/certs`, etc. (minimum to make a subprocess function), binds `workspace_path` read-write, tmpfs-mounts everything else. No access to `$HOME`, no access to files outside the workspace, no access to host env beyond a minimal whitelist (`PATH`, `HOME`, `LANG`, `TERM`).
-2. **`fs_policy = "unrestricted"`.** Sandbox disabled. Agent runs shell + subprocesses with the client process's full privileges. **Toggle requires typed-device-name confirmation** (ADR-051).
+1. **`fs_policy = "sandbox"` (default).** On Linux, `exec` and client-side MCP subprocesses run inside a `bwrap` jail rooted at the device's `workspace_path`. The jail read-binds `/usr`, `/bin`, `/lib`, `/etc/ssl/certs`, etc. (minimum to make a subprocess function), binds `workspace_path` read-write, tmpfs-mounts everything else. No access to `$HOME`, no access to files outside the workspace, no access to host env beyond a minimal whitelist (`PATH`, `HOME`, `LANG`, `TERM`).
+2. **`fs_policy = "unrestricted"`.** Sandbox disabled. Agent runs `exec` + subprocesses with the client process's full privileges. **Toggle requires typed-device-name confirmation** (ADR-051).
 
 **Platform coverage in v1:** Linux (bwrap) only. Non-Linux clients effectively run unrestricted even if `fs_policy="sandbox"` is set, because the sandbox primitive isn't available. Future: macOS `sandbox-exec`, Windows Job Objects / AppContainer. Not blockers for v1.
 

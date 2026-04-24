@@ -16,19 +16,20 @@ info:
 
     | Agent tool | REST equivalent | Notes |
     |---|---|---|
-    | `read_file` | `GET /api/workspace/files/{path}` | Absolute workspace path |
+    | `read_file` | `GET /api/workspace/files/{path}` | Workspace path (relative = personal; absolute = any) |
     | `write_file` | `PUT /api/workspace/files/{path}` | Implicit mkdir -p |
     | `edit_file` | `PATCH /api/workspace/files/{path}` | Body: old_text/new_text/replace_all |
     | `delete_file` | `DELETE /api/workspace/files/{path}` | Always allowed (quota release) |
     | `delete_folder` | `DELETE /api/workspace/folders/{path}` | Recursive, no flag |
     | `list_dir` | `GET /api/workspace/list/{path}` | Query: recursive, max_entries |
-    | `glob` | `GET /api/workspace/glob` | Query: pattern, path |
-    | `grep` | `GET /api/workspace/grep` | Query: pattern, path, mode |
+    | `glob` | `GET /api/workspace/glob` | Query: pattern, path, head_limit, offset, entry_type |
+    | `grep` | `GET /api/workspace/grep` | Query: pattern, path, mode, context_before/after, etc. |
+    | `notebook_edit` | `PATCH /api/workspace/notebook/{path}` | Body: cell_index, new_source, cell_type, edit_mode |
     | `file_transfer` | `POST /api/workspace/transfer` | Body matches tool args |
-    | `cron` | `POST /api/cron` + CRUD | Full schedule management |
+    | `cron` | `POST /api/cron` + CRUD | REST uses verbs (POST/GET/DELETE); tool uses single action-enum (nanobot-aligned) |
     | `web_fetch` | — | No REST parallel (browser fetches directly) |
     | `message` | — | No REST parallel (browser composes via chat) |
-    | `shell` | — | No REST parallel (rare UI need in v1) |
+    | `exec` | — | No REST parallel (rare UI need in v1) |
 
     **Auth model:**
 

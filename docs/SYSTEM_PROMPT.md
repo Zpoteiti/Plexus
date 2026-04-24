@@ -95,12 +95,13 @@ To install a new skill into your personal workspace:
    `name`, `description`, optional `always_on: false`) plus
    any supporting files. The folder name and the `name` field
    in frontmatter must match exactly.
-2. Copy with file_transfer:
+2. Copy with file_transfer (relative dst_path → your personal
+   workspace):
    file_transfer(
      plexus_src_device="<where source lives>",
      src_path="<source folder path>",
      plexus_dst_device="server",
-     dst_path="/a4f7e2d1-e29b-41d4-a716-446655440000/skills/<skill-name>/",
+     dst_path="skills/<skill-name>/",
      mode="copy"
    )
 3. Validation runs at write time. If SKILL.md is malformed,
@@ -111,15 +112,14 @@ To install a new skill into your personal workspace:
 4. The new skill appears in next turn's Skills section.
 
 To install from a shared workspace, use that workspace's
-path as src_path — e.g.,
+absolute path as src_path — e.g.,
 src_path="/production_department/skills-source/codestyle-guide/".
 
 ### Conditional skills
 
 - **morning-standup** — Generate a morning standup summary
   from team sprint state and post to Discord. Load full body:
-  read_file(plexus_device="server",
-  path="/a4f7e2d1-e29b-41d4-a716-446655440000/skills/morning-standup/SKILL.md")
+  read_file(plexus_device="server", path="skills/morning-standup/SKILL.md")
 
 ---
 
@@ -156,7 +156,7 @@ plexus_device="server" target a workspace by path prefix.
 
 ### laptop (online)
 fs_policy: sandbox (Linux bwrap, rooted at /home/alice/.plexus/).
-Shell available. Default timeout 60s, max 300s.
+exec available. Default timeout 60s, max 600s.
 No server-side quota — Alice manages her own disk.
 
 ### phone (offline since 2026-04-23 18:42 UTC)
@@ -168,12 +168,26 @@ Tools will fail until phone reconnects.
 
 ## Operating Notes
 
-- Absolute paths only. Leading segment names the workspace.
-- Personal workspace is private — do not relay its contents
-  through channels without explicit confirmation from Alice.
-- Shared workspace writes are immediate broadcasts to the
-  allow-list.
-- Prefer `cron` over keeping a turn alive for long work.
+- **Paths.** Relative paths resolve to your personal workspace on
+  the target device. Absolute paths are also accepted. Shared
+  workspaces require absolute paths (e.g.
+  `/production_department/sprint.md`).
+- **Privacy.** Personal workspace is private — do not relay its
+  contents through channels without explicit confirmation.
+- **Shared workspaces.** Any write is an immediate broadcast to
+  every member of that workspace's allow-list.
+- **Search & Discovery.**
+  - Prefer list_dir / glob / grep over exec for workspace search.
+  - For broad searches, use grep with output_mode="count" or
+    "files_with_matches" to scope before requesting full content.
+  - Use offset/limit on read_file to page through large files
+    instead of pulling all at once.
+- **Replying.** Plain text output delivers to the current session
+  channel automatically. Use the `message` tool when you need to
+  send files (media), inline buttons, or reach a different
+  channel. Do NOT use read_file to "send" files — it only lets
+  YOU see the content.
+- **Long work.** Prefer `cron` over keeping a turn alive.
 ```
 
 ### Runtime context block — lives on the USER message, NOT in the system prompt
