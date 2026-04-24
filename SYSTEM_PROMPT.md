@@ -173,9 +173,11 @@ Tools will fail until phone reconnects.
 - Prefer `cron` over keeping a turn alive for long work.
 ```
 
-### Runtime context block (injected per turn)
+### Runtime context block — lives on the USER message, NOT in the system prompt
 
-Immediately before the user's message content, as an additional text block on the same user-role message:
+The static system prompt above stops at Operating Notes. Everything that changes per turn (current time, channel, chat_id) is prepended as a text block on the user-role message — **not** appended to the system prompt. That's what keeps the system prompt cacheable byte-for-byte across the session.
+
+The runtime block on the user message looks like:
 
 ```
 <runtime>
@@ -185,7 +187,7 @@ chat_id: 184729384
 </runtime>
 ```
 
-The wire shape of a turn:
+The wire shape of a turn makes the separation explicit:
 
 ```
 messages: [
