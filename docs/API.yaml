@@ -48,6 +48,13 @@ info:
     - Timestamps are ISO 8601 with timezone offset.
     - UUIDs unless noted.
 
+    **Chat consumption pattern (ADR-093):** the SSE stream at
+    `GET /api/sessions/{id}/stream` is the single entry point for
+    "show me the chat" — it replays recent history on connect, then
+    delivers live events. `GET /api/sessions/{id}/messages` is a
+    separate cursor-paginated endpoint used only for scroll-up beyond
+    the replay window.
+
     **Not in this spec:**
 
     - Discord and Telegram ingress. Those are internal adapter modules inside
@@ -267,13 +274,26 @@ paths:
         schema: { type: string }
     get:
       tags: [Sessions]
-      summary: List messages in a session
+      summary: Paginated scroll-up of older message history (ADR-093)
+      description: |
+        Returns messages strictly older than the `before` cursor, in
+        reverse chronological order. Used when the user scrolls past
+        the window that was replayed by `GET /api/sessions/{id}/stream`
+        on open. The stream is the canonical "show me the chat"
+        entry point; this endpoint exists only for loading older
+        batches beyond the replay window.
       parameters:
+        - name: before
+          in: query
+          schema: { type: string }
+          description: |
+            Return messages created strictly before this `message_id`.
+            Omit to start from the very latest message (uncommon — the
+            stream's replay normally covers the recent window).
         - $ref: '#/components/parameters/Limit'
-        - $ref: '#/components/parameters/Offset'
       responses:
         '200':
-          description: OK
+          description: OK — messages in reverse chronological order.
           content:
             application/json:
               schema:
@@ -319,22 +339,57 @@ paths:
         schema: { type: string }
     get:
       tags: [Sessions]
-      summary: SSE stream of agent events for this session (ADR-003)
+      summary: SSE stream — replay recent history, then live events (ADR-003, ADR-093)
       description: |
         Opens a Server-Sent Events stream. The server holds the
         connection open and writes `event: <name>\ndata: <json>\n\n`
-        chunks as the agent produces them. Cookie auth works because
+        chunks as things happen. Cookie auth works because
         EventSource includes credentials with `withCredentials: true`.
 
-        Event names (see `SseEvent*` schemas):
+        **Replay + live in one stream.** On connect:
 
-        - `hint` — mechanical tool-dispatch hint (ADR-017).
-        - `final` — completed assistant message (ADR-015).
-        - `session_update` — session state transitions (cancel, etc.).
+        1. **Historical replay.** Server emits up to `replay_limit`
+           most-recent persisted messages as `event: message`
+           chunks in chronological order. If the request includes
+           a `Last-Event-ID` header, replay is "everything after
+           that message_id" — EventSource's native reconnect fills
+           missed events seamlessly. If the client already has
+           history and wants to skip replay entirely, pass
+           `replay_limit=0`.
+        2. **Cut-over marker.** One-off `event: history_end` with
+           empty payload — tells the client "you're live now."
+        3. **Live phase.** `event: hint`, `event: message`,
+           `event: session_update`, `event: kick` as things occur.
+
+        Every `event: message` carries an `id:` SSE header with
+        the DB `message_id`; EventSource uses it for
+        `Last-Event-ID` on automatic reconnect.
+
+        **Event names (see `SseEvent*` schemas):**
+
+        - `message` — a persisted user / assistant / tool message
+          (both replay and live). Assistant messages here are the
+          terminal responses (no more tool_use); user messages
+          include inbound turns from the current channel AND any
+          synthesized markers like `[User pressed stop]` (ADR-035).
+        - `hint` — transient tool-dispatch notification (ADR-017);
+          not persisted, not replayed on reconnect.
+        - `history_end` — one-off marker between replay and live.
+        - `session_update` — state transitions (cancel_requested,
+          cancelled, resumed).
         - `kick` — server-initiated termination.
 
-        OpenAPI does not model SSE first-class; event payloads are
-        described under `components.schemas`.
+        OpenAPI does not model SSE first-class; event payloads
+        are described under `components.schemas`.
+      parameters:
+        - name: replay_limit
+          in: query
+          schema: { type: integer, default: 50, minimum: 0, maximum: 200 }
+          description: |
+            Maximum messages to replay before entering live mode.
+            Ignored when `Last-Event-ID` header is present (server
+            replays everything after that ID instead). Pass 0 to
+            skip replay entirely.
       responses:
         '200':
           description: SSE stream opened.
@@ -1364,8 +1419,18 @@ components:
     #
     # --- SSE event payloads ---
     #
+    SseEventMessage:
+      description: |
+        A persisted user/assistant/tool message. Same shape as a
+        row from `GET /api/sessions/{id}/messages`. Emitted during
+        both historical replay (on stream connect) and live mode
+        (as new messages arrive). Each carries an `id:` SSE header
+        with the DB `message_id` for EventSource's reconnect.
+      allOf:
+        - $ref: '#/components/schemas/Message'
+
     SseEventHint:
-      description: Emitted once per tool dispatch (ADR-017, ADR-030).
+      description: Transient tool-dispatch notification (ADR-017, ADR-030). Not persisted, not replayed.
       type: object
       required: [kind, text]
       properties:
@@ -1376,15 +1441,10 @@ components:
           type: string
           description: E.g., "Executing read_file on server".
 
-    SseEventFinal:
-      description: Emitted when the agent produces a terminal (no-tool_use) assistant response.
+    SseEventHistoryEnd:
+      description: One-off marker emitted between the replay phase and the live phase. Empty payload.
       type: object
-      required: [message_id, content]
-      properties:
-        message_id: { type: string }
-        content:
-          type: array
-          items: { $ref: '#/components/schemas/ContentBlock' }
+      additionalProperties: false
 
     SseEventSessionUpdate:
       description: State transitions (cancellation, etc.).

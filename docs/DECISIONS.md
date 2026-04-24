@@ -38,7 +38,7 @@ These supersede the historical ADR set in the previous Plexus codebase — most 
 **Decision:**
 - **Browser ↔ server:** two endpoints, one per direction.
   - **Inbound** (user → server): `POST /api/sessions/{id}/messages` — fire-and-forget per ADR-013, returns 202 immediately.
-  - **Outbound** (server → user): `GET /api/sessions/{id}/stream` — Server-Sent Events. Pushes the agent's replies, tool hints (ADR-017), session_update notifications, and kick events as they happen. `EventSource` in the browser auto-reconnects on drop.
+  - **Outbound** (server → user): `GET /api/sessions/{id}/stream` — Server-Sent Events. On connect, replays recent persisted messages, then switches to live events — see ADR-093 for the replay-then-live pattern. `EventSource` in the browser auto-reconnects on drop, replaying missed events via `Last-Event-ID`.
 - **Device ↔ server:** WebSocket (unchanged) — devices need bidirectional real-time for tool dispatch; live behind NAT; HTTP is wrong primitive.
 - **Discord/Telegram:** via their SDKs (serenity/teloxide).
 
@@ -790,6 +790,27 @@ User, assistant, and tool messages all use the same block schema.
 **Context:** Heartbeat Phase 1 (ADR-054) runs each tick and decides skip-or-run based on current time and `HEARTBEAT.md`. A "last Phase 1 decision" column or table was considered to let admins audit tick behavior.
 **Decision:** No persisted heartbeat state. No `users.last_heartbeat_phase1_at`, no `heartbeat_state` table. Phase 1 is stateless — each tick reads current context and decides fresh.
 **Consequences:** Restart doesn't carry heartbeat baggage. If Phase 1 fires Phase 2, the only persistence is the resulting heartbeat-session message history (via the normal message-bus path, ADR-010). Admin audit of Phase 1 behavior must come from logs, not DB queries. Acceptable: heartbeats are infrequent and user-scoped, not a compliance surface.
+
+### ADR-093 · Chat SSE stream unifies history replay + live events
+
+**Status:** accepted
+**Context:** Original shape (ADR-003) used two endpoints for browser chat: `GET /api/sessions/{id}/messages` for paginated history and `GET /api/sessions/{id}/stream` for live SSE. On chat open the frontend had to call both — a GET for history, then open the stream for live — and handle the race where a message could arrive between the two requests. Client-side deduplication by `message_id` papers over it but is extra complexity for every chat consumer.
+**Decision:** The SSE stream at `GET /api/sessions/{id}/stream` is the canonical "show me the chat" endpoint. On connect:
+
+1. **Replay phase.** Server emits the most-recent persisted messages as `event: message` chunks, chronologically ordered, capped by the `replay_limit` query param (default 50, max 200). If the request carries `Last-Event-ID`, replay is "everything after that message_id" — EventSource's native reconnect seamlessly fills missed events.
+2. **Cut-over.** Server emits one `event: history_end` marker.
+3. **Live phase.** Server emits `event: hint`, `event: message`, `event: session_update`, `event: kick` as they occur.
+
+Each `event: message` carries an `id:` SSE header with the DB `message_id`, so the browser's EventSource can reconnect with `Last-Event-ID` and the server replays exactly what was missed.
+
+The `GET /api/sessions/{id}/messages` endpoint stays but narrows in purpose: it is now the **cursor-paginated scroll-up** entry point (`?before=<msg_id>&limit=50`), used only when the user scrolls past the window the stream replayed.
+
+**Consequences:**
+- One API call on chat open instead of two. Frontend code drops a race condition and a deduplication pass.
+- Native reconnect via `Last-Event-ID` means dropped connections replay exactly the missed events — no per-message dedup on the client.
+- Replay payload at 50 messages is bounded (base64 images included — still a few hundred KB typical). Older batches come through the messages endpoint.
+- The original `final` event type dissolves: a terminal assistant message is just a persisted `message` event in the unified model. Transient events (`hint`) remain distinct because they're not persisted.
+- Multi-tab: opening a second tab replays the same history to that subscriber, live events broadcast to all SSE subscribers for the session. No extra coordination needed.
 
 ---
 
