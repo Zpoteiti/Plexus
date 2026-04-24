@@ -9,9 +9,14 @@ This is a *design* document. Use it during implementation as the source of truth
 ## Conventions
 
 - **Source schemas are nanobot-shape.** Two patterns for how device-awareness shows up in source:
-  - **Routing-only device** — for shared tools (`read_file`, `write_file`, etc.), `shell`, and MCP-wrapped tools, the source schema has **no `device` field at all**. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects `device` as a brand-new property (ADR-071) with an enum populated from connected install sites, and adds it to the `required` list.
-  - **Intrinsic device** — for tools that natively operate across devices (`file_transfer`, `message`), the device field IS part of the source schema with `enum: ["server"]` as the starting point. At merge time, the enum is **extended** with connected device names. Example: `file_transfer.src_device` source has `enum: ["server"]`; post-merge it becomes `enum: ["server", "alice-laptop", "alice-phone"]`.
-- **Tools_registry merge invariants:** for routing-only tools the merge MAY inject a `device` property and append `device` to `required`; for intrinsic-device tools the merge MAY extend device-field enums. Property names, types, descriptions, and all non-device fields are pass-through. See pseudocode in the Cross-cutting concerns section below.
+  - **Routing-only device** — for shared tools (`read_file`, `write_file`, etc.), `shell`, and MCP-wrapped tools, the source schema has **no device field at all**. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects a `plexus_device` property (ADR-071) with an enum populated from connected install sites, and appends `plexus_device` to `required`.
+  - **Intrinsic device** — for tools that natively operate across devices (`file_transfer`, `message`), the device field IS part of the source schema. `file_transfer` uses `plexus_src_device` + `plexus_dst_device`; `message` uses `plexus_device`. Each source stub has `enum: ["server"]`. At merge time, each such enum is **extended** with connected device names.
+- **Reserved `plexus_` prefix.** The routing field name MUST use the `plexus_` prefix and MUST NOT be just `device` / `src_device` / `dst_device`. Why: the merger would otherwise clobber an MCP tool's native `device` arg (e.g., a tool selecting a GPU). The reserved prefix makes collision impossible.
+- **Marker, not heuristic.** Every intrinsic-device field in a source schema carries `"x-plexus-device": true` (a JSON Schema extension). The merger detects device-routing fields by this marker, never by enum-shape guessing. The typed helper `plexus_device_field()` in `plexus-common/src/tools/device_field.rs` produces the canonical fragment — source-schema authors use it instead of hand-writing.
+- **Tools_registry merge invariants:** the merge performs exactly one of two mutations per source schema:
+  - **Inject:** add a brand-new `plexus_device` property (string, `enum` of install sites, marker `x-plexus-device: true`) and append `plexus_device` to `required`. Applies to routing-only tools.
+  - **Extend:** for every property carrying `x-plexus-device: true`, replace its enum with the extended list of install sites. Applies to intrinsic-device tools.
+  - Nothing else mutates. All other property names, types, descriptions, non-device enums, and the rest of `required` are strictly pass-through. See pseudocode in the Cross-cutting concerns section below.
 - **Three crate locations for tool code:**
   - **Shared schemas** → `plexus-common/src/tools/<tool>.rs`
   - **Shared tool implementations** → both `plexus-server/src/tools/<tool>.rs` and `plexus-client/src/tools/<tool>.rs` (each side runs natively when the agent dispatches with the matching `device`).
@@ -50,10 +55,10 @@ This is a *design* document. Use it during implementation as the source of truth
 
 ## Shared tools
 
-All shared tools accept a `device` argument (injected at merge time per ADR-071) selecting which workspace tree the operation targets:
+All shared tools accept a `plexus_device` argument (injected at merge time per ADR-071) selecting which workspace tree the operation targets:
 
-- `device="server"` → routes to `workspace_fs` on the server. Path's first segment names the workspace (personal or shared).
-- `device="<client_name>"` → dispatched over WebSocket to the named device, where the client-side implementation runs against the local filesystem inside `fs_policy` bounds.
+- `plexus_device="server"` → routes to `workspace_fs` on the server. Path's first segment names the workspace (personal or shared).
+- `plexus_device="<client_name>"` → dispatched over WebSocket to the named device, where the client-side implementation runs against the local filesystem inside `fs_policy` bounds.
 
 ### `read_file`
 
@@ -424,16 +429,17 @@ These four tools have no client-side counterpart. Their implementations live ent
       "channel": { "type": "string", "enum": ["discord", "telegram"], "description": "Channel to deliver to." },
       "chat_id": { "type": "string", "description": "Target chat identifier in the channel's namespace." },
       "content": { "type": "string", "description": "Message text." },
-      "device": {
+      "plexus_device": {
         "type": "string",
         "enum": ["server"],
-        "description": "Device where the media files live. Defaults to server. All media paths in one call must come from this device."
+        "description": "Device where the media files live. Defaults to server. All media paths in one call must come from this device.",
+        "x-plexus-device": true
       },
       "media": {
         "type": "array",
         "items": { "type": "string" },
         "default": [],
-        "description": "Optional list of absolute paths on `device` to attach as media."
+        "description": "Optional list of absolute paths on `plexus_device` to attach as media."
       }
     },
     "required": ["channel", "chat_id", "content"],
@@ -442,13 +448,13 @@ These four tools have no client-side counterpart. Their implementations live ent
 }
 ```
 
-**Merge-time injection:** `device.enum` is **extended** with currently-connected device names — e.g., post-merge it becomes `["server", "alice-laptop", "alice-phone"]`. Source schema stays as `["server"]` only.
+**Merge-time injection:** `plexus_device.enum` is **extended** with currently-connected device names — e.g., post-merge it becomes `["server", "alice-laptop", "alice-phone"]`. Source schema stays as `["server"]` only. Detection is via the `x-plexus-device: true` marker, not enum shape (ADR-071).
 
 **Mechanism:**
 - Looks up the user's config for the target channel (`discord_configs` / `telegram_configs`); if none, return `ToolError::ChannelNotConfigured`.
 - For each media path:
-  - If `device="server"`: opens via `workspace_fs::read` (validates user authorization, symlink boundary). Handles base64-in-DB images per ADR-059 / ADR-044.
-  - If `device="<client_name>"`: server fetches the file from the named client over the device WebSocket and forwards into the channel adapter. The file is not staged into the workspace (this is direct delivery; use `file_transfer` first if persistence is wanted).
+  - If `plexus_device="server"`: opens via `workspace_fs::read` (validates user authorization, symlink boundary). Handles base64-in-DB images per ADR-059 / ADR-044.
+  - If `plexus_device="<client_name>"`: server fetches the file from the named client over the device WebSocket and forwards into the channel adapter. The file is not staged into the workspace (this is direct delivery; use `file_transfer` first if persistence is wanted).
 - Emits as `Outbound::Final` with `channel`/`chat_id` set to the target. The corresponding channel adapter does the actual delivery.
 - Returns delivery status per channel.
 
@@ -473,31 +479,33 @@ These four tools have no client-side counterpart. Their implementations live ent
   "input_schema": {
     "type": "object",
     "properties": {
-      "src_device": {
+      "plexus_src_device": {
         "type": "string",
         "enum": ["server"],
-        "description": "Device where the source file or folder lives."
+        "description": "Device where the source file or folder lives.",
+        "x-plexus-device": true
       },
-      "src_path": { "type": "string", "description": "Absolute path on src_device." },
-      "dst_device": {
+      "src_path": { "type": "string", "description": "Absolute path on plexus_src_device." },
+      "plexus_dst_device": {
         "type": "string",
         "enum": ["server"],
-        "description": "Device where the file or folder should land."
+        "description": "Device where the file or folder should land.",
+        "x-plexus-device": true
       },
-      "dst_path": { "type": "string", "description": "Absolute path on dst_device. Must not already exist." },
+      "dst_path": { "type": "string", "description": "Absolute path on plexus_dst_device. Must not already exist." },
       "mode": {
         "type": "string",
         "enum": ["copy", "move"],
         "description": "copy: source intact. move: source deleted after successful transfer. Same-device move is atomic (rename). Cross-device move is copy-then-delete; if delete fails after a successful copy, both copies exist and the result flags a warning."
       }
     },
-    "required": ["src_device", "src_path", "dst_device", "dst_path", "mode"],
+    "required": ["plexus_src_device", "src_path", "plexus_dst_device", "dst_path", "mode"],
     "additionalProperties": false
   }
 }
 ```
 
-**Merge-time injection:** both `src_device.enum` and `dst_device.enum` are **extended** with currently-connected device names. Post-merge example: `["server", "alice-laptop", "alice-phone"]` for both fields.
+**Merge-time injection:** both `plexus_src_device.enum` and `plexus_dst_device.enum` are **extended** with currently-connected device names. Post-merge example: `["server", "alice-laptop", "alice-phone"]` for both fields. Detection is via the `x-plexus-device: true` marker on each field, not enum shape.
 
 **Mechanism:**
 - Source schema lists only `["server"]` for both device fields. The merge step is what makes other devices selectable, exactly as the user's session has them connected.
@@ -507,7 +515,7 @@ These four tools have no client-side counterpart. Their implementations live ent
   - Cross-device, `copy`: server orchestrates streaming pull-and-push over the device WebSockets; source intact.
   - Cross-device, `move`: same stream copy, then delete source on success. If delete fails, tool result includes a warning naming both surviving copies.
 - **Folder semantics:** recursive. Cross-device folder transfer streams each entry; on mid-transfer failure, partial dst is cleaned up.
-- **Quota:** applies when `dst_device="server"`. Reserve-then-write through `workspace_fs`; refund on move-from-server.
+- **Quota:** applies when `plexus_dst_device="server"`. Reserve-then-write through `workspace_fs`; refund on move-from-server.
 - **SKILL.md validation — applies to BOTH single-file and folder transfers:**
   - Before any bytes move, the server enumerates every destination path the transfer would produce.
   - Any path that would match `skills/*/SKILL.md` (exactly one level deep, exact filename, per ADR-082) has its source content validated up-front.
@@ -651,7 +659,7 @@ These four tools have no client-side counterpart. Their implementations live ent
 }
 ```
 
-**Merge-time injection:** `device` is added as a brand-new top-level property with an enum listing **only connected client devices** (no `"server"` — the server is not a code execution environment per ADR-072), and is appended to `required`. If no clients are connected, `shell` is omitted from the merged tool list entirely.
+**Merge-time injection:** `plexus_device` is added as a brand-new top-level property (carrying `x-plexus-device: true`) with an enum listing **only connected client devices** (no `"server"` — the server is not a code execution environment per ADR-072), and is appended to `required`. If no clients are connected, `shell` is omitted from the merged tool list entirely.
 
 **Mechanism:**
 - **fs_policy=sandbox (default, Linux):** wraps the command in `bwrap` per ADR-073:
@@ -681,7 +689,7 @@ For each MCP server `<server_name>` and each tool `<tool_name>` it advertises:
 
 - **Wrapped name:** `mcp_<server_name>_<tool_name>` (ADR-048).
 - **Source schema:** the MCP-provided schema is taken **as-is** — wrap is purely a name prefix. No parameter injection, no enum modification, no description rewrite at wrap time.
-- **Merge-time injection:** at session tool-schema-build time, `device` is added as a brand-new top-level property with an enum listing every install site of this MCP, and appended to `required` (same mechanism as the routing-only-device pattern for shared tools, ADR-071).
+- **Merge-time injection:** at session tool-schema-build time, `plexus_device` is added as a brand-new top-level property (with `x-plexus-device: true`), enum listing every install site of this MCP, appended to `required` (same mechanism as the routing-only-device pattern for shared tools, ADR-071). The reserved `plexus_` prefix ensures no collision with any MCP tool's native args — even if an MCP advertises a field named `device`, the merger's injected field never overwrites it.
 - **Lives in:** `plexus-common/src/mcp/` provides the wrapping. Server-side admin-installed MCPs are managed in `plexus-server/src/mcp/`; client-side per-device MCPs in `plexus-client/src/mcp/`.
 
 **Worked example.** A tool `web_search` from MCP server `minimax` whose source schema is:
@@ -708,17 +716,19 @@ Post-merge, the agent sees:
     "type": "object",
     "properties": {
       "query": { "type": "string" },
-      "device": {
+      "plexus_device": {
         "type": "string",
-        "enum": ["server", "alice-laptop"]
+        "enum": ["server", "alice-laptop"],
+        "x-plexus-device": true,
+        "description": "Which install site to execute on."
       }
     },
-    "required": ["query", "device"]
+    "required": ["query", "plexus_device"]
   }
 }
 ```
 
-`device` enum lists every device (and "server" if admin-installed) where `minimax` is mounted. The agent picks one to dispatch to.
+`plexus_device` enum lists every device (and "server" if admin-installed) where `minimax` is mounted. The agent picks one to dispatch to. The reserved `plexus_` prefix is the collision-proof guarantee: even if an MCP tool had its own `device` field (say, selecting a GPU), the merge step would not touch it.
 
 ### Schema-collision handling
 
@@ -726,7 +736,7 @@ If the same `mcp_<server>_<tool>` name is reported with different schemas across
 
 ### Dispatch
 
-When the agent calls an MCP-wrapped tool, the server looks up which install site matches the `device` enum value and forwards the call to that site's `McpSession` (server-side or via a `ToolCall` frame to the client).
+When the agent calls an MCP-wrapped tool, the server looks up which install site matches the `plexus_device` enum value and forwards the call to that site's `McpSession` (server-side or via a `ToolCall` frame to the client).
 
 ### Timeout
 
@@ -754,7 +764,7 @@ pub trait Tool: Send + Sync {
 }
 ```
 
-`ToolContext` carries: `user_id`, `session_id`, `device` (for shared/MCP tools), and references to shared state (workspace_fs, channel registry, MCP manager).
+`ToolContext` carries: `user_id`, `session_id`, `plexus_device` (for shared/MCP tools), and references to shared state (workspace_fs, channel registry, MCP manager).
 
 ### Schema merging at session start
 
@@ -763,9 +773,85 @@ Every agent-loop iteration step 4a (per ADR-021) calls `tools_registry::get_tool
 1. Lists all source schemas: shared tool schemas from `plexus-common`, server-only tools, client-side schemas advertised at handshake (`ClientToServer::RegisterTools`), MCP-wrapped schemas from both server and client sides.
 2. Groups by `(fully_qualified_name, canonical_schema)`.
 3. For each group, emits one merged schema:
-   - Routing-only tools (shared, shell, MCP) have `device` injected as a new property with enum of install sites, and `device` appended to `required`.
-   - Intrinsic-device tools (`file_transfer`, `message`) have their existing device field(s)' enum extended with connected devices.
+   - Routing-only tools (shared, shell, MCP) have `plexus_device` injected as a new property (with `x-plexus-device: true` marker) with enum of install sites, and `plexus_device` appended to `required`.
+   - Intrinsic-device tools (`file_transfer`, `message`) have every property carrying `x-plexus-device: true` — `plexus_src_device`/`plexus_dst_device` for `file_transfer`, `plexus_device` for `message` — extended with connected devices.
 4. Source-schema collisions across install sites with the same name but different schemas → reject (logged, surfaced to admin/user via UI for MCP cases per ADR-049).
+
+### Device-field helper + reserved name
+
+Every device-routing field uses the reserved `plexus_` prefix and carries the `x-plexus-device: true` JSON Schema extension marker. A typed helper in `plexus-common/src/tools/device_field.rs` produces the canonical fragment:
+
+```rust
+pub const DEVICE_FIELD_NAME: &str = "plexus_device";
+
+/// Use this to construct any device-routing field in a source schema.
+pub fn plexus_device_field(description: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": ["server"],
+        "description": description,
+        "x-plexus-device": true
+    })
+}
+```
+
+The merger algorithm:
+
+```python
+def build_tool_schemas(user_id):
+    connected = get_connected_devices(user_id)   # e.g. ["alice-laptop", "alice-phone"]
+    merged = []
+
+    # 1. Shared tools — inject plexus_device, enum = ["server"] + connected
+    for tool in SHARED_TOOLS:
+        s = deep_copy(tool.schema)
+        inject_device_routing(s, sites=["server"] + connected)
+        merged.append(s)
+
+    # 2. Client-only tools (shell) — inject plexus_device, clients only (no "server")
+    if connected:
+        for tool in CLIENT_ONLY_TOOLS:
+            s = deep_copy(tool.schema)
+            inject_device_routing(s, sites=connected)
+            merged.append(s)
+
+    # 3. Server-only tools — extend any x-plexus-device field; pure server tools no-op
+    for tool in SERVER_ONLY_TOOLS:
+        s = deep_copy(tool.schema)
+        extend_plexus_device_enums(s, extra=connected)
+        merged.append(s)
+
+    # 4. MCP tools — inject plexus_device, enum = install sites
+    for group in collect_mcp_groups(user_id):
+        if not all_canonical_schemas_match(group):
+            reject_install(group)             # ADR-049 collision
+            continue
+        s = deep_copy(group.canonical_schema)
+        inject_device_routing(s, sites=group.install_sites)
+        merged.append(s)
+
+    return merged
+
+
+def inject_device_routing(schema, sites):
+    """Add a brand-new plexus_device property; append to required."""
+    schema["properties"]["plexus_device"] = {
+        "type": "string",
+        "enum": list(sites),
+        "description": "Which install site to execute on.",
+        "x-plexus-device": True,
+    }
+    schema["required"].append("plexus_device")
+
+
+def extend_plexus_device_enums(schema, extra):
+    """Extend every property marked x-plexus-device: true with extra device names."""
+    for prop in schema["properties"].values():
+        if prop.get("x-plexus-device") is True:
+            prop["enum"] = prop["enum"] + list(extra)
+```
+
+The merger never inspects enum contents to decide what to mutate — only the explicit marker.
 
 Cache is per-user `DashMap<user_id, Vec<MergedSchema>>`. Invalidates on device connect/disconnect, MCP install/uninstall, device config change.
 

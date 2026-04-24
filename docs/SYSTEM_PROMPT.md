@@ -97,14 +97,17 @@ To install a new skill into your personal workspace:
    in frontmatter must match exactly.
 2. Copy with file_transfer:
    file_transfer(
-     src_device="<where source lives>",
+     plexus_src_device="<where source lives>",
      src_path="<source folder path>",
-     dst_device="server",
+     plexus_dst_device="server",
      dst_path="/a4f7e2d1-e29b-41d4-a716-446655440000/skills/<skill-name>/",
      mode="copy"
    )
 3. Validation runs at write time. If SKILL.md is malformed,
-   workspace_fs rejects the write — fix and retry.
+   workspace_fs rejects the write — fix and retry. For folder
+   transfers, ALL SKILL.md files under skills/*/SKILL.md in the
+   source tree are pre-validated; if any is malformed the entire
+   transfer is rejected atomically.
 4. The new skill appears in next turn's Skills section.
 
 To install from a shared workspace, use that workspace's
@@ -115,7 +118,7 @@ src_path="/production_department/skills-source/codestyle-guide/".
 
 - **morning-standup** — Generate a morning standup summary
   from team sprint state and post to Discord. Load full body:
-  read_file(device="server",
+  read_file(plexus_device="server",
   path="/a4f7e2d1-e29b-41d4-a716-446655440000/skills/morning-standup/SKILL.md")
 
 ---
@@ -149,7 +152,7 @@ chosen device's filesystem.
 
 ### server (always available)
 Hosts every workspace listed above. File tool calls with
-device="server" target a workspace by path prefix.
+plexus_device="server" target a workspace by path prefix.
 
 ### laptop (online)
 fs_policy: sandbox (Linux bwrap, rooted at /home/alice/.plexus/).

@@ -1385,11 +1385,16 @@ components:
 
     TransferRequest:
       type: object
-      required: [src_device, src_path, dst_device, dst_path, mode]
+      required: [plexus_src_device, src_path, plexus_dst_device, dst_path, mode]
+      description: |
+        Mirrors the `file_transfer` tool's args. The reserved `plexus_`
+        prefix on the two device fields matches the agent-visible tool
+        schema exactly (see docs/TOOLS.md) so REST and tool callers use
+        the same names.
       properties:
-        src_device: { type: string, description: "`server` or a device name." }
+        plexus_src_device: { type: string, description: "`server` or a device name." }
         src_path: { type: string }
-        dst_device: { type: string }
+        plexus_dst_device: { type: string, description: "`server` or a device name. Must not already exist at dst_path." }
         dst_path: { type: string }
         mode: { type: string, enum: [copy, move] }
 

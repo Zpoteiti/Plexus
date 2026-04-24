@@ -359,29 +359,36 @@ Once fired, in-flight tools complete (bounded by their own timeout), then the lo
 **Status:** accepted
 **Decision:** `message`, `web_fetch`, `cron`, `file_transfer` are plexus-server-owned and defined there.
 
-### ADR-041 · `device` routes file tool calls (injected at merge)
+### ADR-041 · `plexus_device` routes file tool calls (injected at merge)
 
 **Status:** accepted
-**Decision:** Source tool schemas (in `plexus-common/src/tools/`, `plexus-client/src/tools/`, or MCP wraps) are nanobot-shape. Routing-only tools (shared file tools, shell, MCP) **do not include `device`** in their source schema. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects `device` (per ADR-071) into the agent-visible schema. Intrinsic-device tools (`file_transfer`, `message`) keep their `device` / `src_device` / `dst_device` field in source with `enum: ["server"]`; merge extends the enum. Dispatch:
-- `device="server"` → `workspace_fs` or the relevant server-side implementation directly
-- otherwise → WebSocket `ToolCall` frame to the named device
-**Consequences:** Source schemas stay pristine and testable against nanobot fixtures. For routing-only tools, `device` only appears in the post-merge schema the LLM sees. Agent sees `edit_file` not `edit_file_server` vs `edit_file_laptop`.
+**Decision:** Source tool schemas (in `plexus-common/src/tools/`, `plexus-client/src/tools/`, or MCP wraps) are nanobot-shape. Routing-only tools (shared file tools, shell, MCP) **do not include a `plexus_device` field** in their source schema. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects `plexus_device` (per ADR-071) into the agent-visible schema. Intrinsic-device tools (`file_transfer`, `message`) keep their device fields (`plexus_device` / `plexus_src_device` / `plexus_dst_device`) in source with `enum: ["server"]`; merge extends the enum.
 
-### ADR-071 · Tools with the same name + schema are merged; `device` enum lists install sites
+**Why the `plexus_` prefix?** The routing field name must not collide with any tool author's native arg. An MCP tool might legitimately have a `device` argument (e.g., selecting a GPU, audio device, or display). The reserved `plexus_` prefix guarantees the merger's injected property never clobbers a tool's own args.
+
+Dispatch:
+- `plexus_device="server"` → `workspace_fs` or the relevant server-side implementation directly
+- otherwise → WebSocket `ToolCall` frame to the named device
+
+**Consequences:** Source schemas stay pristine and testable against nanobot fixtures. For routing-only tools, `plexus_device` only appears in the post-merge schema the LLM sees. Agent sees `edit_file` not `edit_file_server` vs `edit_file_laptop`. Reserved name is collision-proof.
+
+### ADR-071 · Tools with the same name + schema are merged; `plexus_device` enum lists install sites
 
 **Status:** accepted
 **Context:** Without this rule, if `read_file` exists on server + three devices, the agent would see four separate tools or four overlapping schemas. That defeats the point of the unified tool surface (ADR-041) and blows up the agent's tool-registry cognitive load.
 **Decision:** At tool-schema-build time (per session), `tools_registry::build_tool_schemas` deduplicates:
 
 1. Group incoming tool schemas by `(fully_qualified_name, canonical_schema)`.
-2. For each group, emit **one** merged schema whose `device` enum lists every install site that reported it.
+2. For each group, emit **one** merged schema whose `plexus_device` enum lists every install site that reported it.
 3. If two install sites report the same name but different canonical schemas, REJECT — ADR-049 for MCP collisions; for non-MCP tools, this is a bug (shared tools should have server-owned canonical schemas per ADR-038).
 
 **Applies to:**
-- **Shared file tools** (`read_file`, `write_file`, etc.): server schema is canonical (ADR-038). Every connected device reports the same schema. Merge injects `device` as a new property; enum = `["server", <device_1>, <device_2>, ...]`.
-- **Client-only tools** (`shell`): schema owned by client (ADR-039), advertised at handshake. Merge injects `device`; enum = `[<device_1>, <device_2>, ...]` (no "server", per ADR-072).
+- **Shared file tools** (`read_file`, `write_file`, etc.): server schema is canonical (ADR-038). Every connected device reports the same schema. Merge injects `plexus_device` as a new property; enum = `["server", <device_1>, <device_2>, ...]`, appended to `required`.
+- **Client-only tools** (`shell`): schema owned by client (ADR-039), advertised at handshake. Merge injects `plexus_device`; enum = `[<device_1>, <device_2>, ...]` (no "server", per ADR-072).
 - **Server-only tools** (`cron`, `web_fetch`): single install site, no device-routing field.
-- **Intrinsic-device server tools** (`file_transfer`, `message`): source schema has its own device field(s) with `enum: ["server"]`. Merge **extends** each such enum with connected device names — no new property injected.
+- **Intrinsic-device server tools** (`file_transfer`, `message`): source schema already has its device field(s) — `plexus_src_device`/`plexus_dst_device` for `file_transfer`, `plexus_device` for `message` — with `enum: ["server"]` as a stub. Merge **extends** each such enum with connected device names — no new property injected.
+
+**Merger detects intrinsic-device fields via an explicit marker, not by enum-shape heuristic.** Each device-routing field in a source schema carries `"x-plexus-device": true` (a JSON Schema extension). The typed helper `plexus_device_field()` in `plexus-common/src/tools/` produces the canonical fragment. The merger scans for this marker when extending enums — avoids the "guess a field is device-routing because its enum happens to be `['server']`" trap.
 - **MCP tools** (`mcp_{server}_{tool}`): collision-checked at install (ADR-049); schemas guaranteed identical across sites when install succeeds. Enum lists all install sites of this MCP server.
 
 **Canonical schema comparison:** compare the schema after normalizing whitespace, property ordering, and OpenAI-compatibility transforms. Use a stable JSON canonicalization (e.g. sorted keys, trimmed descriptions).
@@ -485,7 +492,7 @@ pub trait Tool: Send + Sync {
     /// Tool name as it appears in the schema (e.g., "read_file", "shell").
     fn name(&self) -> &str;
 
-    /// JSON Schema for the tool parameters. Nanobot-shape; `device`
+    /// JSON Schema for the tool parameters. Nanobot-shape; `plexus_device`
     /// is injected at merge time (ADR-041, ADR-071), not here.
     fn schema(&self) -> serde_json::Value;
 
@@ -495,7 +502,7 @@ pub trait Tool: Send + Sync {
     }
 
     /// Execute the tool call with validated args and an execution context
-    /// (user_id, session_id, device, state refs).
+    /// (user_id, session_id, plexus_device, state refs).
     async fn execute(&self, args: serde_json::Value, ctx: &ToolContext) -> ToolResult;
 }
 ```
@@ -612,7 +619,7 @@ Rejected: a dedicated `install_skill` server tool. Would require URL allowlistin
 **Status:** accepted
 **Context:** Originally `file_transfer` was a cross-device-only copy primitive. A separate `move_file` was considered for same-device rename. Keeping them separate felt cleaner conceptually, but a unified tool is fewer tool slots for the agent to learn and reuses the cross-device byte-moving machinery for all file relocations.
 **Decision:**
-- **Schema: five required fields** — `src_device`, `src_path`, `dst_device`, `dst_path`, `mode`. `mode` enum: `"copy" | "move"`.
+- **Schema: five required fields** — `plexus_src_device`, `src_path`, `plexus_dst_device`, `dst_path`, `mode`. `mode` enum: `"copy" | "move"`. The two device fields use the reserved `plexus_` prefix (per ADR-041) with source stub `enum: ["server"]`; merge extends.
 - **Behavior matrix:**
   - Same-device `copy`: native filesystem copy on that device.
   - Same-device `move`: atomic rename (`tokio::fs::rename`).
@@ -620,7 +627,7 @@ Rejected: a dedicated `install_skill` server tool. Would require URL allowlistin
   - Cross-device `move`: same stream copy, then delete source only on successful write. If delete fails after a successful copy, both copies exist and the tool result flags a warning. The inverse (neither copy exists) cannot happen — we order copy-then-delete.
 - **Folder semantics.** If `src_path` points to a folder, the operation is recursive. Same-device folder moves remain atomic (single directory-entry rename). Cross-device folder transfers stream each entry; mid-transfer failure triggers partial-dst cleanup.
 - **Rejection cases.** `dst_path` already exists → reject (no implicit overwrite). `src_path` does not exist → reject. Symlink-outside-workspace checks apply per each side's `fs_policy`.
-- **Quota.** Applies when `dst_device="server"`. Single-op cap (ADR-078) uses total bytes being written (folder sum for recursive). Move from server refunds on successful delete.
+- **Quota.** Applies when `plexus_dst_device="server"`. Single-op cap (ADR-078) uses total bytes being written (folder sum for recursive). Move from server refunds on successful delete.
 - **SKILL.md validation (applies to BOTH single-file AND folder transfers).** Before any bytes move, the server enumerates every destination path the transfer would produce. For each path that would match `skills/*/SKILL.md` (exactly one level deep, exact filename — same rule as ADR-082), the validator runs against the source content.
   - **Single-file transfer:** if `dst_path` matches `skills/*/SKILL.md` and content is malformed → reject the transfer; no bytes land.
   - **Folder transfer:** the server pre-scans the source tree and identifies every file whose final dst path would match `skills/*/SKILL.md`. It validates ALL such files up-front. If **any** is malformed, the **entire transfer** is rejected atomically — no partial copy lands. This closes the gap where recursive folder transfer would otherwise admit invalid skills for later load-time discovery.
@@ -649,8 +656,8 @@ Rejected: a dedicated `install_skill` server tool. Would require URL allowlistin
 ### ADR-048 · MCP tool naming: `mcp_{server}_{tool}`
 
 **Status:** accepted
-**Decision:** The MCP wrap step prefixes each MCP-provided tool name with `mcp_<server_name>_<tool_name>`. Nothing else is injected at wrap time — source schema stays unchanged. The `device` enum is added later at merge time per ADR-071, consistent with ADR-041.
-**Consequences:** Wrap is pure name-rewriting; merge is where cross-site schema comparison + `device` injection happens. Cleanly separates concerns.
+**Decision:** The MCP wrap step prefixes each MCP-provided tool name with `mcp_<server_name>_<tool_name>`. Nothing else is injected at wrap time — source schema stays unchanged. The `plexus_device` enum is added later at merge time per ADR-071, consistent with ADR-041.
+**Consequences:** Wrap is pure name-rewriting; merge is where cross-site schema comparison + `plexus_device` injection happens. Cleanly separates concerns. The reserved `plexus_` prefix on the routing field ensures we never clobber an MCP tool's own args, even if the MCP author used a field named `device`.
 
 ### ADR-049 · MCP schema-collision is rejected at install time
 
