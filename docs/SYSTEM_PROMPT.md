@@ -187,21 +187,32 @@ chat_id: 184729384
 </runtime>
 ```
 
-The wire shape of a turn makes the separation explicit:
+The wire shape of a turn makes the separation explicit. Chronology goes **system → all prior history (oldest → newest) → current user turn (with runtime block prepended)**:
 
 ```
 messages: [
-  { role: "system", content: "<static system prompt>" },         // cacheable
-  { role: "user",   content: [
-      { type: "text", text: "<runtime block above>" },           // fresh each turn
+  // --- cacheable prefix ---
+  { role: "system", content: "<static system prompt>" },
+
+  // --- all prior history, in chronological order (oldest → newest) ---
+  { role: "user",      content: [...] },        // past user turn
+  { role: "assistant", content: [...] },        // past assistant reply (may include tool_use)
+  { role: "tool",      content: [...] },        // past tool_result
+  { role: "assistant", content: [...] },        // more assistant + tool interleaving
+  // ...as many back-and-forth turns as history contains...
+
+  // --- the current turn — always LAST ---
+  { role: "user", content: [
+      { type: "text", text: "<runtime block>" },               // fresh each turn; prepended ONLY to the current user message
       { type: "text", text: "<user's actual message>" },
-      { type: "image_url", image_url: { url: "data:..." } },     // if present
+      { type: "image_url", image_url: { url: "data:..." } },   // if present
   ]},
-  // ...prior assistant/tool messages in history...
 ]
 ```
 
-Only the `system` message is the cacheable prefix. Everything inside the `user` content array varies per turn, so it's outside the cache boundary.
+Only the `system` message is the cacheable prefix. Prior history is effectively static within a session (new rows only append), so most of the cached prefix extends through it too — the cache boundary sits just before the current user message. Everything inside that current user message (including the runtime block) varies per turn.
+
+**Important:** the `<runtime>` block is attached to the **current** user message ONLY. Older user messages in history do NOT carry runtime blocks (see ADR-093 / the per-section assembly notes below for why the runtime block is not persisted to DB).
 
 ---
 

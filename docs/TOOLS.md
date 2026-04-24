@@ -9,9 +9,9 @@ This is a *design* document. Use it during implementation as the source of truth
 ## Conventions
 
 - **Source schemas are nanobot-shape.** Two patterns for how device-awareness shows up in source:
-  - **Routing-only device** — for shared tools (`read_file`, `write_file`, etc.), `shell`, and MCP-wrapped tools, the source schema has **no `device_name` field at all**. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects `device_name` as a brand-new property (ADR-071) with an enum populated from connected devices.
+  - **Routing-only device** — for shared tools (`read_file`, `write_file`, etc.), `shell`, and MCP-wrapped tools, the source schema has **no `device` field at all**. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects `device` as a brand-new property (ADR-071) with an enum populated from connected install sites, and adds it to the `required` list.
   - **Intrinsic device** — for tools that natively operate across devices (`file_transfer`, `message`), the device field IS part of the source schema with `enum: ["server"]` as the starting point. At merge time, the enum is **extended** with connected device names. Example: `file_transfer.src_device` source has `enum: ["server"]`; post-merge it becomes `enum: ["server", "alice-laptop", "alice-phone"]`.
-- **Tools_registry merge invariants:** the merge never modifies anything but enums. Property names, types, descriptions, required-lists are pass-through.
+- **Tools_registry merge invariants:** for routing-only tools the merge MAY inject a `device` property and append `device` to `required`; for intrinsic-device tools the merge MAY extend device-field enums. Property names, types, descriptions, and all non-device fields are pass-through. See pseudocode in the Cross-cutting concerns section below.
 - **Three crate locations for tool code:**
   - **Shared schemas** → `plexus-common/src/tools/<tool>.rs`
   - **Shared tool implementations** → both `plexus-server/src/tools/<tool>.rs` and `plexus-client/src/tools/<tool>.rs` (each side runs natively when the agent dispatches with the matching `device`).
@@ -508,7 +508,12 @@ These four tools have no client-side counterpart. Their implementations live ent
   - Cross-device, `move`: same stream copy, then delete source on success. If delete fails, tool result includes a warning naming both surviving copies.
 - **Folder semantics:** recursive. Cross-device folder transfer streams each entry; on mid-transfer failure, partial dst is cleaned up.
 - **Quota:** applies when `dst_device="server"`. Reserve-then-write through `workspace_fs`; refund on move-from-server.
-- **SKILL.md validation:** if `dst_path` matches `skills/*/SKILL.md`, runs the ADR-082 validator before commit.
+- **SKILL.md validation — applies to BOTH single-file and folder transfers:**
+  - Before any bytes move, the server enumerates every destination path the transfer would produce.
+  - Any path that would match `skills/*/SKILL.md` (exactly one level deep, exact filename, per ADR-082) has its source content validated up-front.
+  - **Single-file transfer with malformed SKILL.md** → reject.
+  - **Folder transfer with any malformed SKILL.md** → reject the **entire transfer atomically**. No partial copy lands. This closes the loophole where recursive folder transfer could smuggle invalid skills into the scanner path.
+  - Non-SKILL.md files and files outside `skills/` are untouched by this validator.
 - **Reject** if `dst_path` already exists, or `src_path` doesn't exist.
 
 **Timeout:** stall-detection — abort if no bytes flow for 30s. Same-device move is atomic, returns instantly.
@@ -646,7 +651,7 @@ These four tools have no client-side counterpart. Their implementations live ent
 }
 ```
 
-**Merge-time injection:** `device_name` is added as a brand-new top-level property with an enum listing **only connected client devices** (no `"server"` — the server is not a code execution environment per ADR-072). If no clients are connected, `shell` is omitted from the merged tool list entirely.
+**Merge-time injection:** `device` is added as a brand-new top-level property with an enum listing **only connected client devices** (no `"server"` — the server is not a code execution environment per ADR-072), and is appended to `required`. If no clients are connected, `shell` is omitted from the merged tool list entirely.
 
 **Mechanism:**
 - **fs_policy=sandbox (default, Linux):** wraps the command in `bwrap` per ADR-073:
@@ -676,7 +681,7 @@ For each MCP server `<server_name>` and each tool `<tool_name>` it advertises:
 
 - **Wrapped name:** `mcp_<server_name>_<tool_name>` (ADR-048).
 - **Source schema:** the MCP-provided schema is taken **as-is** — wrap is purely a name prefix. No parameter injection, no enum modification, no description rewrite at wrap time.
-- **Merge-time injection:** at session tool-schema-build time, `device_name` is added as a brand-new top-level property with an enum listing every install site of this MCP (same mechanism as the routing-only-device pattern for shared tools, ADR-071).
+- **Merge-time injection:** at session tool-schema-build time, `device` is added as a brand-new top-level property with an enum listing every install site of this MCP, and appended to `required` (same mechanism as the routing-only-device pattern for shared tools, ADR-071).
 - **Lives in:** `plexus-common/src/mcp/` provides the wrapping. Server-side admin-installed MCPs are managed in `plexus-server/src/mcp/`; client-side per-device MCPs in `plexus-client/src/mcp/`.
 
 **Worked example.** A tool `web_search` from MCP server `minimax` whose source schema is:
@@ -703,17 +708,17 @@ Post-merge, the agent sees:
     "type": "object",
     "properties": {
       "query": { "type": "string" },
-      "device_name": {
+      "device": {
         "type": "string",
         "enum": ["server", "alice-laptop"]
       }
     },
-    "required": ["query", "device_name"]
+    "required": ["query", "device"]
   }
 }
 ```
 
-`device_name` enum lists every device (and "server" if admin-installed) where `minimax` is mounted. The agent picks one to dispatch to.
+`device` enum lists every device (and "server" if admin-installed) where `minimax` is mounted. The agent picks one to dispatch to.
 
 ### Schema-collision handling
 
@@ -721,7 +726,7 @@ If the same `mcp_<server>_<tool>` name is reported with different schemas across
 
 ### Dispatch
 
-When the agent calls an MCP-wrapped tool, the server looks up which install site matches the `device_name` enum value and forwards the call to that site's `McpSession` (server-side or via a `ToolCall` frame to the client).
+When the agent calls an MCP-wrapped tool, the server looks up which install site matches the `device` enum value and forwards the call to that site's `McpSession` (server-side or via a `ToolCall` frame to the client).
 
 ### Timeout
 
@@ -749,7 +754,7 @@ pub trait Tool: Send + Sync {
 }
 ```
 
-`ToolContext` carries: `user_id`, `session_id`, `device_name` (for shared/MCP tools), and references to shared state (workspace_fs, channel registry, MCP manager).
+`ToolContext` carries: `user_id`, `session_id`, `device` (for shared/MCP tools), and references to shared state (workspace_fs, channel registry, MCP manager).
 
 ### Schema merging at session start
 
@@ -757,7 +762,9 @@ Every agent-loop iteration step 4a (per ADR-021) calls `tools_registry::get_tool
 
 1. Lists all source schemas: shared tool schemas from `plexus-common`, server-only tools, client-side schemas advertised at handshake (`ClientToServer::RegisterTools`), MCP-wrapped schemas from both server and client sides.
 2. Groups by `(fully_qualified_name, canonical_schema)`.
-3. For each group, emits one merged schema with `device_name` enum listing every install site (ADR-071).
+3. For each group, emits one merged schema:
+   - Routing-only tools (shared, shell, MCP) have `device` injected as a new property with enum of install sites, and `device` appended to `required`.
+   - Intrinsic-device tools (`file_transfer`, `message`) have their existing device field(s)' enum extended with connected devices.
 4. Source-schema collisions across install sites with the same name but different schemas → reject (logged, surfaced to admin/user via UI for MCP cases per ADR-049).
 
 Cache is per-user `DashMap<user_id, Vec<MergedSchema>>`. Invalidates on device connect/disconnect, MCP install/uninstall, device config change.
