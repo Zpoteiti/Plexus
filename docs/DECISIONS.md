@@ -261,22 +261,31 @@ pub struct ContextInputs<'a> {
 **Decision:** No session state. On LLM error, if the request contained `image_url` blocks, retry once with them stripped (keep all text blocks, including path-text markers). Return result. No flag propagates.
 **Consequences:** ~100 LoC simpler. DB stores full-fidelity messages always. Switching to a VLM mid-session works immediately — no stale flag. Cost: one 500ms retry per image turn on non-VLM.
 
-### ADR-027 · Path-text markers accompany every image attachment
+### ADR-027 · Path-text markers accompany every chat attachment
 
 **Status:** accepted
-**Decision:** When the adapter adds an image block to user content, it ALSO adds a text block: `"User has uploaded a file to device='server', path='.attachments/...'"`. After vision-strip retry, this text block remains, giving the LLM enough context to reference the file via `read_file` or other tools.
-**Consequences:** Non-VLM agents can still reason about uploaded files structurally. VLM agents have redundancy (image + path), which is fine.
+**Decision:** When a channel adapter receives an inbound message with one or more attachments, it adds a text block per attachment: `"User has uploaded a file to device='server', path='.attachments/{msg_id}/{filename}'"`. This fires for **every** attachment regardless of MIME type:
+- **Images** — adapter adds the path-text block AND an `image_url` block (base64 inline per ADR-059). After vision-strip retry, the path-text block remains so a non-VLM agent still knows the file exists.
+- **Non-image files** (PDFs, CSVs, audio, archives, anything else) — adapter adds the path-text block ONLY. There is no `file_url` content block in OpenAI chat completions (ADR-101), so non-image bytes never live inline in `messages.content`. The agent reaches them via `read_file` against the workspace path.
+
+**Consequences:** Non-VLM agents can still reason about uploaded files structurally. VLM agents have redundancy on images (path + base64), which is fine. Non-image files have a single path of access (workspace `.attachments/`) — uniform model regardless of whether the LLM supports vision.
 
 ### ADR-028 · Two-stage compaction
 
 **Status:** accepted
-**Decision:**
-- **Stage 1** (user-turn boundary): compact the range `[after system prompt ... before latest user message]` into a single compressed message. Target: 12k tokens.
-- **Stage 2** (mid-turn): if history still exceeds threshold after stage 1, compact `[latest user message + accumulated tool/assistant within current turn]` into another 12k-target summary.
+**Decision:** Two admin-set keys in `system_config` (ADR-101) drive the trigger:
+- `llm_max_context_tokens` — the LLM's context-window size, counted with tiktoken-rs (ADR-025) against the full chat-completions prompt (system + tools + history + new turn).
+- `llm_compaction_threshold_tokens` — the headroom that triggers compaction. Default `16000`.
 
-**Units clarification:** the 16k threshold and 12k target are **tokens** (measured via tiktoken-rs per ADR-025). This is separate from tool result caps (ADR-076), which are **characters** — roughly 4× smaller in token terms. A max-size tool output (16k chars ≈ 4k tokens) uses ~¼ of the compaction headroom, so ~4 such outputs fit before stage-1 compact fires. Mid-turn accumulation of many tool results is what stage 2 handles.
+**Trigger:** when `llm_max_context_tokens − tiktoken_count(prompt) < llm_compaction_threshold_tokens`, fire compaction.
 
-**Consequences:** Handles both long histories and long agentic runs. Compressed messages are stored in DB with a flag to prevent re-summarization. Stage 2 is rare in practice (needs 30+ tool calls in one turn) but correct when needed.
+**Stages:**
+- **Stage 1** (user-turn boundary): compact the range `[after system prompt ... before latest user message]` into a single compressed message. The compaction LLM call uses `max_output_tokens = llm_compaction_threshold_tokens − 4000` (= `12000` at the default), leaving 4k headroom for the next user turn.
+- **Stage 2** (mid-turn): if the prompt still trips the trigger after stage 1, compact `[latest user message + accumulated tool/assistant within current turn]` into another summary with the same `max_output_tokens` formula.
+
+**Units clarification:** all the thresholds are **tokens** (tiktoken-rs). Tool result caps (ADR-076) are **characters** — roughly 4× smaller in token terms. A max-size tool output (16k chars ≈ 4k tokens) uses ~¼ of a 16k-token threshold, so ~4 such outputs fit before stage-1 compaction fires. Mid-turn accumulation of many tool results is what stage 2 handles.
+
+**Consequences:** Handles both long histories and long agentic runs. Admin tunes `llm_compaction_threshold_tokens` against their model's behavior — smaller threshold = more frequent compaction with more useful tail history; larger = fewer compaction calls but less room for the next turn. Compressed messages are stored in DB with `is_compaction_summary=true` (ADR-089) to prevent re-summarization. Stage 2 is rare in practice (needs 30+ tool calls in one turn) but correct when needed.
 
 ### ADR-029 · Serial tool dispatch; DB is mid-turn source of truth
 
@@ -293,8 +302,8 @@ pub struct ContextInputs<'a> {
 ### ADR-031 · Tool failures propagate as `tool_result` error content
 
 **Status:** accepted
-**Decision:** All tool failures (timeout, permission, bad args, panic) return a `tool_result` block with `is_error: true` and explanatory content. The agent observes the error in the next iteration and decides recovery. The loop does not break on tool failure.
-**Consequences:** Agent can retry, ask the user, or give up. No centralized error-handling for tools.
+**Decision:** All tool failures (timeout, permission, bad args, panic) return a `tool_result` block with `is_error: true` and explanatory content. The agent observes the error in the next iteration and decides recovery. The loop does not break on tool failure. Device-side failures (target client disconnected mid-call, WS frame send failed, heartbeat timeout) are surfaced the same way with `code: device_unreachable` — no server-side retry, fail fast (ADR-096 details the WS-layer mechanics).
+**Consequences:** Agent can retry, ask the user, or give up. No centralized error-handling for tools. Trap-in-loop detection (ADR-036) catches agents that retry the same unreachable device repeatedly.
 
 ### ADR-032 · Persist immediately on every state transition
 
@@ -428,14 +437,23 @@ Dispatch:
 
 **Status:** accepted
 **Context:** Prior Plexus had `/api/files` (ephemeral upload cache, 24h TTL) running parallel to `/api/workspace/files/` (durable user tree). Two storage systems for files caused drift across message-send, context-load, and channel delivery.
-**Decision:** Workspace is canonical for files the agent operates on. No `/api/files`, no `file_store.rs`. Chat-drop images land at `workspace/.attachments/{msg_id}/{filename}` — a reserved directory that counts toward quota like any other workspace content.
+**Decision:** Workspace is canonical for files the agent operates on. No `/api/files`, no `file_store.rs`. Chat-drop attachments land at `workspace/.attachments/{msg_id}/{filename}` (server-side workspace, `{PLEXUS_WORKSPACE_ROOT}/{user_id}/.attachments/...`) — a reserved directory that counts toward quota like any other workspace content. **Note:** this `.attachments/` concept exists only on the server. Client devices have no equivalent — bytes that flow to a client via `file_transfer` or `write_file` land directly in `device.workspace_path` with no special media subdir.
 **Consequences:** One file model for agent-accessible files. All inbound/outbound media the agent reads/writes flows through workspace paths. Discord/Telegram adapters read workspace files directly for delivery (no staging cache). Device-origin files: the agent uses `file_transfer` to stage to server first, or the server relays via `GET /api/device-stream/{name}/{path}` (SSE-compatible for browser display).
 
-**Adjunct — images are stored in BOTH workspace and DB, serving different purposes:**
-- **Workspace file** at `.attachments/{msg_id}/{filename}` — the agent's file tools (`read_file`, `file_transfer`, etc.) operate on this copy. Counts toward quota (ADR-078). Persists until the user or agent deletes it — there is no server-side retention sweep (see ADR-081).
-- **DB base64 inside the message content block** (per ADR-059) — the durable conversation-replay source. Image bytes live inline in the JSONB as `data:{mime};base64,...` URLs, matching the provider API shape so the LLM call is a pass-through with no marshaling.
+**Storage by attachment type:**
 
-If the user or agent later deletes a workspace attachment (to reclaim quota), conversation history remains fully functional: frontend renders the base64 directly, LLM requests still include the image, only the agent's ability to `read_file` that specific path is lost (covered by the path-text marker in ADR-027 if the agent needs to reason about provenance).
+| Attachment type | Workspace `.attachments/` | DB `messages.content` |
+|---|---|---|
+| **Image** (jpg/png/webp/gif/...) | yes — bytes written | yes — `image_url` block, base64 data URL inline (ADR-059) |
+| **Non-image file** (pdf/csv/audio/archive/...) | yes — bytes written | no `file_url` block exists in OpenAI chat completions (ADR-101); only the path-text marker (ADR-027) lands in DB |
+
+So:
+- **Images live in BOTH places.** Workspace copy is for `read_file` / `file_transfer`; DB base64 is the durable conversation-replay source so the LLM request is a pass-through with no marshaling.
+- **Non-image files live ONLY in `.attachments/`.** The DB just carries the path-text marker pointing at them. The agent uses `read_file` to access content; the LLM never sees the bytes inline.
+
+If the user or agent later deletes a workspace attachment to reclaim quota:
+- **Image deleted:** conversation history still renders + replays via the DB base64. Only the agent's ability to `read_file` that specific path is lost (path-text marker per ADR-027 lets the agent still reason about provenance).
+- **Non-image file deleted:** the agent permanently loses access to the bytes (no DB copy to fall back on). The path-text marker remains in history so the agent knows the file existed.
 
 ### ADR-045 · `workspace_fs` is the single write path server-side
 
@@ -664,21 +682,77 @@ Rejected: a dedicated `install_skill` server tool. Would require URL allowlistin
 ### ADR-047 · Shared MCP client in `plexus-common`
 
 **Status:** accepted
-**Context:** Both server (admin-installed MCPs) and client (user-installed per-device MCPs) need an rmcp-based MCP client. Prior Plexus had ~150 LoC of duplicated wrapper in both crates.
-**Decision:** `plexus-common/src/mcp/` contains the shared `McpSession` + `McpManager` + transport setup (`TokioChildProcess`). Server and client each import.
-**Consequences:** Single implementation. Per-site specific bits (server loads config from `system_config`; client applies from `ConfigUpdate`) stay in the owning crate. `rmcp` is already a workspace dependency.
+**Context:** Both server (admin-installed MCPs) and client (user-installed per-device MCPs) need an rmcp-based MCP client. Prior Plexus had ~150 LoC of duplicated wrapper in both crates. MCP advertises three capability surfaces — tools, resources, prompts — and Plexus exposes all three uniformly to the agent (matches nanobot's pattern).
+**Decision:** `plexus-common/src/mcp/` contains the shared `McpSession` + `McpManager` + transport setup (`TokioChildProcess`). Server and client each import. On connect to any MCP server, the manager calls `list_tools()`, `list_resources()`, and `list_prompts()` and registers wrappers for each into the per-user tool registry (naming convention in ADR-048).
+**Consequences:** Single implementation. Per-site specific bits (server loads config from `system_config`; client applies from `ConfigUpdate`) stay in the owning crate. `rmcp` is already a workspace dependency. The agent sees a flat list of callable entries — it never branches on "is this a tool, resource, or prompt", just on the wrapped name.
 
-### ADR-048 · MCP tool naming: `mcp_{server}_{tool}`
-
-**Status:** accepted
-**Decision:** The MCP wrap step prefixes each MCP-provided tool name with `mcp_<server_name>_<tool_name>`. Nothing else is injected at wrap time — source schema stays unchanged. The `plexus_device` enum is added later at merge time per ADR-071, consistent with ADR-041.
-**Consequences:** Wrap is pure name-rewriting; merge is where cross-site schema comparison + `plexus_device` injection happens. Cleanly separates concerns. The reserved `plexus_` prefix on the routing field ensures we never clobber an MCP tool's own args, even if the MCP author used a field named `device`.
-
-### ADR-049 · MCP schema-collision is rejected at install time
+### ADR-048 · MCP wrapping — tools, resources, prompts as tool-registry entries
 
 **Status:** accepted
-**Decision:** Same `mcp_<server>_<tool>` name MUST have identical tool schemas across ALL install sites. On install (`PUT /api/devices/{name}/mcp` for device-level, `PUT /api/server-mcp` for admin-level), the incoming MCP's tools are introspected (10-second timeout for admin server-side via rmcp; already-cached for device-side via `RegisterTools.mcp_schemas`). If a schema differs from any existing install of the same `<server>` name, return 409 Conflict with a structured diff body.
-**Consequences:** Never auto-version / suffix. User renames their local install if they want two versions to coexist. Single canonical schema per name.
+**Decision:** The MCP wrap step turns each capability advertised by an MCP server into a tool-registry entry. Three name formats, mirroring nanobot's typed-infix convention exactly:
+
+| Surface | Wrapped name | Action when called |
+|---|---|---|
+| Tool | `mcp_<server>_<tool_name>` | Forwards to MCP `call_tool(name, args)` |
+| Resource | `mcp_<server>_resource_<resource_name>` | Forwards to MCP `read_resource(uri)` |
+| Prompt | `mcp_<server>_prompt_<prompt_name>` | Forwards to MCP `get_prompt(name, args)` |
+
+The typed infixes (`_resource_` / `_prompt_`) make cross-surface name collisions impossible by construction (a tool named "search" and a resource named "search" wrap to different names). Tools stay unprefixed for back-compat with the original ADR-048 convention.
+
+Source-schema handling per surface:
+- **Tool:** the MCP-provided `input_schema` is taken as-is. No injection at wrap time.
+- **Resource:** the wrapper's `input_schema` is auto-generated from the resource's URI. Static URIs produce `{type: object, properties: {}, required: []}` — zero-arg call. URI templates (`notion://page/{page_id}`) are parsed and each `{var}` becomes a required string property; the wrapper substitutes at call time before invoking `read_resource` (Plexus divergence from nanobot — see ADR-099).
+- **Prompt:** the wrapper's `input_schema` is auto-generated from the prompt's `arguments` array (each argument → property; required-flag honored).
+
+Merge-time injection (ADR-071) is uniform across all three: `plexus_device` is added with the install-site enum, regardless of surface.
+
+**Prompt output convention:** `get_prompt` returns a list of `PromptMessage` objects. The wrapper concatenates the text content of every message with `"\n"` and returns the resulting string as the `tool_result.content` (matches nanobot `mcp.py:408–421`). Non-text content blocks are stringified via Rust `Display`. Empty result → `"(no output)"`. The wrapped result is then prefixed with `[untrusted tool result]: ` per ADR-095.
+
+**Consequences:** Wrap is pure name-rewriting + schema-shape generation; merge is where cross-site schema comparison + `plexus_device` injection happens. Cleanly separates concerns. The reserved `plexus_` prefix on the routing field ensures we never clobber an MCP capability's own args, even if the MCP author used a field named `device`. The agent learns three name patterns and treats them uniformly thereafter.
+
+### ADR-049 · MCP collision rejection — same name within a server, or schema drift across install sites
+
+**Status:** accepted
+**Decision:** Two distinct collision cases, both rejected at install time:
+
+1. **Within-server cross-surface or intra-surface dup.** If the same MCP server advertises two capabilities that wrap to the same name — two tools named `search`, or any internal duplicate — the install is rejected. (Cross-surface collisions like tool `search` vs resource `search` are impossible by ADR-048's typed infix, so this rule fires only on within-surface dups, which indicate a malformed MCP server.) Plexus diverges from nanobot here: nanobot silently overwrites (`registry.py:19–22`); Plexus rejects with a structured error so the agent never sees a half-registered MCP.
+2. **Cross-install-site schema drift.** Same wrapped name (e.g. `mcp_minimax_web_search`) MUST have an identical source schema across every install site. On install (`PUT /api/devices/{name}/mcp` for device-level, `PUT /api/admin/server-mcp` for admin-level), the incoming MCP's capabilities are introspected (10-second timeout for admin server-side via rmcp; already-cached for device-side via `register_mcp.tools/resources/prompts`). If any schema differs from an existing install of the same `<server>` name, return `409 Conflict` with a structured diff body covering all three surfaces.
+
+**Consequences:** Never auto-version / suffix. User renames their local install if they want two versions to coexist. Single canonical schema per wrapped name. Within-server dups surface as registration failures (developer fixes their MCP) instead of mysterious silently-dropped capabilities.
+
+### ADR-099 · MCP resource templates — URI placeholders are surfaced as schema properties
+
+**Status:** accepted
+**Context:** MCP resources can be either static URIs (`notion://workspace/index`) or URI templates with placeholders (`notion://page/{page_id}`). Nanobot wraps both shapes identically: the URI is stored verbatim with empty `properties` and the wrapper takes no args (`mcp.py:223, 227–231, 256`). For static URIs this works; for templates, the agent has no way to pass `{page_id}` and the resource is effectively dead weight.
+**Decision:** At wrap time, parse `{var}` placeholders out of the resource's URI template using a simple `\{(\w+)\}` regex. For each placeholder, inject one required string property into the wrapper's `input_schema`. At call time, substitute the agent-supplied values back into the URI before invoking `read_resource`. Static URIs (no placeholders) keep the zero-arg wrapper shape.
+
+Worked example. MCP resource with URI template `notion://page/{page_id}` → wrapper schema:
+```json
+{
+  "name": "mcp_notion_resource_page",
+  "input_schema": {
+    "type": "object",
+    "properties": { "page_id": { "type": "string", "description": "URI template variable: page_id" } },
+    "required": ["page_id"]
+  }
+}
+```
+Agent calls `mcp_notion_resource_page(page_id="abc")` → wrapper computes `notion://page/abc` → `read_resource("notion://page/abc")` → returns the resource content as `tool_result`.
+
+**Consequences:** Templated resources become first-class agent capabilities (Plexus divergence from nanobot, justified by the meaningful UX win). Implementation is small (~30 lines in the wrap step). If a template variable name collides with `plexus_device` (the reserved merge-time field), wrapping fails at install time with a clear error — MCP author renames the placeholder. No support for advanced URI Template syntax (RFC 6570 — query strings, fragments, etc.); only simple `{var}` substitution. If a real MCP needs more, we revisit.
+
+### ADR-100 · MCP `enabled` filter applies uniformly across tools, resources, prompts
+
+**Status:** accepted
+**Context:** Nanobot's `enabledTools` config filters `list_tools()` output but does not filter resources or prompts (`mcp.py:511–540` vs `553–577`). Asymmetric — the user can suppress noisy tools but not noisy resources from the same MCP.
+**Decision:** Each MCP server config carries an optional `enabled: [<wrapped_name_pattern>...]` field (single allow-list, glob-style patterns matched against the post-wrap name). When present, only matching wrapped entries are registered, regardless of surface. When absent, every advertised capability registers (default-allow). Nanobot's `enabledTools` is renamed to `enabled` in Plexus configs; conversion is mechanical for users importing nanobot configs.
+
+Examples:
+- `enabled: ["mcp_notion_*"]` → all notion entries (tools, resources, prompts).
+- `enabled: ["mcp_notion_search", "mcp_notion_resource_*"]` → the `search` tool plus every resource.
+- `enabled: ["mcp_*_resource_*"]` → every resource from every MCP, no tools or prompts.
+
+**Consequences:** Single mental model — one config field, one filter, three surfaces. Plexus divergence from nanobot, justified by symmetry. Users who want nanobot's tools-only behavior write `enabled: ["mcp_<server>_*"]` excluding the resource/prompt infixes — slightly more verbose but explicit.
 
 ---
 
@@ -696,11 +770,50 @@ Rejected: a dedicated `install_skill` server tool. Would require URL allowlistin
 **Decision:** Frontend toggle from `sandbox` to `unrestricted` opens a modal requiring the user to type the device name. Matches the account-deletion confirmation pattern.
 **Consequences:** No one-click footgun. Explicit opt-in.
 
-### ADR-052 · Server `web_fetch` has hardcoded RFC-1918 block
+### ADR-052 · `web_fetch` is shared; server hard-blocks private addresses, client default-blocks with per-device whitelist exceptions
 
 **Status:** accepted
-**Decision:** `web_fetch` unconditionally blocks RFC-1918, link-local (169.254/16), loopback, carrier-grade NAT. No whitelist exists server-side. Private-network fetches must go through a client device with its own `ssrf_whitelist`.
-**Consequences:** Server in prod cannot be tricked into probing its own infrastructure. Per-device whitelist applies only to that device's client-side operations (shell subprocess, client MCP network calls).
+**Context:** `web_fetch` was originally server-only with a hardcoded private-IP block. With clients in the picture (and legitimate use cases like fetching an internal company API at `10.180.20.30:8080`), making `web_fetch` shared lets the agent reach declared internal services through the same structured tool path it uses for public URLs.
+**Decision:** `web_fetch` is a shared tool. The merger's `plexus_device` enum = `["server"] + connected_clients`.
+
+- **Server site:** unconditional block-list. RFC-1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), 100.64.0.0/10 carrier-grade NAT (covers Tailscale's 100.x range), 169.254.0.0/16 link-local, 127.0.0.0/8 loopback, IPv6 equivalents (`::1`, `fc00::/7`, `fe80::/10`). **No whitelist exception.** Protects neighbor infra in the same VPC/tailnet (e.g. another service on the same Tailnet that the agent must never be able to probe).
+- **Client site:** same default block-list **plus per-device `ssrf_whitelist`** (host or `host:port` entries) overriding the block. Whitelist is editable per device (ADR-050).
+- DNS rebinding mitigated at both sites: re-resolve before connecting, verify the actual connect-target IP against the policy.
+
+**Capability declaration, not a sandbox.** The client whitelist is not a security boundary. The agent retains full host network access via `exec` (e.g. `curl 10.180.20.30:8080`) because `bwrap` does not isolate network (ADR-073). The whitelist exists to give the agent a clean, structured, audit-loggable tool path for declared internal services — not to prevent network access. The device-setup UI documents this so users aren't sold false security.
+
+**Consequences:** Server stays hard-protected against neighbor-fetch attacks. Clients gain a declarative way to reach internal services through `web_fetch` without falling back to `exec curl`. Per-user SSRF whitelist is still gone (server is hardcoded); per-device whitelist is back as a capability declaration.
+
+### ADR-096 · Device WebSocket protocol — single-connection JSON control + binary file transfer
+
+**Status:** accepted
+**Context:** Devices need bidirectional, low-latency dispatch (server pushes tool calls, client pushes results, both sides push file bytes for `message`-with-files and `file_transfer`). Browser already uses REST + SSE (ADR-003); devices need WebSocket because they sit behind NAT and tool dispatch is bidirectional.
+**Decision:** A single WebSocket connection per device carries both control plane (JSON text frames) and bulk plane (binary frames). The full wire spec lives in `docs/PROTOCOL.md`; this ADR fixes the headline choices that other decisions reference:
+
+- **Endpoint:** `GET /ws/device` with `Authorization: Bearer <PLEXUS_DEVICE_TOKEN>` (or `?token=` query for clients that can't set headers on WS).
+- **Frame types (text/JSON):** `hello`, `hello_ack`, `tool_call`, `tool_result`, `register_mcp`, `config_update`, `transfer_begin`, `transfer_progress`, `transfer_end`, `ping`, `pong`, `error`.
+- **Correlation:** every request carries a UUID v7 `id`; responses echo it. Not strict JSON-RPC.
+- **Parallel tool dispatch.** Server may issue multiple `tool_call` frames before any `tool_result` arrives; client spawns a tokio task per call. Matches the agent's parallel-tool pattern.
+- **Heartbeat.** Server sends `ping` every 30s. Two missed `pong` (~70s) → mark device offline, fail in-flight calls with `tool_result(is_error=true, code:device_unreachable)` (ADR-031). Client reconnects with exponential backoff using the same token; `hello` is idempotent.
+- **No persistent in-flight queue.** Server does not retry on its own; if the client drops mid-call, the failure surfaces to the agent immediately. Agent decides next action.
+- **File transfer (Option A).** Bulk bytes flow over the same WS as binary frames, multiplexed by a 16-byte UUID header per frame. JSON `transfer_begin` opens the slot (carries `total_bytes`, `sha256`, src/dst), `transfer_end` closes (verifies sha). Multiple transfers can be in flight concurrently. For device→device transfers, the server is a pure bridge — reads sender's binary frames, forwards to receiver's WS without buffering the whole file.
+- **JSON for M0–M3.** MessagePack/CBOR is a future optimization; not justified for current scale.
+
+**Consequences:** Client crate is a WS loop + local tool dispatcher + a binary-frame multiplexer. No HTTP listener required (clients can be behind any NAT). All device-related ADRs (config push ADR-050, MCP register ADR-047, tool call ADR-031, transfer ADR-087) hang off this protocol.
+
+### ADR-097 · Device pairing — frontend-issued token, env-var startup, token-as-identity
+
+**Status:** accepted
+**Context:** Devices need to identify themselves to the server. Must work for headless boxes (`./plexus_client` on a server), unattended phones, and dev laptops. No browser-side OAuth dance.
+**Decision:** Pairing is a one-shot token-issuance flow:
+
+1. **Token creation** (frontend, web UI). User opens "Devices" page, fills in `name`, optional `workspace_path`/`fs_policy`/`shell_timeout_max`/`ssrf_whitelist`/`mcp_servers`, submits.
+2. **Server mints token.** `POST /api/devices` returns `{token: "plexus_dev_<base64>", ...}` ONCE. Token is shown verbatim in the UI with copy-to-clipboard. Never retrievable again — lost tokens require `POST /api/devices/{name}/regenerate-token` (ADR-091).
+3. **Client startup.** User exports `PLEXUS_DEVICE_TOKEN=plexus_dev_...` and runs `./plexus_client` (or whatever the installed binary is called). Token is the **only** identifier the client needs; everything else (workspace path, fs_policy, etc.) is fetched from the server's `hello_ack` frame at handshake.
+4. **Identity.** The token is the SSOT for device identity — primary key on `devices` (ADR-091). `(user_id, name)` UNIQUE means a user can't have two devices with the same friendly label, but the friendly label is purely cosmetic; the token is what identifies the connection.
+5. **Rotation.** Delete + recreate (frontend) or `POST /api/devices/{name}/regenerate-token`. Old token invalid immediately; in-flight WS connection torn down on next server-side check.
+
+**Consequences:** No QR codes, no out-of-band pairing dance, no browser launching from the client. Headless deployments are trivial (`export PLEXUS_DEVICE_TOKEN=...`). Token leaks are equivalent to device compromise — same blast radius as exposing any bearer credential; user rotates and moves on. ADR-073's config-masking covers the disk-side leak vector for the client binary's local config.
 
 ---
 
@@ -751,7 +864,7 @@ Rejected: a dedicated `install_skill` server tool. Would require URL allowlistin
 ### ADR-059 · Messages store provider-shape content blocks as JSONB; images inline as base64 data URLs
 
 **Status:** accepted
-**Decision:** `messages.content JSONB` holds the array of content blocks. Block shapes mirror the OpenAI/Anthropic chat-completions request body exactly — storing what the LLM will receive so the request body is a pass-through with no translation.
+**Decision:** `messages.content JSONB` holds the array of content blocks. Block shapes mirror the OpenAI chat-completions request body exactly (ADR-101 — Plexus speaks OpenAI chat completions only, gateway-translated for non-OpenAI providers) — storing what the LLM will receive so the request body is a pass-through with no translation.
 
 Canonical block types:
 - **text:** `{"type": "text", "text": "..."}`
@@ -776,7 +889,7 @@ User, assistant, and tool messages all use the same block schema.
 ### ADR-089 · Message role enum is `user | assistant | tool`; compaction summaries use an inline flag
 
 **Status:** accepted
-**Context:** Compaction summaries (ADR-028) need to be distinguishable from regular history so the next compaction pass skips them and the context builder knows where the "fold point" is. A synthetic role like `compaction_summary` would break the pass-through-to-provider storage (ADR-059), since OpenAI/Anthropic chat APIs only accept `user`, `assistant`, `tool`.
+**Context:** Compaction summaries (ADR-028) need to be distinguishable from regular history so the next compaction pass skips them and the context builder knows where the "fold point" is. A synthetic role like `compaction_summary` would break the pass-through-to-provider storage (ADR-059), since OpenAI chat completions (the only API Plexus speaks per ADR-101) only accepts `user`, `assistant`, `tool`.
 **Decision:**
 - `messages.role` column is strictly one of `user`, `assistant`, `tool`. No synthetic role values.
 - Compaction summaries are inserted with `role='assistant'` plus `is_compaction_summary BOOLEAN NOT NULL DEFAULT FALSE` set to true on that specific row.
@@ -878,6 +991,18 @@ No system-prompt rule is added. The wrap itself is the signal — the agent lear
 - The agent can still *use* information inside tool results; it just doesn't follow instructions embedded there. Same distinction as for channel messages.
 - Compaction, persistence, and LLM-call pass-through all work unchanged — the wrap is just part of the content string.
 
+### ADR-098 · REST `/api/sessions/{key}/messages` accepts only frontend session keys; reads are open
+
+**Status:** accepted
+**Context:** Session keys follow `{channel}:{chat_id}` or an override (ADR-006). Internal synthesizers use overrides like `cron:{job_id}` and `heartbeat:{user_id}`. A user with valid auth could otherwise call `POST /api/sessions/cron:abc/messages` and inject a synthetic-looking message into a cron job's history, or `POST /api/sessions/discord:9999/messages` to forge a Discord-origin message. Codex-style audit flagged this as a session-key injection vector.
+**Decision:** Asymmetric per verb on the session-key path:
+
+- **Write** — `POST /api/sessions/{key}/messages`: **allow-list** the channel prefix. Only keys whose prefix is `web:` (the frontend's namespace) are accepted. Everything else (`cron:`, `heartbeat:`, `discord:`, `telegram:`, any future channel) is rejected with `400 Bad Request`. Default deny — no block-list to maintain. The frontend can only inject into its own `web:` sessions; Discord/Telegram/cron/heartbeat sessions get their messages exclusively from their own pipelines (channel adapters, scheduler, heartbeat phase-2 synthesizer).
+- **Read** — `GET /api/sessions/{key}/stream`, `GET /api/sessions/{key}/messages`, `GET /api/sessions/{key}`: any key whose `session.user_id` matches the authenticated user. The web UI can show Discord history, cron history, heartbeat history — read-only — without being able to write into those streams. Impersonation isn't possible through a read.
+- The user-ownership check (`session.user_id == jwt.user_id`) applies to both verbs unchanged.
+
+**Consequences:** Frontend retains a clean inbox into its own web-channel sessions. Internal session namespaces stay sealed against impersonation. The web UI can render any of the user's session histories (the multi-tab "show me what my agent said on Discord today" view) without exposing a forge primitive. No block-list bookkeeping — adding a new channel namespace later doesn't require remembering to deny-list it.
+
 ---
 
 ## 10. Safety
@@ -890,7 +1015,7 @@ No system-prompt rule is added. The wrap itself is the signal — the agent lear
 
 - **File tools** (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_dir`, `glob`, `grep`) — byte-level operations through `workspace_fs`. Read and write content, never interpret it.
 - **`message`** — delivers text/media to a channel. No execution.
-- **`web_fetch`** — HTTP GET/POST with hardcoded RFC-1918 block (ADR-052). Content is returned as bytes; server does not evaluate.
+- **`web_fetch`** — HTTP GET/POST. When dispatched to the server site, the unconditional block-list (RFC-1918, 100.64/10, link-local, loopback, IPv6 equivalents — ADR-052) applies. Content is returned as bytes; server does not evaluate.
 - **`cron`** — schedules future agent invocations. Does not itself execute anything.
 - **`file_transfer`** — moves bytes between server and a device. No execution.
 
@@ -905,22 +1030,74 @@ Absent, deliberately: `exec`, `python`, `eval`, any code-execution tool (on the 
 
 Admin is trusted. Agent is not. The shape of "admin explicitly installs; agent calls tools through protocol" keeps the blast radius bounded to what the MCP itself exposes.
 
-### ADR-073 · Client-side code execution is sandboxed by default; user-opted to unrestricted
+### ADR-073 · Client sandboxing — two distinct jails: file-tool jail (in-process, OS-agnostic) + subprocess jail (out-of-process, OS-specific)
 
 **Status:** accepted
-**Context:** The client's purpose is precisely the opposite of the server's — it exists to give the agent code-execution capability on the user's device (shell commands, MCP subprocesses, file writes that users will then run themselves). That necessarily creates a risk surface.
-**Decision:** Defense-in-depth with two explicit tiers, user-selected per device:
+**Context:** The client's purpose is the opposite of the server's — it exists to give the agent code-execution capability on the user's device (shell commands, MCP subprocesses, file writes that users will then run themselves). That necessarily creates a risk surface. Plexus runs on Linux (dev-ops boxes), macOS (laptops), and Windows (engineer workstations); a single sandbox primitive doesn't span all three. Nanobot's lesson: file-tool path validation in code is OS-agnostic and load-bearing; bwrap is additional protection for subprocesses on Linux only.
+**Decision:** **Two distinct jail mechanisms**, both controlled by `fs_policy`:
 
-1. **`fs_policy = "sandbox"` (default).** On Linux, `exec` and client-side MCP subprocesses run inside a `bwrap` jail rooted at the device's `workspace_path`. The jail read-binds `/usr`, `/bin`, `/lib`, `/etc/ssl/certs`, etc. (minimum to make a subprocess function), binds `workspace_path` read-write, tmpfs-mounts everything else. No access to `$HOME`, no access to files outside the workspace, no access to host env beyond a minimal whitelist (`PATH`, `HOME`, `LANG`, `TERM`).
-2. **`fs_policy = "unrestricted"`.** Sandbox disabled. Agent runs `exec` + subprocesses with the client process's full privileges. **Toggle requires typed-device-name confirmation** (ADR-051).
+#### Jail 1 — file-tool jail (in-process, Rust path validation, OS-agnostic)
 
-**Platform coverage in v1:** Linux (bwrap) only. Non-Linux clients effectively run unrestricted even if `fs_policy="sandbox"` is set, because the sandbox primitive isn't available. Future: macOS `sandbox-exec`, Windows Job Objects / AppContainer. Not blockers for v1.
+Every file tool implemented in `plexus-client` (`read_file`, `write_file`, `edit_file`, `delete_file`, `delete_folder`, `list_dir`, `glob`, `grep`, `notebook_edit`) calls a shared helper — `resolve_in_workspace(path: &str) -> Result<PathBuf>` in `plexus-common/src/tools/path.rs` — before any disk operation. The helper:
+
+1. Expands `~` and resolves relative paths against `device.workspace_path`.
+2. Calls `Path::canonicalize()` to dereference symlinks.
+3. Verifies the resolved absolute path is `starts_with(device.workspace_path.canonicalize())`.
+4. Rejects with `WorkspaceError::PathOutsideWorkspace` otherwise.
+
+This is **mandatory on every platform** — Linux, macOS, Windows — because it's pure Rust, no OS primitive required. The agent's file tools cannot escape `workspace_path` regardless of OS. Hard guarantee. Matches nanobot's `_resolve_path()` pattern (`nanobot/agent/tools/filesystem.py:17–33`).
+
+#### Jail 2 — subprocess jail (out-of-process, OS-specific)
+
+`exec` and client-side MCP subprocesses spawn child processes. Path validation in Rust doesn't help once the subprocess is running — it can do whatever the host lets it. So this jail is OS-dependent:
+
+| OS | v1 mechanism | What it does | What's deferred |
+|---|---|---|---|
+| **Linux** | `bwrap` jail rooted at `workspace_path` | Filesystem-only isolation; network open. Mount list matches nanobot exactly (see below). | — |
+| **macOS** | none | Subprocess runs with full user privileges. Env-stripped (see below). | `sandbox-exec` profile (Apple-deprecated but still used by Claude Code, Cursor; ~200 LoC + macOS testing). |
+| **Windows** | none | Subprocess runs with full user privileges. Env-stripped. | AppContainer (multi-week scope) or Windows Sandbox (heavy install). |
+
+**Linux bwrap mount list** (`--ro-bind-try`, matches nanobot exactly):
+- `/usr`, `/bin`, `/lib`, `/lib64` — binaries + dynamic linker.
+- `/etc/alternatives` — Debian alternatives symlinks.
+- `/etc/ssl/certs` — TLS root certificates.
+- `/etc/resolv.conf` — DNS resolution (without this, `curl example.com` fails).
+- `/etc/ld.so.cache` — dynamic linker cache.
+
+`workspace_path` is bind-mounted read-write at its same absolute path. Everything else is `tmpfs`. Host env stripped to `PATH`, `HOME`, `LANG`, `TERM`.
+
+#### `fs_policy` controls both jails together
+
+| `fs_policy` | File-tool jail | Subprocess jail |
+|---|---|---|
+| `"sandbox"` (default) | enforced (all OSes) | Linux: bwrap. macOS/Windows: env-stripped only. |
+| `"unrestricted"` | **lifted** — agent's file tools can read/write anywhere on the host | Linux: no bwrap. macOS/Windows: env-stripped only. |
+
+Matches nanobot's behavior (`nanobot/agent/loop.py:286–288` — `allowed_dir = workspace if (restrict_to_workspace or sandbox) else None`). `unrestricted` is a coherent "this is my dev box, agent has my privileges" mode.
+
+Toggling to `unrestricted` requires typed-device-name confirmation (ADR-051).
+
+#### Network is NOT isolated (Linux bwrap)
+
+`bwrap` is filesystem-only in Plexus — we deliberately do not pass `--unshare-net`. The agent retains full host network access. Intentional: agents that can't run `pip install`, `npm install`, or `curl` aren't useful as coding agents. The sandbox prevents exfiltration of host files (e.g. `~/.ssh/id_rsa`), not network probes. Network-egress controls live in `web_fetch`'s per-device whitelist (ADR-052), explicitly framed as capability declarations, not enforced boundaries — `exec curl` always bypasses them.
+
+#### Environment stripping (all OSes, even unrestricted)
+
+Even in `unrestricted` mode, the env passed to subprocesses is stripped to a small allow-list before exec:
+- **Linux/macOS:** `PATH`, `HOME`, `LANG`, `TERM`.
+- **Windows:** `SYSTEMROOT`, `COMSPEC`, `USERPROFILE`, `HOMEDRIVE`, `HOMEPATH`, `TEMP`, `TMP`, `PATHEXT`, `PATH`, `APPDATA`, `LOCALAPPDATA`, `ProgramData`, `ProgramFiles`, `ProgramFiles(x86)`, `ProgramW6432` (matches nanobot, `tests/tools/test_exec_platform.py:65–73`).
+
+Secrets in `$GITHUB_TOKEN`, `$AWS_SECRET_ACCESS_KEY`, etc. don't leak to agent-run processes regardless of `fs_policy` or OS.
+
+#### Client config masking (Linux only)
+
+The client process stores its device token at `~/.config/plexus/client.yaml` (or `$XDG_CONFIG_HOME/plexus/client.yaml`). The Linux bwrap jail `tmpfs`-masks the parent of that path so even an `fs_policy=sandbox` agent's subprocesses can't read it. Client startup refuses any `workspace_path` that overlaps the config directory on every platform (validation error → process exits before any session opens), so even on macOS/Windows where the subprocess jail doesn't exist, the file-tool jail + workspace boundary together keep the config out of reach.
 
 **Consequences:**
-- **Trust model is explicit.** Server protects itself (ADR-072); client protects the user *with the user's consent.* A user who flips to unrestricted or runs Plexus on a non-Linux platform without a sandbox primitive accepts that the agent runs with their full user permissions.
-- **The sandbox is a defense, not a guarantee.** `bwrap` namespace isolation is strong but not unbreakable — notable escapes exist for adjacent kernel bugs, privileged capabilities, or misconfigurations. Plexus documents the risk in the device setup UI.
-- **Environment isolation applies even in unrestricted mode for shell.** We strip host env to a small whitelist before exec, so secrets in `$GITHUB_TOKEN` etc. don't leak to agent-run processes. (Inherited from nanobot's pattern.)
-- **Future sandbox primitives slot in via `fs_policy` values.** Adding macOS support means adding a `fs_policy="sandbox-darwin"` variant or extending the existing `sandbox` enum. No protocol change.
+- **Cross-platform sandbox is real, just narrower.** All three OSes get the file-tool jail; only Linux gets the subprocess jail in v1. Sandbox mode means "the agent's file tools cannot escape the workspace; on Linux, exec/MCP subprocesses are also jailed." Honest framing in the device-setup UI.
+- **The sandbox is a defense, not a guarantee.** `bwrap` namespace isolation is strong but not unbreakable; macOS/Windows sandbox modes are weaker by design. Plexus documents the risk in the device setup UI.
+- **Future sandbox primitives slot in via `fs_policy` mechanism.** Adding macOS support means shipping a `sandbox-exec` profile + wrapper code; Windows means tackling AppContainer. No protocol change.
+- **`unrestricted` is the same name on every OS** — coherent semantics: file tools can roam, subprocesses run with full host privileges (env still stripped).
 
 ### ADR-074 · Trust model summary
 
@@ -944,6 +1121,7 @@ Admin is trusted. Agent is not. The shape of "admin explicitly installs; agent c
 - **The user's own agent going off the rails.** If a user instructs their agent to `rm -rf ~` on their own unrestricted device, the agent will comply. That's a user-ergonomics + sandbox policy question, not a platform security question.
 - **Compromised LLM provider.** If the admin-configured LLM starts returning malicious tool calls, the agent will attempt them. In sandbox mode this is bounded to the workspace; in unrestricted, the user has accepted the risk.
 - **Partners on shared channels.** If Alice shares a Discord channel with Bob, Bob's untrusted-wrapped messages reach the agent. Wrap + system prompt teach the agent to reject instructions from non-partners (ADR-007). Not a cryptographic guarantee.
+- **Quota DoS via noisy allowed-users.** If an allowed user (a non-partner human the partner has authorized to message the agent on a shared channel — e.g. a coworker added for after-hours ops) spams files or messages and burns the partner's storage / LLM quota, mitigation is the partner removing them from their per-channel allow-list. Not a platform-level concern.
 
 ---
 
@@ -981,6 +1159,123 @@ When an agent writes a file, the open Workspace tab doesn't auto-refresh. User r
 ### ADR-070 · No multi-instance-coordination for heartbeat
 Heartbeat tick runs per-process. If two servers run the same DB, both would fire heartbeats. Single-node deployment avoids this. Coordinating across nodes requires leader election or advisory locks — deferred.
 
+### ADR-103 · No multi-server multiplexing in plexus-client
+One client process talks to exactly one Plexus server. `PLEXUS_DEVICE_TOKEN` is a single value, the WS connection is a single endpoint, all in-memory state (config from `hello_ack`, in-flight tool calls, MCP sessions) is single-server. Users who need to participate in multiple Plexus deployments run the binary twice with different env vars. Adds no extra plumbing — separate processes are already isolated by OS.
+
+---
+
+## 12. LLM Provider
+
+### ADR-101 · OpenAI chat completions API only; LLM config is admin-API-set, not env
+
+**Status:** accepted
+**Context:** Plexus needs an LLM. The choices: (a) ship a per-provider client trait (Anthropic Messages API, OpenAI Chat Completions, Bedrock, Gemini, etc. — each with its own request/response/tool-call shape), (b) speak one wire format and let the admin put a translation gateway in front for everything else. Option (a) has been the prior-Plexus pattern and produced provider-switching bugs, vision-strip drift, and tool-call-format edge cases.
+**Decision:** **OpenAI chat completions API ONLY.** Plexus speaks one request shape, one response shape, one tool-call format. If an admin wants Anthropic / Bedrock / Gemini / a local model, they put a gateway in front (LiteLLM, an OpenAI-compatible proxy, or the provider's own OpenAI-compat endpoint) and configure Plexus to talk to it. Format translation lives in the gateway, not in Plexus.
+
+The admin configures the LLM via the admin REST API — **not env vars**. Five keys persist in `system_config`:
+
+| Key | Type | Purpose |
+|---|---|---|
+| `llm_endpoint` | string | Base URL of the OpenAI-compatible API (e.g. `https://api.openai.com/v1`, `http://litellm:4000/v1`). |
+| `llm_api_key` | string | Bearer credential the server uses on outbound requests. |
+| `llm_model` | string | Model name passed in the request body (e.g. `gpt-4o`, `gpt-5-codex`, `anthropic/claude-opus-4-7` if the gateway routes it). |
+| `llm_max_context_tokens` | integer | The LLM's hard context-window size in tokens (e.g. `128000` for gpt-4o, `200000` for gpt-5-class). Counted with `tiktoken-rs` (ADR-025) against the full chat-completions prompt — system + tools + history + new turn. |
+| `llm_compaction_threshold_tokens` | integer | Headroom that triggers compaction (default `16000`, ADR-028). When `llm_max_context_tokens − tiktoken_count(prompt) < llm_compaction_threshold_tokens`, the bus fires stage-1 compaction. The summary's `max_output_tokens` is `threshold − 4000` (= `12000` at the default), reserving 4k headroom for the next user turn. |
+
+Set via `PATCH /api/admin/config`. Read via `GET /api/admin/config`. No `LLM_*` env vars; the only env vars relevant to LLM behavior are `DATABASE_URL` (so the server can read these keys at startup) and the JWT/auth secrets.
+
+**Consequences:** No provider abstraction trait, no per-provider modules, no vision-format adapters per provider — vision retry (ADR-026) targets a single request shape. Switching the model is a `PATCH` away. Switching the *provider* is "stand up LiteLLM, change `llm_endpoint` and `llm_api_key`" — handled outside Plexus. Admin operating overhead (one extra container if they want non-OpenAI) is the trade we're willing to make for codebase simplicity.
+
+---
+
+## 13. Distribution
+
+### ADR-102 · Distribution targets — Linux-only server (musl), all-three-OS client; GitHub Releases as the sole channel
+
+**Status:** accepted
+**Context:** Plexus serves a heterogeneous user base — Linux dev-ops boxes, macOS leadership, Windows engineers — but the production server is overwhelmingly Linux. We need a release strategy that ships single-binary artifacts for the realistic deployment matrix without taking on distro-packaging or container-distribution burden.
+**Decision:**
+
+**Targets:**
+
+| Crate | Targets | Linkage |
+|---|---|---|
+| **plexus-server** | `linux-x86_64`, `linux-aarch64` | musl static |
+| **plexus-client** | `linux-x86_64`, `linux-aarch64`, `darwin-x86_64`, `darwin-aarch64`, `windows-x86_64.exe` | musl on Linux; native libc on macOS/Windows |
+
+The server's macOS/Windows targets are deliberately omitted in v1 — production deployment is overwhelmingly Linux, and supporting Windows server adds non-trivial code complexity (UNC path normalization for `messages.content` path-text markers, Windows symlink + junction handling in `workspace_fs` per ADR-045, ACL semantics for `skills/` validation). Admins who want to run the server on macOS/Windows can `cargo build --release` and accept untested status. Revisit post-M3 if real demand emerges.
+
+**Linux uses musl.** All Plexus dependencies are pure Rust (sqlx, rustls, axum, tungstenite, rmcp), so musl-static linking produces one binary per architecture that runs on every distro from ancient CentOS to current Alpine without modification. No need for Debian/CentOS/RHEL-specific builds. Trade-offs (slower musl malloc, historically funky DNS resolver) are negligible for a network-bound service.
+
+**Naming:** `plexus-{server,client}-v{X.Y.Z}-{os}-{arch}[.exe]`. Server tarball includes the embedded frontend bundle (per ADR-002). Client is a single static binary.
+
+**Channel:** **GitHub Releases only**, tagged per version. No Docker images in v1 (revisit when there's first-real-deployment demand). No APT/YUM repos. No Homebrew tap. `cargo install --git github.com/<owner>/plexus` works as a fallback for users who already have a Rust toolchain and want to track main.
+
+**M3 frontend integration:** the **Settings → Devices** tab surfaces a download link section. Frontend reads the deployed server's `GET /api/version` and renders direct links to the GitHub Release assets pinned to that exact version (so a deployment running v0.3.4 doesn't push users a v0.4.0 client that may not handshake against the older protocol). User-agent detection picks the matching binary as the primary CTA; the other targets sit behind a "Other platforms" disclosure.
+
+**Consequences:** One channel to maintain (GitHub Releases). One binary per (crate × target). Linux distro-independence comes for free via musl. Frontend's download UX is version-correct by construction. Future container/distro-package channels add zero ADR debt because GitHub Releases is just "the artifact store" — anything else is a republishing layer over it.
+
+### ADR-104 · plexus-client CLI surface, env vars, and failure semantics
+
+**Status:** accepted
+**Context:** plexus-client is a long-running daemon-style process invoked by the user (or systemd / launchd / Windows service / `nohup ./plexus-client &`). It needs the smallest possible startup contract — env vars in, no config wizard, no flags for the common path. Failure modes also need clear conventions so users on three OSes know what "broken" looks like.
+**Decision:**
+
+#### Env vars (both required for `run`)
+
+| Var | Example | Purpose |
+|---|---|---|
+| `PLEXUS_DEVICE_TOKEN` | `plexus_dev_abc123...` | Device identity + auth (ADR-091, ADR-097). Created by the user via `POST /api/devices`, shown once in the frontend. |
+| `PLEXUS_SERVER_URL` | `https://company.plexus.com` (prod) or `http://localhost:8080` (dev) | Base URL with scheme. Client derives the WS endpoint by swapping `http(s)` → `ws(s)` and appending `/ws/device`. No path component supported in v1 (server is at the URL root; deployments behind path-prefix proxies are out of scope). |
+
+Missing or empty env var → friendly stderr message + exit non-zero.
+
+#### CLI subcommands
+
+```
+plexus-client run           # default subcommand if invoked with no args
+plexus-client version       # print "plexus-client v0.X.Y (protocol v1)" and exit
+plexus-client logout        # deregister this device server-side, then clear local config
+```
+
+No other subcommands in v1. No `doctor` (failure modes self-explain), no `status` (use the web UI's Devices tab), no `--config` flag (env vars carry everything).
+
+#### `logout` semantics
+
+`logout` is **local-only**. It removes `~/.config/plexus/` (or `$XDG_CONFIG_HOME/plexus/`) and exits zero. The device token remains valid server-side — full revocation is the user's action via the frontend Devices tab (`DELETE /api/devices/{name}`). The CLI prints:
+
+```
+Logged out locally. The device token is still valid server-side.
+Revoke it via Settings → Devices on the web UI to fully deregister.
+```
+
+No new API endpoint required. The client never makes a REST call during normal operation — everything goes over WS. Server-side deregister is intentionally a frontend action so that "I lost my laptop" still works (user revokes from any browser, no need to recover the missing device first).
+
+#### Sandbox fallback (Linux + `fs_policy=sandbox` + bwrap missing)
+
+**Silent fallback to env-stripped subprocess execution.** If the device's `fs_policy=sandbox` but `bwrap` isn't on the host's `PATH`, the client logs a warning at startup ("`bwrap` not found; subprocesses will run env-stripped without filesystem isolation. Install with `apt install bubblewrap` or set fs_policy=unrestricted to silence this warning.") and proceeds. File-tool jail (ADR-073) is unaffected — it's pure Rust path validation, no OS primitive needed. This matches nanobot's behavior on macOS/Windows extended to Linux-without-bwrap.
+
+#### Initial connect retry — backoff forever
+
+Client never gives up reaching the server. On startup, if the WS handshake fails (DNS error, TCP refused, TLS error, 4xx response, etc.):
+
+- Retry with the same exponential backoff used post-handshake (PROTOCOL.md §1.3): 1s, 2s, 4s, 8s, 16s, 30s, 30s, ..., capped at 30s with ±20% jitter.
+- Log each attempt to stderr.
+- Never exit on its own; only SIGTERM / SIGINT / OS shutdown stops it.
+
+Rationale: the typical deployment is `systemd Restart=always` or equivalent, so the daemon should be self-healing rather than die-and-be-restarted. For interactive debugging the user can `Ctrl-C`. No `--exit-on-error` flag in v1; add later if a real use case appears.
+
+#### Local config dir contents (v1)
+
+`~/.config/plexus/` exists primarily so the Linux bwrap jail can `tmpfs`-mask it (ADR-073). In v1 the directory is **empty** — env vars carry all state, every WS reconnect re-fetches config via `hello_ack`, no local cache, no log file (logs go to stderr; user redirects via shell or systemd journal). Future versions may cache the last `hello_ack` for faster startup; for now, simplicity wins.
+
+**Consequences:**
+- Single startup contract: two env vars + one subcommand. Documents in 30 seconds.
+- `logout` is a real action with a real server-side effect, not a placeholder.
+- Sandbox fallback prioritizes "agent keeps working" over "fail fast" — admin sees the warning in logs and can fix later.
+- Backoff-forever pairs cleanly with systemd / launchd / Windows service supervision; no separate "should I exit?" decision tree.
+- Empty config dir keeps install/uninstall trivially `~/.config/plexus/` = the entire footprint.
+
 ---
 
 ## Appendix A · Key Design Principles
@@ -1013,7 +1308,7 @@ For contributors migrating from the old codebase, here's what changed and why:
 | WebSocket for browser chat | REST + SSE | ADR-003 |
 | `InboundEvent.sender_id`, `.identity.is_partner` | Neither field on InboundMessage | ADR-007, ADR-008 |
 | Rate limiting in bus | None in v1 | ADR-056 |
-| Per-user SSRF whitelist on `web_fetch` | Hardcoded RFC-1918 block | ADR-052 |
+| Per-user SSRF whitelist on `web_fetch` | Server: hardcoded block (no override). Client: per-device whitelist exceptions (capability declaration, not sandbox) | ADR-052 |
 | `/api/files` ephemeral cache | Workspace canonical | ADR-044 |
 | `vision_stripped` on session state | Retry at provider layer only | ADR-026 |
 | Session = long-lived actor task + mpsc inbox | Session = DB row + transient lock | ADR-011 |

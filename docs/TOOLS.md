@@ -27,6 +27,7 @@ This is a *design* document. Use it during implementation as the source of truth
 - **Timeouts are per-tool** (ADR-075). No central dispatcher wrapper. Some tools expose `timeout` in their schema (agent-tunable); others enforce internal-only timeouts.
 - **Path policy** (ADR-043): relative paths are accepted and resolve to the **personal workspace on the target device**. On server, that's `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`; on a client, it's the device's `workspace_path`. Absolute paths are also accepted. **Shared workspaces always require absolute paths** (`/production_department/sprint.md`) — they have no implicit relative base.
 - **Workspace writes funnel through `workspace_fs`** server-side (ADR-045). It owns quota check, SKILL.md validation, skills-cache invalidation, and symlink-escape protection.
+- **All file tools enforce a workspace boundary in code** (ADR-073, file-tool jail). Every shared file tool (`read_file`, `write_file`, `edit_file`, `delete_file`, `delete_folder`, `list_dir`, `glob`, `grep`, `notebook_edit`) calls `resolve_in_workspace()` in `plexus-common/src/tools/path.rs` before any disk op — canonicalize → check `starts_with(workspace_root)` → reject with `WorkspaceError::PathOutsideWorkspace` otherwise. This is OS-agnostic Rust and active when `fs_policy="sandbox"` (default). It is **the only thing keeping file tools in their lane on macOS and Windows**, where the bwrap subprocess jail doesn't exist. Lifted only when the device is `fs_policy="unrestricted"` (typed-name confirmation per ADR-051).
 - **Every tool result is wrapped** (ADR-095): the content string returned to the LLM is prefixed with `[untrusted tool result]: ` at construction time. Uniform across all tools — web_fetch body, exec stdout, read_file output, MCP response, everything. The wrap is the signal; no system-prompt rule.
 
 ---
@@ -44,14 +45,14 @@ This is a *design* document. Use it during implementation as the source of truth
 | `glob` | shared | plexus-common | server + client | Find files by glob pattern |
 | `grep` | shared | plexus-common | server + client | Search file contents |
 | `notebook_edit` | shared | plexus-common | server + client | Edit Jupyter notebook cells |
+| `web_fetch` | shared | plexus-common | server + client | HTTP fetch — server has hardcoded private-IP block, clients have default block + per-device whitelist exceptions (ADR-052) |
 | `message` | server-only | plexus-server | plexus-server | Deliver text/media/buttons to a channel chat |
 | `file_transfer` | server-only | plexus-server | plexus-server | Copy or move files within/across devices (Plexus addition) |
 | `cron` | server-only | plexus-server | plexus-server | Add/list/remove scheduled agent invocations |
-| `web_fetch` | server-only | plexus-server | plexus-server | HTTP fetch with RFC-1918 block |
 | `exec` | client-only | plexus-client | plexus-client | Execute a shell command on a device |
-| `mcp_<server>_<tool>` | dynamic | (rmcp) | wherever the MCP is installed | Wrapped MCP-provided tool |
+| `mcp_<server>_<tool>`, `mcp_<server>_resource_<name>`, `mcp_<server>_prompt_<name>` | dynamic | (rmcp) | wherever the MCP is installed | Wrapped MCP capabilities — tools, resources, prompts (ADR-048) |
 
-9 shared + 4 server-only + 1 client-only = 14 first-class tools, plus any number of MCP-wrapped tools.
+10 shared + 3 server-only + 1 client-only = 14 first-class tools, plus any number of MCP-wrapped tools.
 
 Schemas below are the **source** schemas (what gets written in code). The agent sees these plus the merger's additions per ADR-071 (`plexus_device` property on routing-only tools, enum extension on intrinsic-device tools).
 
@@ -547,9 +548,67 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 
 ---
 
+### `web_fetch`
+
+**Lives in:**
+- Schema: `plexus-common/src/tools/web_fetch.rs`
+- Server impl: `plexus-server/src/tools/web_fetch.rs` — applies the unconditional server block-list.
+- Client impl: `plexus-client/src/tools/web_fetch.rs` — applies the same default block-list, plus per-device `ssrf_whitelist` exceptions.
+
+**Purpose:** Fetch a URL and extract readable content (HTML → markdown/text). Available on server and any connected client; the agent picks the dispatch site via `plexus_device` (ADR-052). Use the server site for public URLs; use a client site to reach declared internal services in the user's network (e.g. an internal company API at `10.180.20.30:8080`).
+
+**Source schema (matches nanobot):**
+```json
+{
+  "name": "web_fetch",
+  "description": "Fetch a URL and extract readable content (HTML → markdown/text). Output is capped at maxChars (default 50 000). Works for most web pages and docs; may fail on login-walled or JS-heavy sites.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "URL to fetch"
+      },
+      "extractMode": {
+        "type": "string",
+        "enum": ["markdown", "text"],
+        "default": "markdown"
+      },
+      "maxChars": {
+        "type": "integer",
+        "minimum": 100
+      }
+    },
+    "required": ["url"]
+  }
+}
+```
+
+**Merge-time injection:** standard shared-tool injection — `plexus_device` is added with enum = `["server"] + connected_clients`. The agent picks where the fetch dispatches.
+
+**Mechanism:**
+- Both sites parse the URL, resolve DNS, then check the resolved IP against the policy. Re-resolve before connecting (mitigates DNS rebinding) and verify the actual connect-target IP against the policy.
+- **Server site — block-list (no exception):**
+  - RFC-1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+  - 100.64.0.0/10 carrier-grade NAT (covers Tailscale's 100.x range)
+  - Link-local (169.254.0.0/16)
+  - Loopback (127.0.0.0/8, ::1)
+  - IPv6 ULA `fc00::/7` and link-local `fe80::/10`
+- **Client site:** same default block-list, plus `device.ssrf_whitelist` (host or `host:port` entries) overrides the block. Whitelist editable via `PATCH /api/devices/{name}/config`.
+- **Capability declaration, not sandbox** (ADR-052, ADR-073): the client whitelist is a declarative tool path for known internal services. The agent can still bypass it via `exec curl <ip>` because `bwrap` does not isolate network. Documented as such.
+- Fetches via `reqwest`, 10s connect + 30s total timeout. Uses a readability extractor (jina/readability-style) to convert HTML → `extractMode` output. Output capped at `maxChars` (default 50,000, agent-overridable).
+- Tool result content is wrapped per ADR-095 with `[untrusted tool result]: ` before the LLM sees it — uniform with all other tool results.
+
+**Timeout:** 30s total, 10s connect.
+**Result cap:** 50,000 characters (tool's own cap via `maxChars`). Shared 16k global cap (ADR-076) doesn't apply — web_fetch's cap is explicit in schema.
+**Errors:** `NetworkError::PrivateAddressBlocked`, `NetworkError::WhitelistMiss`, `NetworkError::DNSFailed`, `NetworkError::Timeout`, `NetworkError::HttpError`.
+**Related ADRs:** 050 (per-device config), 052 (block-list + per-device whitelist), 073 (network-not-isolated), 074 (untrusted content treatment), 095 (result wrap).
+
+---
+
 ## Server-only tools
 
-These four tools have no client-side counterpart. Their implementations live entirely in `plexus-server/src/tools/`. The agent reaches them by NOT specifying a `device` argument (or by the schema not having one), since they are inherently server-orchestrated.
+These three tools have no client-side counterpart. Their implementations live entirely in `plexus-server/src/tools/`. The agent reaches them by NOT specifying a `plexus_device` argument (or by the schema not having one), since they are inherently server-orchestrated.
 
 ### `message`
 
@@ -764,56 +823,6 @@ These four tools have no client-side counterpart. Their implementations live ent
 
 ---
 
-### `web_fetch`
-
-**Lives in:** `plexus-server/src/tools/web_fetch.rs`
-
-**Purpose:** Fetch a URL and extract readable content (HTML → markdown/text). Hardcoded SSRF protection blocks RFC-1918 / link-local / loopback / CGNAT (ADR-052).
-
-**Source schema (matches nanobot):**
-```json
-{
-  "name": "web_fetch",
-  "description": "Fetch a URL and extract readable content (HTML → markdown/text). Output is capped at maxChars (default 50 000). Works for most web pages and docs; may fail on login-walled or JS-heavy sites.",
-  "input_schema": {
-    "type": "object",
-    "properties": {
-      "url": {
-        "type": "string",
-        "description": "URL to fetch"
-      },
-      "extractMode": {
-        "type": "string",
-        "enum": ["markdown", "text"],
-        "default": "markdown"
-      },
-      "maxChars": {
-        "type": "integer",
-        "minimum": 100
-      }
-    },
-    "required": ["url"]
-  }
-}
-```
-
-**Mechanism:**
-- Parses the URL, resolves DNS, then checks the resolved IP against the hardcoded blocklist (ADR-052):
-  - RFC-1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-  - Link-local (169.254.0.0/16)
-  - Loopback (127.0.0.0/8, ::1)
-  - Carrier-grade NAT (100.64.0.0/10)
-- Re-resolves before connecting (mitigates DNS rebinding) and verifies the actual connect-target IP against the blocklist.
-- Fetches via `reqwest`, 10s connect + 30s total timeout. Uses a readability extractor (jina/readability-style) to convert HTML → `extractMode` output. Output capped at `maxChars` (default 50,000, agent-overridable).
-- Tool result content is wrapped per ADR-095 with `[untrusted tool result]: ` before the LLM sees it — uniform with all other tool results.
-
-**Timeout:** 30s total, 10s connect.
-**Result cap:** 50,000 characters (tool's own cap via `maxChars`). Shared 16k global cap (ADR-076) doesn't apply — web_fetch's cap is explicit in schema.
-**Errors:** `NetworkError::PrivateAddressBlocked`, `NetworkError::DNSFailed`, `NetworkError::Timeout`, `NetworkError::HttpError`.
-**Related ADRs:** 052 (RFC-1918 block), 074 (untrusted content treatment), 095 (result wrap).
-
----
-
 ## Client-only tools
 
 ### `exec`
@@ -847,11 +856,15 @@ These four tools have no client-side counterpart. Their implementations live ent
 **Merge-time injection:** `plexus_device` is added as a brand-new top-level property (carrying `x-plexus-device: true`) with an enum listing **only connected client devices** (no `"server"` — the server is not a code execution environment per ADR-072), and is appended to `required`. If no clients are connected, `exec` is omitted from the merged tool list entirely.
 
 **Mechanism:**
-- **fs_policy=sandbox (default, Linux):** wraps the command in `bwrap` per ADR-073:
-  - `workspace_path` mounted read-write at workspace_path.
-  - `/usr`, `/bin`, `/lib`, `/lib64`, `/etc/ssl/certs` mounted read-only (minimum to make subprocesses function).
-  - Tmpfs everything else.
-  - No `$HOME` access outside workspace, no host env access beyond the whitelist.
+- **fs_policy=sandbox (default, Linux):** wraps the command in `bwrap` per ADR-073. Mount list matches nanobot exactly, all `--ro-bind-try`:
+  - `/usr`, `/bin`, `/lib`, `/lib64` — binaries + dynamic linker.
+  - `/etc/alternatives` — Debian alternatives symlinks.
+  - `/etc/ssl/certs` — TLS root certificates.
+  - `/etc/resolv.conf` — DNS resolution (without this, `curl example.com` fails inside the jail).
+  - `/etc/ld.so.cache` — dynamic linker cache.
+
+  Plus: `workspace_path` bind-mounted read-write at its same absolute path; `tmpfs` over the client config directory (`~/.config/plexus/` per ADR-073) so the device token is unreadable from the jail; `tmpfs` everywhere else. No `$HOME` access outside the workspace.
+- **Network is NOT isolated** (ADR-073). `curl`, `pip install`, `npm install` work from inside the jail. The sandbox blocks filesystem exfiltration, not network probes.
 - **fs_policy=unrestricted:** runs the command directly with the client process's full privileges. Only set after the user types the device name to confirm (ADR-051).
 - **Environment stripping** applies even in unrestricted mode: only `PATH`, `HOME`, `LANG`, `TERM` pass through. Secrets in `$GITHUB_TOKEN` etc. don't leak into agent-run subprocesses.
 - **Output capture:** combined stdout + stderr. Both streamed; on timeout, process is killed (SIGTERM, then SIGKILL after 1s grace).
@@ -865,16 +878,21 @@ These four tools have no client-side counterpart. Their implementations live ent
 
 ---
 
-## MCP tools
+## MCP tools, resources, prompts
 
-MCP-provided tools are wrapped at install time and exposed to the agent through the same merge pipeline as native tools.
+MCP servers advertise three capability surfaces — **tools**, **resources**, **prompts**. Plexus wraps all three uniformly into the per-user tool registry (ADR-047), so the agent sees one flat list of callable entries. Naming by surface (ADR-048):
 
-### Wrapping
+| Surface | Wrapped name | Action when called |
+|---|---|---|
+| Tool | `mcp_<server>_<tool_name>` | `call_tool(name, args)` |
+| Resource | `mcp_<server>_resource_<resource_name>` | `read_resource(uri)` (URI built from agent args per ADR-099) |
+| Prompt | `mcp_<server>_prompt_<prompt_name>` | `get_prompt(name, args)` → text-joined messages per ADR-048 |
 
-For each MCP server `<server_name>` and each tool `<tool_name>` it advertises:
+The typed infixes (`_resource_` / `_prompt_`) make cross-surface name collisions impossible by construction. Tools stay unprefixed for back-compat with the original ADR-048 convention.
 
-- **Wrapped name:** `mcp_<server_name>_<tool_name>` (ADR-048).
-- **Source schema:** the MCP-provided schema is taken **as-is** — wrap is purely a name prefix. No parameter injection, no enum modification, no description rewrite at wrap time.
+### Wrapping — tools
+
+- **Source schema:** the MCP-provided `input_schema` is taken **as-is** — wrap is purely a name rewrite.
 - **Merge-time injection:** at session tool-schema-build time, `plexus_device` is added as a brand-new top-level property (with `x-plexus-device: true`), enum listing every install site of this MCP, appended to `required` (same mechanism as the routing-only-device pattern for shared tools, ADR-071). The reserved `plexus_` prefix ensures no collision with any MCP tool's native args — even if an MCP advertises a field named `device`, the merger's injected field never overwrites it.
 - **Lives in:** `plexus-common/src/mcp/` provides the wrapping. Server-side admin-installed MCPs are managed in `plexus-server/src/mcp/`; client-side per-device MCPs in `plexus-client/src/mcp/`.
 
@@ -891,9 +909,7 @@ For each MCP server `<server_name>` and each tool `<tool_name>` it advertises:
 }
 ```
 
-Post-wrap (name only) becomes `mcp_minimax_web_search` with the schema otherwise unchanged.
-
-Post-merge, the agent sees:
+Post-wrap becomes `mcp_minimax_web_search`, source schema unchanged. Post-merge, the agent sees:
 
 ```json
 {
@@ -914,23 +930,95 @@ Post-merge, the agent sees:
 }
 ```
 
-`plexus_device` enum lists every device (and "server" if admin-installed) where `minimax` is mounted. The agent picks one to dispatch to. The reserved `plexus_` prefix is the collision-proof guarantee: even if an MCP tool had its own `device` field (say, selecting a GPU), the merge step would not touch it.
+`plexus_device` enum lists every site where `minimax` is mounted. The reserved `plexus_` prefix is the collision-proof guarantee: even if an MCP tool had its own `device` field (say, selecting a GPU), the merge step would not touch it.
 
-### Schema-collision handling
+### Wrapping — resources
 
-If the same `mcp_<server>_<tool>` name is reported with different schemas across install sites (e.g. an admin-installed `mcp_github_*` and a per-device install of the same MCP at a different version), the install is rejected with HTTP 409 Conflict (ADR-049). User must rename one of the installs to keep both side-by-side.
+- **Source schema:** auto-generated from the resource's URI (ADR-099). Static URIs produce a zero-arg schema; URI templates are parsed for `{var}` placeholders, each becoming a required `string` property.
+- **At call time:** the wrapper substitutes agent-supplied values back into the URI before invoking `read_resource`. Static resources call `read_resource` with the literal URI.
+- **Merge-time injection:** identical to tools — `plexus_device` injected at the top level.
+
+**Worked example — static URI.** Resource `index` at `notion://workspace/index` from MCP server `notion`:
+
+```json
+{
+  "name": "mcp_notion_resource_index",
+  "input_schema": { "type": "object", "properties": {}, "required": [] }
+}
+```
+
+Post-merge adds `plexus_device` (the only required arg). Calling it returns the resource's content as `tool_result`.
+
+**Worked example — URI template.** Resource `page` at `notion://page/{page_id}`:
+
+```json
+{
+  "name": "mcp_notion_resource_page",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "page_id": { "type": "string", "description": "URI template variable: page_id" }
+    },
+    "required": ["page_id"]
+  }
+}
+```
+
+Post-merge adds `plexus_device`. Agent calls `mcp_notion_resource_page(page_id="abc", plexus_device="server")` → wrapper computes `notion://page/abc` → `read_resource("notion://page/abc")`.
+
+If a template variable name collides with the reserved `plexus_device`, wrapping fails at install time with a clear error (the MCP author renames the placeholder).
+
+### Wrapping — prompts
+
+- **Source schema:** auto-generated from the prompt's `arguments` array. Each `{name, description, required}` becomes a string property; `required` flag is honored.
+- **At call time:** invokes `get_prompt(name, args)`. The result is a list of `PromptMessage` objects; the wrapper extracts text content from every message and joins with `"\n"` (matches nanobot `mcp.py:408–421`). Non-text content blocks are stringified via `Display`. Empty result → `"(no output)"`.
+- **Merge-time injection:** identical to tools.
+
+**Worked example.** Prompt `code_review` from MCP server `helper` with arguments `[{name:"language", required:true}, {name:"style", required:false}]`:
+
+```json
+{
+  "name": "mcp_helper_prompt_code_review",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "language": { "type": "string" },
+      "style": { "type": "string" }
+    },
+    "required": ["language"]
+  }
+}
+```
+
+Calling returns the rendered prompt messages as a single concatenated string in the `tool_result.content` (then wrapped per ADR-095).
+
+### Collision handling
+
+Two cases, both rejected at install time (ADR-049):
+
+1. **Within-server dup** — same MCP server advertises two capabilities that wrap to the same name (only intra-surface dups can fire, since `_resource_` / `_prompt_` infixes prevent cross-surface collisions). Plexus diverges from nanobot's silent overwrite — install is rejected with a structured error.
+2. **Cross-install schema drift** — same wrapped name (e.g. `mcp_minimax_web_search`) is reported with a different schema across install sites. Returns `409 Conflict` with a structured diff body covering all three surfaces. User renames one of the installs to keep both side-by-side.
 
 ### Dispatch
 
-When the agent calls an MCP-wrapped tool, the server looks up which install site matches the `plexus_device` enum value and forwards the call to that site's `McpSession` (server-side or via a `ToolCall` frame to the client).
+When the agent calls any MCP-wrapped entry, the server looks up which install site matches the `plexus_device` enum value and forwards the call to that site's `McpSession` (server-side or via a `tool_call` frame to the client). Resources and prompts dispatch identically to tools.
+
+### `enabled` filter (ADR-100)
+
+Each MCP server config carries an optional `enabled: [<glob>...]` allow-list, matched against the post-wrap name. When present, only matching entries register; when absent, every advertised capability registers (default-allow). Single field, three surfaces.
+
+Examples:
+- `enabled: ["mcp_notion_*"]` — every notion entry (tools, resources, prompts).
+- `enabled: ["mcp_notion_search", "mcp_notion_resource_*"]` — the `search` tool plus every resource.
+- `enabled: ["mcp_*_resource_*"]` — every resource from every MCP, no tools or prompts.
 
 ### Timeout
 
-Per-MCP. The MCP's own session timeout governs; rmcp's defaults apply unless overridden in the MCP server's config.
+Per-MCP. The MCP's own session timeout governs; rmcp's defaults apply unless overridden in the MCP server's config. Same for tools, resources, prompts.
 
 ### Related ADRs
 
-047 (shared MCP client), 048 (naming), 049 (collision rejection), 071 (merge).
+047 (shared MCP client + three surfaces), 048 (naming + prompt-output convention), 049 (collision rejection), 071 (merge), 099 (URI template expansion), 100 (`enabled` filter).
 
 ---
 
@@ -1007,7 +1095,9 @@ def build_tool_schemas(user_id):
         extend_plexus_device_enums(s, extra=connected)
         merged.append(s)
 
-    # 4. MCP tools — inject plexus_device, enum = install sites
+    # 4. MCP entries (tools + resources + prompts) — inject plexus_device,
+    #    enum = install sites. ADR-048 typed-infix naming makes the surface
+    #    irrelevant here; merger treats every entry uniformly.
     for group in collect_mcp_groups(user_id):
         if not all_canonical_schemas_match(group):
             reject_install(group)             # ADR-049 collision
@@ -1092,7 +1182,7 @@ The agent sees errors as normal tool results and adapts on the next iteration (A
 - **`install_skill`** — dropped per ADR-084. Skills are installed via `file_transfer` from a client (where the user runs the installer) or via the web UI.
 - **`read_skill`** — same. Skills are read via `read_file`.
 - **`bulk_*` operations** — single-file ops only (ADR-067, superseded by ADR-087 for the rename case).
-- **Server `web_fetch` with private-IP whitelist** — server SSRF block is hardcoded (ADR-052). Per-device whitelists exist for clients only.
+- **Server `web_fetch` with private-IP whitelist** — server site of `web_fetch` has an unconditional block-list (ADR-052). The per-device `ssrf_whitelist` only applies to the client site.
 - **`mkdir`** — implicit via `write_file` (ADR-088).
 - **`rmdir`** — covered by `delete_folder` (no separate empty-only variant; too niche).
 

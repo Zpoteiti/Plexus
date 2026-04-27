@@ -27,7 +27,7 @@ info:
     | `notebook_edit` | `PATCH /api/workspace/notebook/{path}` | Body: cell_index, new_source, cell_type, edit_mode |
     | `file_transfer` | `POST /api/workspace/transfer` | Body matches tool args |
     | `cron` | `POST /api/cron` + CRUD | REST uses verbs (POST/GET/DELETE); tool uses single action-enum (nanobot-aligned) |
-    | `web_fetch` | — | No REST parallel (browser fetches directly) |
+    | `web_fetch` | — | No REST parallel (browser fetches directly). Tool is shared (server + client sites) per ADR-052. |
     | `message` | — | No REST parallel (browser composes via chat) |
     | `exec` | — | No REST parallel (rare UI need in v1) |
 
@@ -308,6 +308,16 @@ paths:
         message and spawning the agent task. Subscribe to
         `GET /api/sessions/{id}/stream` to receive the agent's reply
         events.
+
+        **Session-key allow-list (ADR-098).** Only session keys whose
+        channel prefix is `web:` (the frontend's namespace) are accepted
+        on this endpoint. Any other prefix (`cron:`, `heartbeat:`,
+        `discord:`, `telegram:`, ...) is rejected with `400 Bad Request`.
+        Discord/Telegram/cron/heartbeat sessions receive their messages
+        exclusively from their own pipelines (channel adapters,
+        scheduler, heartbeat synthesizer) — REST is the frontend's
+        inbox only. Reads (GET messages, GET stream) remain open for
+        any session the authenticated user owns.
       requestBody:
         required: true
         content:
@@ -317,7 +327,7 @@ paths:
               required: [content]
               properties:
                 content:
-                  description: Anthropic-style content blocks (text + image_url). Strings are accepted as shorthand for a single text block.
+                  description: OpenAI chat-completions content blocks (text + image_url). Strings are accepted as shorthand for a single text block. (ADR-101 — Plexus speaks OpenAI chat completions only.)
                   oneOf:
                     - { type: string }
                     - type: array
@@ -331,6 +341,10 @@ paths:
                 type: object
                 properties:
                   message_id: { type: string }
+        '400':
+          description: |
+            Session key is not a frontend-writable prefix. Only `web:`
+            session keys may receive POSTed messages (ADR-098).
 
   /api/sessions/{id}/stream:
     parameters:
@@ -781,7 +795,7 @@ paths:
                 items: { $ref: '#/components/schemas/Device' }
     post:
       tags: [Devices]
-      summary: Register a new device (returns the token ONCE)
+      summary: Register a new device (returns the token ONCE — ADR-097)
       requestBody:
         required: true
         content:
@@ -810,6 +824,10 @@ paths:
           description: |
             Device created. The response includes the token ONCE — it is
             never returned again. Lost tokens require `POST /api/devices/{name}/regenerate-token`.
+            Client startup uses the token via the `PLEXUS_DEVICE_TOKEN` env
+            var; everything else (workspace_path, fs_policy, ssrf_whitelist,
+            etc.) is fetched from the server's `hello_ack` frame at the
+            WebSocket handshake (see PROTOCOL.md, ADR-096 / ADR-097).
           content:
             application/json:
               schema:
@@ -1053,9 +1071,27 @@ paths:
       tags: [Admin]
       summary: Get system-wide config (admin only)
       description: |
-        Returns every row of the `system_config` table. Includes the
-        global `quota_bytes`, LLM provider config, shared-workspace
-        quota ceiling, etc.
+        Returns every row of the `system_config` table. Known keys:
+
+          - `quota_bytes` (int) — per-user workspace quota (ADR-046).
+          - `llm_endpoint` (string) — base URL of the OpenAI-compatible
+            chat-completions API (e.g. `https://api.openai.com/v1`,
+            `http://litellm:4000/v1`). ADR-101.
+          - `llm_api_key` (string) — bearer credential the server uses on
+            outbound LLM requests. ADR-101.
+          - `llm_model` (string) — model name passed in the request body
+            (e.g. `gpt-4o`). ADR-101.
+          - `llm_max_context_tokens` (int) — LLM context window in tokens
+            (e.g. `128000`). Counted with tiktoken-rs (ADR-025). ADR-101.
+          - `llm_compaction_threshold_tokens` (int) — headroom that
+            triggers compaction (default `16000`). Compaction fires when
+            `llm_max_context_tokens − tiktoken_count(prompt) <
+            llm_compaction_threshold_tokens`. Summary `max_output_tokens`
+            = `threshold − 4000`. ADR-028, ADR-101.
+
+        `additionalProperties: true` because deployments may carry
+        deployment-local keys; everything not listed above is treated
+        as opaque metadata by Plexus.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1150,10 +1186,15 @@ paths:
       tags: [Admin]
       summary: Replace the server-side MCP list (admin only)
       description: |
-        Collision detection per ADR-049: if any new MCP has a
-        schema-conflicting name against an existing install, returns
-        `409 Conflict` with a structured diff and does not apply
-        any changes.
+        Collision detection per ADR-049, two cases:
+          - **Within-server dup** — an MCP server advertises two
+            capabilities that wrap to the same name (intra-surface only;
+            cross-surface collisions impossible by ADR-048's typed-infix
+            naming). Returns `409 Conflict` and does not apply.
+          - **Cross-install schema drift** — a new MCP's wrapped name
+            matches an existing install with a different `input_schema`
+            across any surface (tool / resource / prompt). Returns
+            `409 Conflict` with a structured diff and does not apply.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1265,7 +1306,7 @@ components:
         created_at: { type: string, format: date-time }
 
     ContentBlock:
-      description: Anthropic/OpenAI-style content block. See ADR-059.
+      description: OpenAI chat-completions content block. See ADR-059, ADR-101.
       oneOf:
         - type: object
           required: [type, text]
@@ -1381,7 +1422,7 @@ components:
         channel: { type: string }
         chat_id: { type: string }
         one_shot: { type: boolean }
-        last_fired_at: { type: string, format: date-time, nullable: true }
+        last_fired_at: { type: [string, "null"], format: date-time }
         created_at: { type: string, format: date-time }
 
     TransferRequest:
@@ -1412,7 +1453,16 @@ components:
       properties:
         name:
           type: string
-          description: Identifier used in wrapped tool names (`mcp_<name>_<tool>`).
+          description: |
+            Identifier used in wrapped capability names. Plexus exposes
+            tools, resources, and prompts uniformly into the agent's tool
+            registry (ADR-047/048):
+              - tools     → `mcp_<name>_<tool_name>`
+              - resources → `mcp_<name>_resource_<resource_name>`
+              - prompts   → `mcp_<name>_prompt_<prompt_name>`
+            Typed infixes (`_resource_` / `_prompt_`) prevent cross-surface
+            name collisions; intra-surface dups are rejected at install
+            time (ADR-049).
         command:
           type: array
           items: { type: string }
@@ -1420,6 +1470,18 @@ components:
         env:
           type: object
           additionalProperties: { type: string }
+        enabled:
+          type: array
+          items: { type: string }
+          description: |
+            Optional allow-list of glob patterns matched against the
+            post-wrap entry name (ADR-100). When present, only matching
+            entries register. When absent, every advertised capability
+            registers (default-allow). Examples:
+              - `["mcp_notion_*"]` — every notion entry
+              - `["mcp_notion_search", "mcp_notion_resource_*"]` — one
+                tool plus every resource
+              - `["mcp_*_resource_*"]` — every resource from every MCP
         description: { type: string }
 
     #

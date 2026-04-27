@@ -2,7 +2,7 @@
 
 The shape of the context every agent turn sees. Split into two pieces so prompt caching stays effective:
 
-- **Static system prompt** — identical byte-for-byte across a session's turns. Cached by the provider (Anthropic / OpenAI).
+- **Static system prompt** — identical byte-for-byte across a session's turns. Cached by the OpenAI-compatible provider (ADR-101).
 - **Runtime context block** — fresh each turn. Injected as a text block glued onto the user message, not the system prompt. Contains only what changes per turn (current time, channel, chat_id).
 
 ---
