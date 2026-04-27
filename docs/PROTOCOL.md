@@ -170,7 +170,7 @@ There is no per-device concurrency cap in v1. Practical bound is the agent's own
 
 ### 3.5 `register_mcp`
 
-Client → server. Sent immediately after `hello_ack` if the client has any configured MCP servers, and again whenever the MCP set changes. Carries all three capability surfaces (tools, resources, prompts) for every MCP — wrapping/naming per ADR-048.
+Client → server. Sent **on every fresh `hello_ack`** (initial handshake AND every reconnect) AND whenever the MCP snapshot changes locally (ADR-105). Carries all three capability surfaces (tools, resources, prompts) for every MCP that successfully spawned, plus a `spawn_failures` array for MCPs the client tried to start but couldn't.
 
 ```jsonc
 {
@@ -198,17 +198,42 @@ Client → server. Sent immediately after `hello_ack` if the client has any conf
         }
       ]
     }
+  ],
+  "spawn_failures": [
+    {
+      "server_name": "google",
+      "error": "subprocess exited code 1; stderr tail: 'GOOGLE_API_KEY env var not set'",
+      "failed_at": "2026-04-27T..."
+    }
   ]
 }
 ```
 
 The client sends raw MCP shapes — `uri` for resources, `arguments` for prompts. The server-side registrar runs the wrap step (ADR-048): name rewriting, URI template parsing for resources, schema generation for prompts, then validation against the existing install set.
 
-Server validates against ADR-049:
-- **Within-server dup** (e.g. two tools named `search` from one MCP) → `error{code:"mcp_within_server_collision"}` and the entire registration for that server is rejected.
-- **Cross-install schema drift** (e.g. `mcp_minimax_web_search` already exists with a different `input_schema` from another install site) → `error{code:"mcp_schema_collision"}` and the client's MCP set for that server is rejected (the client retains the MCP locally; the agent does not see it).
+**Why re-sent on every reconnect:** the server's per-WS-session tools cache is invalidated when the WS session ends. After reconnect, the server expects a fresh `register_mcp` to repopulate. Skipping it is a bug. MCP subprocesses on the client survive reconnect (ADR-105) — the client tracks local state independently, but always re-advertises to the server.
 
-On success, the server caches the wrapped schemas, invalidates the user's tool-registry cache, and the next agent turn sees the new entries merged in alongside any server-side or other-device MCPs.
+#### Rejection flow (ADR-049)
+
+Three rejection cases, all server-orchestrated:
+
+| Case | Triggered by | Code |
+|---|---|---|
+| Within-server dup | Two capabilities from one MCP wrap to the same name | `mcp_within_server_collision` |
+| Cross-install schema drift | Same wrapped name with different schema across install sites | `mcp_schema_collision` |
+| Spawn failed on client | Subprocess exited / 30s startup timeout | `mcp_spawn_failed` (carried in `spawn_failures` field, not as a separate `error` frame) |
+
+When the server detects any of these on processing `register_mcp`:
+
+1. Server emits `error{code: <one of the above>, message: <detail>}` over WS for collision cases (logged client-side; informational since the client already pushed its state).
+2. Server **removes** the offending MCP entry from `devices.mcp_servers` JSONB (or `system_config.server_mcp` for admin scope).
+3. Server pushes a corrective `config_update` (§3.6) with the new device config sans the rejected MCP.
+4. Client's worker queue (ADR-105) processes the `config_update`, tearing down the MCP's subprocess locally if it was running.
+5. Server emits an `mcp_rejected` event on the per-user SSE channel `GET /api/me/events` (ADR-106) so the frontend shows a clean message.
+
+Coarse-grained: if any one capability within an MCP server triggers rejection, the **whole** MCP server is removed. Simpler than partial removal. User re-adds with a tighter `enabled` filter (ADR-100) or a renamed server.
+
+On success: the server caches the wrapped schemas, invalidates the user's tool-registry cache, and the next agent turn sees the new entries merged in alongside any server-side or other-device MCPs.
 
 ### 3.6 `config_update`
 
@@ -343,19 +368,21 @@ Either side may emit. Receiving an `error` does not require reconnecting unless 
 
 Standard WS close codes 1000–1015, plus Plexus-specific:
 
-| Code | Meaning |
-|---|---|
-| `1000` | Normal close (e.g. client shutdown). |
-| `1001` | Going away (server restart). Client should reconnect. |
-| `4401` | Authentication failed (token invalid / revoked). Do NOT retry. |
-| `4408` | Heartbeat timeout. Client should reconnect after backoff. |
-| `4409` | Protocol version unsupported. Reconnect with newer client. |
+| Code | Reason in payload | Client behavior |
+|---|---|---|
+| `1000` | — | Normal close (e.g. client shutdown). |
+| `1001` | — | Going away (server restart). Reconnect with backoff. |
+| `4401` | `{"code":"unauthorized"}` | Token invalid / revoked. **Exit, do NOT retry** (ADR-104). |
+| `4408` | — | Heartbeat timeout. Reconnect with backoff. |
+| `4409` | `{"code":"version_unsupported", "server_version":"...", "protocol_version":"...", "client_minimum":"...", "upgrade_url":"..."}` | Protocol version mismatch. **Exit code 78, do NOT retry** (ADR-104, ADR-107). Client renders a stderr error using the payload fields and points the user at `upgrade_url`. |
 
 ---
 
 ## 6. Versioning
 
-Protocol version is a single string in `hello.version`. v1 is the version specified in this doc. Future breaking changes bump the major number; the server may accept multiple versions during a transition window. There is no minor/patch versioning at the protocol level — additive changes (new frame types, new fields) don't bump the version, but recipients MUST ignore unknown fields (forward compat).
+Protocol version is a single string in `hello.version`. v1 is the version specified in this doc. Bumps **only** when the WS frame format changes in a wire-incompatible way (renamed frame, removed required field, type change). Additive changes (new optional JSON field, new frame type) do NOT bump — recipients MUST ignore unknown fields and tolerate absent optional fields (forward compat).
+
+Protocol version is independent from the binary release version (ADR-107). Most binary releases ship without a protocol bump; the `4409` mismatch only fires when a release does break the wire format. The server may accept multiple protocol versions during a transition window if the breaking change has a graceful migration path.
 
 ---
 

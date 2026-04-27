@@ -710,15 +710,27 @@ Merge-time injection (ADR-071) is uniform across all three: `plexus_device` is a
 
 **Consequences:** Wrap is pure name-rewriting + schema-shape generation; merge is where cross-site schema comparison + `plexus_device` injection happens. Cleanly separates concerns. The reserved `plexus_` prefix on the routing field ensures we never clobber an MCP capability's own args, even if the MCP author used a field named `device`. The agent learns three name patterns and treats them uniformly thereafter.
 
-### ADR-049 · MCP collision rejection — same name within a server, or schema drift across install sites
+### ADR-049 · MCP collision rejection — server orchestrates DB cleanup + corrective config_update
 
 **Status:** accepted
-**Decision:** Two distinct collision cases, both rejected at install time:
+**Decision:** Three distinct rejection cases, all handled by the same server-orchestrated cleanup flow:
 
-1. **Within-server cross-surface or intra-surface dup.** If the same MCP server advertises two capabilities that wrap to the same name — two tools named `search`, or any internal duplicate — the install is rejected. (Cross-surface collisions like tool `search` vs resource `search` are impossible by ADR-048's typed infix, so this rule fires only on within-surface dups, which indicate a malformed MCP server.) Plexus diverges from nanobot here: nanobot silently overwrites (`registry.py:19–22`); Plexus rejects with a structured error so the agent never sees a half-registered MCP.
-2. **Cross-install-site schema drift.** Same wrapped name (e.g. `mcp_minimax_web_search`) MUST have an identical source schema across every install site. On install (`PUT /api/devices/{name}/mcp` for device-level, `PUT /api/admin/server-mcp` for admin-level), the incoming MCP's capabilities are introspected (10-second timeout for admin server-side via rmcp; already-cached for device-side via `register_mcp.tools/resources/prompts`). If any schema differs from an existing install of the same `<server>` name, return `409 Conflict` with a structured diff body covering all three surfaces.
+1. **Within-server cross-surface or intra-surface dup.** If the same MCP server advertises two capabilities that wrap to the same name — two tools named `search`, or any internal duplicate — the install is rejected. (Cross-surface collisions like tool `search` vs resource `search` are impossible by ADR-048's typed infix, so this rule fires only on within-surface dups, which indicate a malformed MCP server.) Plexus diverges from nanobot here: nanobot silently overwrites (`registry.py:19–22`); Plexus rejects so the agent never sees a half-registered MCP.
+2. **Cross-install-site schema drift.** Same wrapped name (e.g. `mcp_minimax_web_search`) MUST have an identical source schema across every install site. If any schema differs from an existing install of the same `<server>` name, the new registration is rejected.
+3. **Spawn failure on the client side** (ADR-105). The MCP subprocess failed to start, exited during `list_tools/resources/prompts`, or hit the 30-second startup timeout. Same rejection treatment as collisions.
 
-**Consequences:** Never auto-version / suffix. User renames their local install if they want two versions to coexist. Single canonical schema per wrapped name. Within-server dups surface as registration failures (developer fixes their MCP) instead of mysterious silently-dropped capabilities.
+**The server is the orchestrator** — when any of the three fires:
+
+a. Server detects the rejection condition during `register_mcp` processing (cases 1, 2) or via the `spawn_failures` field on `register_mcp` (case 3, see PROTOCOL.md §3.5).
+b. Server **removes** the offending entry from the device's `mcp_servers` JSONB on `devices` (case 3) or from `system_config.server_mcp` (cases 1, 2 at admin scope).
+c. Server pushes a corrective `config_update` over WS to the client, which then tears down the rejected MCP's subprocess locally per the worker queue in ADR-105.
+d. Server emits a `mcp_rejected` event on the per-user SSE channel (ADR-106) so the frontend shows the user a clean error: *"GOOGLE was removed from mac-mini. Reason: schema_collision (Google Search input_schema differs from admin-installed GOOGLE)."*
+
+For the admin-side path (`PUT /api/admin/server-mcp`), case 1/2 still fires as `409 Conflict` synchronously on the HTTP request — admin sees the diff in the response body and chooses how to resolve. Device-side rejection is asynchronous (because the spawn happens after `PATCH /api/devices/{name}/config` returns), which is why we need the SSE channel.
+
+**Coarse-grained removal:** if any tool/resource/prompt within an MCP server triggers rejection, the **whole MCP server** is removed from config — not just the offending capability. Simpler implementation, simpler mental model. User re-adds with a tighter `enabled` filter (ADR-100) or a renamed server if they want partial coexistence.
+
+**Consequences:** Never auto-version / suffix. User renames their local install if they want two versions to coexist. Single canonical schema per wrapped name. Within-server dups, schema drift, and spawn failures all surface to the user via the same channel (per-user SSE) with a `reason` discriminator.
 
 ### ADR-099 · MCP resource templates — URI placeholders are surfaced as schema properties
 
@@ -753,6 +765,141 @@ Examples:
 - `enabled: ["mcp_*_resource_*"]` → every resource from every MCP, no tools or prompts.
 
 **Consequences:** Single mental model — one config field, one filter, three surfaces. Plexus divergence from nanobot, justified by symmetry. Users who want nanobot's tools-only behavior write `enabled: ["mcp_<server>_*"]` excluding the resource/prompt infixes — slightly more verbose but explicit.
+
+### ADR-105 · MCP subprocess lifecycle on plexus-client
+
+**Status:** accepted
+**Context:** plexus-client manages user-installed MCP subprocesses on each device. The lifecycle has to handle: initial spawn at handshake, additions and removals via `config_update`, subprocess crashes, schema drift after recovery, `enabled` filter changes, WS reconnects, and concurrent activity from parallel tool dispatch + config edits — all while remaining diagnostically useful when something breaks. This ADR locks the design after a Codex-driven review found 8 issues in an earlier draft.
+**Decision:**
+
+#### Per-MCP state model
+
+```
+process_state:  Spawning  →  Alive(session, schemas)  ←→  Dead(last_error, schemas)
+                              │                                │
+                              └── (process exit only) ─────────┘
+
+  Spawning  → on `list_tools/resources/prompts` success → Alive
+  Spawning  → on startup timeout (30s) / spawn failure  → not in map (cleaned up via ADR-049 path)
+  Alive     → on subprocess unexpected exit              → Dead
+  Dead      → on next config_update spawn attempt        → Spawning → Alive
+  Alive     → on config_update remove                    → teardown → not in map
+```
+
+`Dead` retains the last successful `schemas` so the agent's tool list (server-side `register_mcp` snapshot) stays stable across crashes — the only no-op transition that does NOT trigger `register_mcp` (B2 design: keep registered, error on call with diagnostic content). Calls to a Dead MCP return `tool_result(is_error=true, code='mcp_unavailable', content="MCP <name> is not running. Last error: <subprocess exit + stderr tail>. Reconfigure via Settings → Devices on the web UI.")`.
+
+#### Worker queue — full client-side serialization
+
+All state-mutating work runs on a **single tokio worker task** that pulls from one queue:
+
+```
+WS reader (cheap, never blocks):
+   ├─ ping → respond pong immediately
+   ├─ pong → mark heartbeat OK
+   ├─ binary frames → route to active transfer slot (in-flight tool call's IO)
+   └─ tool_call / config_update → push to worker queue
+
+Worker (single tokio task, processes one item at a time):
+   ├─ tool_call → dispatch → await → send tool_result
+   └─ config_update → reconcile MCP set → maybe send register_mcp
+```
+
+This eliminates transition races (Alive↔Dead during dispatch, spawn-vs-remove, rapid config edits) without generation counters or per-MCP locks. Trade-off: one device's tool calls don't run concurrently across sessions — chat's 30-second `exec` blocks heartbeat's `read_file` for 30s. Acceptable at Plexus scale (ADR-061 — hundreds of users, 1–2 active sessions per user typical). Heartbeat (`ping`/`pong`) and binary frames bypass the queue so `exec` doesn't trip the 70s heartbeat timeout (PROTOCOL.md §1.4).
+
+#### Initial spawn (A1, eager at handshake)
+
+On `hello_ack`, the worker spawns every configured MCP **in parallel** (each one independent — no cross-cancellation):
+
+```rust
+let mut spawns: FuturesUnordered<_> = configs.iter()
+    .map(|cfg| async move { (cfg.server_name.clone(), spawn_mcp(cfg).await) })
+    .collect();
+
+let mut alive = Vec::new();
+let mut failures = Vec::new();
+while let Some((name, result)) = spawns.next().await {
+    match result {
+        Ok((session, schemas)) => alive.push((name, session, schemas)),
+        Err(e) => failures.push((name, e)),
+    }
+}
+```
+
+`spawn_mcp` has a **30-second startup timeout** covering subprocess fork + initial rmcp handshake + `list_tools/resources/prompts`. Past 30s → SpawnError, MCP doesn't enter the map. `FuturesUnordered` keeps healthy MCPs from being cancelled when one fails — `try_join_all`'s wrong-failure-model semantics that the prior draft used.
+
+After all results collect, the worker sends one `register_mcp` frame containing both `mcp_servers` (successful spawns) and `spawn_failures` (failed ones). Server processes both fields:
+- `mcp_servers` → register tools (collision check applies per ADR-049).
+- `spawn_failures` → same treatment as collision rejection per ADR-049: remove from `devices.mcp_servers`, push corrective `config_update`, emit `mcp_rejected` SSE event.
+
+#### Config_update — diff and reconcile (D = match A1)
+
+When a `config_update` arrives, the worker:
+
+1. **Diff** `new_config.mcp_servers` against the current local map.
+2. **Spawn** any newly-listed servers via the same `spawn_mcp` flow as initial handshake (`FuturesUnordered`, 30s timeout, capture failures).
+3. **Teardown** any locally-running servers no longer in config — forceful kill (ADR-105 teardown details below).
+4. **Re-introspect** if the schemas of any unchanged server might have drifted (Dead MCP getting respawned: fresh `list_tools/resources/prompts` runs naturally as part of `spawn_mcp` — we always have fresh schemas after a successful spawn).
+5. **Rebuild the registration snapshot** from current state:
+   ```
+   snapshot = ⋃ across all (Alive ∪ Dead) MCPs:
+                 { schemas filtered by that MCP's `enabled` list }
+   ```
+6. **Compare** new snapshot to last-sent. **Send `register_mcp`** if and only if the snapshot changed.
+
+Single algorithm covers every reason the snapshot might shift: subprocess added, removed, schema drifted on recovery, **`enabled` filter edited** (ADR-100 — filter changes ARE schema changes from the server's POV). Worker doesn't branch on which case fired.
+
+#### Crash recovery (B2 — keep registered)
+
+When an Alive subprocess exits unexpectedly:
+- Worker observes the `Child::wait()` future resolving with non-zero exit + stderr tail.
+- Transition Alive → Dead, retaining the cached schemas.
+- **No `register_mcp` change** (snapshot didn't shift; schemas stayed). Server cache stays warm.
+- Tool calls to this MCP return `mcp_unavailable` with the diagnostic content above.
+
+Recovery requires a fresh `config_update` from the user (e.g. they re-save device config in the frontend after fixing the underlying issue). On config_update, the worker re-runs `spawn_mcp` for any Dead entry whose config is still present; if successful, Dead → Alive, snapshot rebuilds, possibly sends `register_mcp` (only if the fresh schemas differ from cached, e.g. the user updated the underlying MCP package version).
+
+#### Teardown — forceful kill, cross-platform
+
+```rust
+async fn teardown_mcp(child: Child, io_pumps: Vec<JoinHandle<()>>) {
+    let _ = child.start_kill();      // SIGKILL on Unix, TerminateProcess on Windows (tokio handles both)
+    let _ = child.wait().await;      // reap, avoid Unix zombies
+    for pump in io_pumps {
+        pump.abort();                 // drop stdout/stderr reader tasks
+    }
+}
+```
+
+Forceful only in v1. MCP subprocesses use stdio (rmcp's `TokioChildProcess`), don't bind ports, are typically stateless. If a future MCP needs graceful shutdown, add Unix `SIGTERM` first via the `nix` crate (~25 lines). Not v1.
+
+#### WS reconnect
+
+MCP subprocesses **survive WS reconnect** — local lifecycle is independent of WS connectivity. On every fresh `hello_ack`:
+1. Worker treats the new config as a fresh `config_update` and runs the diff-and-reconcile flow.
+2. Worker **always** rebuilds and sends the `register_mcp` snapshot. The server's per-WS-session tools cache is invalidated when the WS session ended; we have to re-advertise on every reconnect, even if our local state is unchanged.
+
+The "no `register_mcp` on Alive→Dead" optimization survives but only **within** a single WS session.
+
+#### Three shared helpers
+
+```rust
+async fn spawn_mcp(config: &McpServerConfig) -> Result<(McpSession, McpSchemas), SpawnError>
+async fn teardown_mcp(child: Child, io_pumps: Vec<JoinHandle<()>>)
+fn build_register_mcp_frame(state: &McpMap) -> RegisterMcpFrame   // applies enabled filters
+```
+
+All three live in `plexus-client/src/mcp/`. The worker stitches them together for every lifecycle moment.
+
+#### Explicit non-goals in v1
+
+- **No auto-restart on crash.** Recovery is via `config_update` (user re-saves config).
+- **No proactive system-prompt mention** that "MCP X is currently down". Agent learns by trying, gets diagnostic error.
+- **No partial trickle registration.** One `register_mcp` per change-event keeps server cache invalidations bounded.
+- **No graceful SIGTERM path.** Forceful kill only.
+- **No cross-session parallelism** in tool dispatch. Worker queue is strict FIFO.
+- **No retry on initial spawn timeout.** 30s once; failure → ADR-049 rejection path.
+
+**Consequences:** Tight implementation (~150 LoC for the worker + helpers), zero generation counters, zero CAS dance, zero per-MCP locks. Race-condition surface area collapses to "subprocess crashes, the rmcp call returns an error, propagate normally per ADR-031" — which is just `Result<_, McpError>` propagation, not concurrency engineering. User-facing failure modes (collision, schema drift, spawn failure, filter change) all flow through the same server-orchestrated rejection path (ADR-049) and the same per-user SSE channel (ADR-106). Diagnostically useful via the structured `last_error` + reconfigure hint format.
 
 ---
 
@@ -950,6 +1097,28 @@ The `GET /api/sessions/{id}/messages` endpoint stays but narrows in purpose: it 
 - Replay payload at 50 messages is bounded (base64 images included — still a few hundred KB typical). Older batches come through the messages endpoint.
 - The original `final` event type dissolves: a terminal assistant message is just a persisted `message` event in the unified model. Transient events (`hint`) remain distinct because they're not persisted.
 - Multi-tab: opening a second tab replays the same history to that subscriber, live events broadcast to all SSE subscribers for the session. No extra coordination needed.
+
+### ADR-106 · Per-user SSE event channel for account-scoped notifications
+
+**Status:** accepted
+**Context:** ADR-093's chat SSE stream is **per-session** (`GET /api/sessions/{id}/stream`). Some events are **per-user** — they're not tied to any particular chat session: an MCP install was rejected on a device (ADR-049), a quota threshold was crossed, an LLM provider config validation failed, a device went offline. These don't fit cleanly into a per-session stream because the user might not have any chat session open when they fire, and they apply across all the user's surfaces (devices, channels, configs).
+**Decision:** A second SSE endpoint, `GET /api/me/events`, scoped to the authenticated user. Frontend opens it once per browser session (in addition to whatever per-session chat streams it has open) and keeps it alive for the duration of the page lifetime.
+
+Event types are user-scoped and asynchronous to any chat session:
+
+| Event | Payload | Triggered by |
+|---|---|---|
+| `mcp_rejected` | `{ device, server, reason: "schema_collision" \| "within_server_collision" \| "spawn_failed", detail }` | ADR-049 (collision on register) or ADR-105 (spawn failure on client) |
+| `device_offline` | `{ device, last_seen_at }` | WS heartbeat timeout (PROTOCOL.md §1.4) |
+| `device_online` | `{ device }` | WS handshake completed for a previously-offline device |
+| (future) `quota_warning` | `{ used_bytes, quota_bytes }` | Per-user quota crosses 90% threshold |
+| (future) `llm_config_invalid` | `{ key, error }` | LLM provider config validation failed at startup or after admin edit |
+
+Reconnect via `Last-Event-ID` using a per-user `event_id` cursor (UUIDs minted at emit time, persisted briefly server-side or replayed-from-memory if recent). Users opening the page after a long absence get nothing replayed — events are best-effort and ephemeral; if the user wasn't connected when one fired, they get the result via the normal data fetch (e.g. opening Settings → Devices shows the rejected device gone from the list).
+
+Auth: same JWT cookie as everything else (ADR-004). EventSource sends cookies natively.
+
+**Consequences:** Frontend has TWO SSE endpoints open: per-session chat stream(s) + one per-user event stream. Chat events stay where they are (session-scoped). Account-scoped notifications get a clean separate channel that doesn't pollute the chat protocol. Adding new account-scoped event types is additive — no breaking changes to chat. The endpoint is also useful for future features like live device-status indicators in the Devices tab and in-app notifications.
 
 ### ADR-094 · Runtime block is persisted per user message as historical metadata
 
@@ -1269,12 +1438,169 @@ Rationale: the typical deployment is `systemd Restart=always` or equivalent, so 
 
 `~/.config/plexus/` exists primarily so the Linux bwrap jail can `tmpfs`-mask it (ADR-073). In v1 the directory is **empty** — env vars carry all state, every WS reconnect re-fetches config via `hello_ack`, no local cache, no log file (logs go to stderr; user redirects via shell or systemd journal). Future versions may cache the last `hello_ack` for faster startup; for now, simplicity wins.
 
+#### Workspace directory bootstrap
+
+When `hello_ack` arrives carrying `workspace_path`, the client:
+
+1. **Validates non-overlap with config dir** (ADR-073). If `workspace_path` contains or equals `~/.config/plexus/`, refuse with friendly stderr error → exit. Catches the dangerous "user set workspace_path to `~/.config/`" case before any disk activity.
+2. **Auto-creates the directory if missing.** `tokio::fs::create_dir_all(workspace_path)` (mkdir -p semantics). Log `"Created workspace dir at <path>"` to stderr exactly once per process lifetime. mkdir failure (permissions, parent on a dead network mount) → friendly stderr error → exit.
+3. **Accepts the directory as-is if it exists**, whether empty or non-empty. No marker file, no init metadata, no validation. Plexus does **not** "own" the workspace — the user can legitimately point it at an existing folder like `~/projects/myrepo/` and the agent operates on existing files in place. Pairs with the `unrestricted` use case where the workspace might be `~/` itself.
+
+The "Plexus doesn't own the workspace" property means uninstall is just removing the binary + the config dir; user's files in the workspace are theirs and untouched.
+
+#### Graceful shutdown — cancel immediately on SIGTERM/SIGINT
+
+The client never tries to drain in-flight work on shutdown. On SIGTERM, SIGINT, or platform-equivalent (Windows console close):
+
+1. Stop the worker queue from accepting new items (cancellation token flipped).
+2. For each in-flight `tool_call` ID: send `tool_result(is_error=true, code='client_shutting_down', content='Client process is shutting down.')` over WS before closing.
+3. For each in-flight transfer slot: send `transfer_end(id, ok=false, error='client_shutting_down')`.
+4. Forceful kill on all MCP subprocesses and the in-flight `exec` subprocess (per ADR-105 teardown — `Child::start_kill()` cross-platform).
+5. Close WS with code 1001 ("going away").
+6. Exit zero.
+
+Rationale for not draining: service managers (systemd default `TimeoutStopSec=90s`, launchd default 20s, Windows SCM variable) escalate SIGTERM → SIGKILL fast. A "drain for up to 10 minutes" model would just mean "drain for ~25s then OS force-kills you mid-cleanup, losing all the things you DID want to send." Cancel-immediately is honest about what we control. The agent receives the `client_shutting_down` errors → ADR-031 handles them → next reconnect resumes the session cleanly. Reconnect-after-restart already handles the "cargo build was running" case via the standard tool-failure → agent retries pattern.
+
+#### Logging
+
+Logs go to stderr. Service-manager environments (systemd journal, launchd unified log, Windows SCM) capture stderr automatically; interactive users redirect with shell piping or read it live.
+
+**Backend:** `tracing` + `tracing-subscriber` (with `env-filter` + `time` features). Plain single-line text format in v1. JSON output is deferred — add a `--log-format=json` flag when there's a real ingestion-stack consumer (Loki, CloudWatch, ELK, etc.).
+
+**Verbosity control:** `EnvFilter` with default `INFO`. Operators override via `RUST_LOG`:
+
+```
+RUST_LOG=debug ./plexus-client run                                 # everything at DEBUG
+RUST_LOG=plexus_client=debug,plexus_common::mcp=trace ./plexus-client run   # targeted
+```
+
+Crate names use **underscores** in directives (`plexus_client`, not `plexus-client`) — this is `tracing-subscriber`'s convention. Document prominently or it becomes a "why doesn't my filter work" support burden. A convenience `--log-level=<level>` CLI flag is also accepted for users who don't want to learn `RUST_LOG` syntax; flag value seeds the filter and `RUST_LOG` overrides if both are set.
+
+**Subscriber config:**
+
+```rust
+tracing_subscriber::fmt()
+    .with_env_filter(filter)
+    .with_ansi(false)                              // never emit color codes — stderr is usually redirected; Windows mangles them in files
+    .with_timer(UtcTime::rfc_3339())               // UTC RFC3339 timestamps; same shape across all hosts; no local-tz drift
+    .with_target(false)                            // hide module path on INFO+ for cleaner one-liners
+    .with_file(false).with_line_number(false)      // file:line only at DEBUG/TRACE if the operator opts in
+    .init();
+```
+
+**INFO inventory — state transitions and failures only.** Per-call logs go to DEBUG to avoid drowning the lifecycle signal at hundreds of calls/minute.
+
+| Level | Logged |
+|---|---|
+| INFO | startup config summary (version, server URL host, workspace path); connection state changes (connect/disconnect/reconnect-attempt); MCP spawn/die/rejected with reason; sandbox-fallback-once; graceful shutdown observed |
+| WARN | tool errors that surface to the agent; sandbox unavailability; heartbeat degradation; MCP crashes (Alive→Dead) |
+| ERROR | startup failures (mkdir, env validation); WS handshake refusals; non-recoverable subprocess failures |
+| DEBUG | every tool dispatch + completion; config_update reconciliation diff; register_mcp send |
+| TRACE | frame-by-frame WS traffic; file-transfer chunk-by-chunk progress; MCP rmcp protocol traffic |
+
+**No periodic "I'm alive" heartbeats at INFO.** Use metrics/external monitoring if needed.
+
+**Structured fields, not format-string interpolation.** Use `tracing`'s typed-field syntax so the same call sites work cleanly when JSON output lands later:
+
+```rust
+// ❌ format-string interpolation:
+info!("Tool {} dispatched (id={}, device={})", name, id, device);
+
+// ✅ structured fields:
+info!(tool = %name, id = %id, device = %device, "Tool dispatched");
+```
+
+Stable field names: `tool`, `mcp_id`, `attempt`, `pid`, `exit_code`, `server_url_host`, `device`, `error`. Avoid free-form keys.
+
+**Secret redaction via the `secrecy` crate.** Every secret-bearing field on every struct uses `secrecy::SecretString` (with `zeroize` on drop). Custom `Debug`/`Display` impls exist on `SecretString` and never reveal the inner value — accidental `error!("config: {:?}", config)` is safe by construction. Affected fields:
+
+- `device_token` (the `PLEXUS_DEVICE_TOKEN` env var)
+- JWT bearer values
+- `mcp_servers.<name>.env` values (MCP API keys live here per ADR-050)
+- LLM `api_key` from `system_config` (server-side, ADR-101)
+
+Test gate: assert no `plexus_dev_*` or JWT-shaped string ever appears in captured log output across a representative test suite. Keeps the "never log secrets" rule from regressing as new code lands.
+
+#### Version mismatch — exit immediately, don't retry
+
+Most reconnect failures are transient (server restart, network blip) and the client retries forever per the "Initial connect retry" rule above. **Protocol version mismatch is the one exception** — retrying with the same broken binary will never succeed, and looping pretends it might.
+
+When the WS handshake closes with code `4409` (`version_unsupported`, see PROTOCOL.md §1.2), the close payload carries:
+
+```jsonc
+{
+  "code": "version_unsupported",
+  "server_version": "0.4.0",
+  "protocol_version": "2",
+  "client_minimum": "0.3.0",
+  "upgrade_url": "https://github.com/<owner>/plexus/releases/tag/v0.4.0"
+}
+```
+
+Client behavior:
+
+1. **ERROR-level log** to stderr with the literal upgrade URL: *"Server requires plexus-client v0.3.0+ (server is v0.4.0, protocol v2). This client is v0.2.1, protocol v1. Download a newer client at https://github.com/.../releases/tag/v0.4.0 ."*
+2. **Exit with code `78`** (`EX_CONFIG` from sysexits.h convention — "configuration error, don't bother restarting"). systemd users who want to suppress restart spam can add `RestartPreventExitStatus=78` to their unit file. We don't ship the unit file in v1 (per ADR-102) but document the suggestion in the README.
+3. **Do NOT enter the reconnect loop.** This is the only WS close code that breaks the retry-forever rule. WS code 4401 (token revoked) is the same pattern — exit, don't retry — but documented separately in ADR-104's logout/auth area.
+
+This pairs with ADR-102's M3 frontend integration: Settings → Devices in the web UI shows a download link pinned to the deployed server's version, so the user's "fix it" path is one click after they see the stderr message.
+
 **Consequences:**
 - Single startup contract: two env vars + one subcommand. Documents in 30 seconds.
 - `logout` is a real action with a real server-side effect, not a placeholder.
 - Sandbox fallback prioritizes "agent keeps working" over "fail fast" — admin sees the warning in logs and can fix later.
 - Backoff-forever pairs cleanly with systemd / launchd / Windows service supervision; no separate "should I exit?" decision tree.
 - Empty config dir keeps install/uninstall trivially `~/.config/plexus/` = the entire footprint.
+- Workspace bootstrap supports both "fresh dir for Plexus" and "point at my existing repo" workflows without a config flag.
+- Version mismatch fails fast and points users at the fix; doesn't generate restart-loop spam.
+
+### ADR-107 · Versioning policy — pre-1.0 collapsed-tier; protocol version is independent
+
+**Status:** accepted
+**Context:** Plexus releases binaries for plexus-server and plexus-client per ADR-102. Two versioning concerns interact: the **binary release tag** (what shows in `plexus-client version` and on GitHub Releases), and the **protocol version** (what's sent in the WS `hello` frame and checked at handshake). Both need a clear policy so users, ops, and downstream tooling know what bumps mean.
+**Decision:**
+
+#### Phase 1 — pre-1.0 (M0 onward, current)
+
+Binary release tags follow `0.m.x` with two-tier semantics (industry-common pre-1.0 / Cargo-ecosystem pattern):
+
+- `0.m.x → 0.m.x+1` — backwards-compatible release. Bug fix or new feature, lumped together (the API is unstable anyway, distinguishing isn't worth the policy overhead).
+- `0.m.x → 0.m+1.0` — potentially breaking change. Could be wire-protocol breaking, could be config schema breaking, could be a removed CLI flag.
+
+This is **not** strict SemVer (which has three tiers: MAJOR/MINOR/PATCH). Strict SemVer would require us to distinguish "feature" from "fix" at every release; pre-1.0 projects rarely benefit from that distinction.
+
+#### Phase 2 — post-1.0 (when API stabilizes)
+
+When Plexus reaches `1.0.0`, switch to **full SemVer**:
+
+- `n.m.x → n.m.x+1` — bug fix, backwards-compatible.
+- `n.m.x → n.m+1.0` — feature, backwards-compatible.
+- `n.m.x → n+1.0.0` — breaking change.
+
+The `1.0.0` cutover is itself the signal that the API has stabilized; before then, "we might break things between minor versions" is the contract.
+
+#### Protocol version is independent
+
+The wire-protocol version (`hello.version` in PROTOCOL.md §1.2) is a **separate string**, not derived from the binary version. It bumps **only** when the WS frame format changes in a wire-incompatible way:
+
+- Adding a new optional JSON field (e.g. `spawn_failures` on `register_mcp` per ADR-105) → no protocol bump. Old clients ignore the new field; new clients tolerate its absence.
+- Renaming a frame, changing a field's type, removing a required field, adding a required field → protocol bump.
+
+Most binary releases will NOT bump the protocol version — internal refactors, new tools, bug fixes, log changes, etc. don't touch the wire. The `4409` close code (handshake mismatch) only fires when the binary client genuinely speaks an older protocol the server can't accept.
+
+This means a stale-but-not-too-stale client (e.g. binary `v0.3.0` speaking protocol `v1`, against server `v0.4.5` speaking protocol `v1`) keeps working — they just miss out on the new features baked into the newer binary's local code.
+
+#### What goes where
+
+- **Binary version** (`0.m.x`): GitHub release tag, `Cargo.toml` `version`, `plexus-client version` output, frontend Settings → Devices download links pinned to it.
+- **Protocol version** (`"1"`, `"2"`, …): hardcoded constant in `plexus-common`, sent in `hello`, checked server-side at handshake. Server may accept multiple protocol versions during a transition window if the breaking change has a graceful migration path.
+- **`4409` close payload** carries both, plus `client_minimum` and `upgrade_url`, so the client can render an actionable error message (per ADR-104).
+
+**Consequences:**
+- Pre-1.0 phase has a simple two-tier release rhythm; admins know `0.m+1.0` means "read the changelog before upgrading."
+- Protocol version stays stable across most binary releases — most stale-client situations are silent feature-skip, not hard breakage.
+- The 1.0 cutover is the natural "we're stable now" milestone; happens organically when the API has settled and we don't expect more breaking changes.
+- README documents both versions: "plexus-client v0.3.1 (protocol v1)" so users know which to compare against the server.
 
 ---
 

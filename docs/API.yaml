@@ -226,6 +226,48 @@ paths:
       responses:
         '204': { description: Account deleted. }
 
+  /api/me/events:
+    get:
+      tags: [Me]
+      summary: SSE stream — per-user account-scoped events (ADR-106)
+      description: |
+        Server-Sent Events stream scoped to the authenticated user.
+        Carries account-scoped notifications that aren't tied to any
+        specific chat session: MCP rejections (ADR-049, ADR-105),
+        device offline/online transitions, future quota/config events.
+
+        The frontend opens this once per browser session and keeps it
+        alive for the page lifetime, in addition to whatever per-session
+        chat streams it has open (ADR-093).
+
+        **Event types:**
+
+        - `mcp_rejected` — an MCP server was removed from a device because
+          it failed to register or spawn. Payload includes `device`,
+          `server`, `reason` (`schema_collision` | `within_server_collision`
+          | `spawn_failed`), `detail`.
+        - `device_offline` — a device's WS heartbeat timed out
+          (PROTOCOL.md §1.4). Payload: `{ device, last_seen_at }`.
+        - `device_online` — a previously-offline device completed WS
+          handshake. Payload: `{ device }`.
+        - (future) `quota_warning`, `llm_config_invalid`, etc.
+
+        **Reconnect:** uses `Last-Event-ID` for the per-user `event_id`
+        cursor. Events are best-effort and ephemeral — if the user
+        wasn't connected when one fired, they get the result through
+        normal data fetches (e.g. opening Settings → Devices shows a
+        rejected MCP gone from the list).
+
+        OpenAPI does not model SSE first-class; event payloads are
+        described under `components.schemas` (`UserEvent*`).
+      responses:
+        '200':
+          description: SSE stream opened.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   #
   # --- Sessions ---
   #
@@ -1529,3 +1571,46 @@ components:
       required: [reason]
       properties:
         reason: { type: string, enum: [server_shutdown, session_deleted] }
+
+    #
+    # --- Per-user SSE event payloads (GET /api/me/events, ADR-106) ---
+    #
+    UserEventMcpRejected:
+      description: |
+        An MCP server was removed from a device because it failed to
+        register (collision per ADR-049) or failed to spawn on the client
+        (ADR-105). The DB has already been updated and a corrective
+        config_update has already been pushed to the client; this event
+        is the user-facing notification.
+      type: object
+      required: [kind, device, server, reason]
+      properties:
+        kind: { type: string, enum: [mcp_rejected] }
+        device: { type: string, description: Friendly device name (per-user UNIQUE per ADR-091). }
+        server: { type: string, description: The MCP server's identifier (the `<name>` in `mcp_<name>_<tool>`). }
+        reason:
+          type: string
+          enum: [schema_collision, within_server_collision, spawn_failed]
+        detail:
+          type: string
+          description: |
+            Human-readable failure reason. For collisions, names the
+            conflicting install site. For spawn_failed, includes exit
+            code + stderr tail.
+
+    UserEventDeviceOnline:
+      description: A device's WS handshake completed.
+      type: object
+      required: [kind, device]
+      properties:
+        kind: { type: string, enum: [device_online] }
+        device: { type: string }
+
+    UserEventDeviceOffline:
+      description: A device's WS heartbeat timed out (PROTOCOL.md §1.4).
+      type: object
+      required: [kind, device, last_seen_at]
+      properties:
+        kind: { type: string, enum: [device_offline] }
+        device: { type: string }
+        last_seen_at: { type: string, format: date-time }
