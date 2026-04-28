@@ -15,7 +15,12 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 secrecy = { workspace = true }
 zeroize = { workspace = true }
+tokio = { workspace = true }
+jsonschema = { workspace = true }
+async-trait = "0.1"
 
 [dev-dependencies]
 proptest = { workspace = true }
 pretty_assertions = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
