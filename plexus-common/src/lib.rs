@@ -17,6 +17,7 @@ pub mod consts;
 pub mod errors;
 pub mod protocol;
 pub mod secrets;
+pub mod tools;
 pub mod version;
 
 // Top-level re-exports for ergonomic access.
