@@ -38,4 +38,6 @@ pub use protocol::{
 };
 pub use secrets::{DeviceToken, JwtSecret, LlmApiKey};
 pub use tools::Tool;
+pub use tools::result::wrap_result;
+pub use tools::validate::{validate_args, validate_with};
 pub use version::{PROTOCOL_VERSION, crate_version};

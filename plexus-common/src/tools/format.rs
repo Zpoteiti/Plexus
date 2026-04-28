@@ -1,34 +1,31 @@
 //! Output formatting helpers for file tools.
 //!
-//! - [`prepend_line_numbers`] — render `LINE_NUM|content` for read_file output.
+//! - [`with_line_numbers`] — render `LINE_NUM|content` for read_file output.
 //! - [`truncate_head`] — head-only character clipping with marker.
 //!
 //! Both are pure UTF-8 safe.
+
+use std::fmt::Write;
 
 const TRUNCATION_MARKER: &str = "\n... (truncated)";
 
 /// Render `text` with each line prefixed by its 1-indexed line number,
 /// using `LINE_NUM|` as the separator (matches nanobot's read_file output).
 ///
-/// Trailing newlines are preserved. Blank lines are numbered.
-pub fn prepend_line_numbers(text: &str) -> String {
+/// Trailing newlines are preserved. Blank lines are numbered. Handles both
+/// `\n` and `\r\n` line endings via `str::lines()`.
+pub fn with_line_numbers(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
-    let has_trailing_newline = text.ends_with('\n');
-    let body = if has_trailing_newline {
-        &text[..text.len() - 1]
-    } else {
-        text
-    };
     let mut out = String::with_capacity(text.len() + 16);
-    for (i, line) in body.split('\n').enumerate() {
+    for (i, line) in text.lines().enumerate() {
         if i > 0 {
             out.push('\n');
         }
-        out.push_str(&format!("{n}|{line}", n = i + 1));
+        let _ = write!(out, "{}|{line}", i + 1);
     }
-    if has_trailing_newline {
+    if text.ends_with('\n') {
         out.push('\n');
     }
     out
@@ -38,13 +35,17 @@ pub fn prepend_line_numbers(text: &str) -> String {
 /// the truncation marker if cut. UTF-8-safe: never splits a codepoint.
 ///
 /// `max_chars` counts Unicode scalar values (Rust `char`s), not bytes.
+/// Single-pass: walks the string at most once via `char_indices().nth(max_chars)`.
 pub fn truncate_head(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
+    match text.char_indices().nth(max_chars) {
+        None => text.to_string(),
+        Some((byte_idx, _)) => {
+            let mut out = String::with_capacity(byte_idx + TRUNCATION_MARKER.len());
+            out.push_str(&text[..byte_idx]);
+            out.push_str(TRUNCATION_MARKER);
+            out
+        }
     }
-    let mut out: String = text.chars().take(max_chars).collect();
-    out.push_str(TRUNCATION_MARKER);
-    out
 }
 
 #[cfg(test)]
@@ -52,32 +53,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prepend_line_numbers_empty() {
-        assert_eq!(prepend_line_numbers(""), "");
+    fn with_line_numbers_empty() {
+        assert_eq!(with_line_numbers(""), "");
     }
 
     #[test]
-    fn prepend_line_numbers_single_line_no_trailing_newline() {
-        assert_eq!(prepend_line_numbers("hello"), "1|hello");
+    fn with_line_numbers_single_line_no_trailing_newline() {
+        assert_eq!(with_line_numbers("hello"), "1|hello");
     }
 
     #[test]
-    fn prepend_line_numbers_single_line_with_trailing_newline() {
-        assert_eq!(prepend_line_numbers("hello\n"), "1|hello\n");
+    fn with_line_numbers_single_line_with_trailing_newline() {
+        assert_eq!(with_line_numbers("hello\n"), "1|hello\n");
     }
 
     #[test]
-    fn prepend_line_numbers_multiple_lines() {
+    fn with_line_numbers_multiple_lines() {
         let input = "alpha\nbeta\ngamma";
         let expected = "1|alpha\n2|beta\n3|gamma";
-        assert_eq!(prepend_line_numbers(input), expected);
+        assert_eq!(with_line_numbers(input), expected);
     }
 
     #[test]
-    fn prepend_line_numbers_blank_lines_are_numbered() {
+    fn with_line_numbers_blank_lines_are_numbered() {
         let input = "a\n\nb";
         let expected = "1|a\n2|\n3|b";
-        assert_eq!(prepend_line_numbers(input), expected);
+        assert_eq!(with_line_numbers(input), expected);
     }
 
     #[test]

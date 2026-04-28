@@ -2,18 +2,36 @@
 //!
 //! Uses `jsonschema` 0.30. Failures return `ToolError::InvalidArgs` with
 //! a human-readable message that includes every validation error found.
+//!
+//! Two entry points:
+//! - [`validate_args`]: takes a `&Value` schema and compiles a validator
+//!   per call. Use for dynamic schemas (MCP-wrapped tools, tests).
+//! - [`validate_with`]: takes a precompiled `&jsonschema::Validator` and
+//!   skips the per-call compilation. Use on the dispatch hot path with
+//!   the validators in [`super::schemas`] (e.g. `READ_FILE_VALIDATOR`).
 
 use crate::errors::ToolError;
+use jsonschema::Validator;
 use serde_json::Value;
 
-/// Validate `args` against `schema`. On failure, returns `ToolError::InvalidArgs`
-/// with all validation errors joined by `; `.
+/// Validate `args` against `schema` (compiles the validator on each call).
+///
+/// On failure, returns `ToolError::InvalidArgs` with all validation errors
+/// joined by `; `. Prefer [`validate_with`] when the schema is static —
+/// it skips the per-call compilation cost.
 pub fn validate_args(schema: &Value, args: &Value) -> Result<(), ToolError> {
     let validator = jsonschema::validator_for(schema)
         .map_err(|e| ToolError::InvalidArgs(format!("invalid schema: {e}")))?;
+    validate_with(&validator, args)
+}
 
+/// Validate `args` against a precompiled `validator`.
+///
+/// Hot-path entry point: pair with the `*_VALIDATOR: LazyLock<Validator>`
+/// statics in [`super::schemas`] to avoid recompiling the schema on every
+/// tool dispatch.
+pub fn validate_with(validator: &Validator, args: &Value) -> Result<(), ToolError> {
     let errors: Vec<String> = validator.iter_errors(args).map(|e| e.to_string()).collect();
-
     if errors.is_empty() {
         Ok(())
     } else {

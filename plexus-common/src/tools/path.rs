@@ -36,55 +36,32 @@ pub fn resolve_in_workspace(workspace_root: &Path, path: &str) -> Result<PathBuf
         canonical_root.join(path)
     };
 
-    let resolved = match candidate.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            // Path doesn't exist (e.g. write to a new file).
-            // Canonicalize the parent and re-attach the basename;
-            // this still catches symlink escapes via the parent.
-            let parent = candidate
-                .parent()
-                .ok_or_else(|| WorkspaceError::PathOutsideWorkspace(candidate.clone()))?;
-            match parent.canonicalize() {
-                Ok(canonical_parent) => {
-                    let basename = candidate
-                        .file_name()
-                        .ok_or_else(|| WorkspaceError::PathOutsideWorkspace(candidate.clone()))?;
-                    canonical_parent.join(basename)
-                }
-                Err(_) => {
-                    // Parent doesn't exist. Walk further up to find an
-                    // existing ancestor. If that ancestor is outside the
-                    // workspace, the path was an escape attempt — report
-                    // PathOutsideWorkspace, not NotFound.
-                    let mut cursor = parent;
-                    let canonical_ancestor = loop {
-                        match cursor.canonicalize() {
-                            Ok(p) => break p,
-                            Err(_) => match cursor.parent() {
-                                Some(p) => cursor = p,
-                                None => {
-                                    return Err(WorkspaceError::PathOutsideWorkspace(
-                                        candidate.clone(),
-                                    ));
-                                }
-                            },
-                        }
-                    };
-                    if !canonical_ancestor.starts_with(&canonical_root) {
-                        return Err(WorkspaceError::PathOutsideWorkspace(candidate));
-                    }
-                    return Err(WorkspaceError::NotFound(parent.to_path_buf()));
-                }
-            }
+    // Walk from candidate upward until we find an ancestor that exists.
+    // Each ancestor is canonicalized so symlink escapes surface immediately.
+    for (depth, ancestor) in candidate.ancestors().enumerate() {
+        let canonical_ancestor = match ancestor.canonicalize() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if !canonical_ancestor.starts_with(&canonical_root) {
+            return Err(WorkspaceError::PathOutsideWorkspace(candidate));
         }
-    };
-
-    if !resolved.starts_with(&canonical_root) {
-        return Err(WorkspaceError::PathOutsideWorkspace(resolved));
+        return match depth {
+            // Candidate itself canonicalizes — this is a path to an existing file/dir.
+            0 => Ok(canonical_ancestor),
+            // Candidate doesn't exist but its immediate parent does.
+            // Re-attach the basename; the parent is inside-root so this is safe.
+            1 => candidate
+                .file_name()
+                .map(|name| canonical_ancestor.join(name))
+                .ok_or_else(|| WorkspaceError::PathOutsideWorkspace(candidate.clone())),
+            // Candidate's parent doesn't exist either; require parent dir.
+            _ => Err(WorkspaceError::NotFound(
+                candidate.parent().unwrap_or(&candidate).to_path_buf(),
+            )),
+        };
     }
-
-    Ok(resolved)
+    Err(WorkspaceError::PathOutsideWorkspace(candidate))
 }
 
 #[cfg(test)]

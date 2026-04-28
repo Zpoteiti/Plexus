@@ -3,9 +3,20 @@
 //! Each schema is a `LazyLock<serde_json::Value>` parsed exactly once
 //! per process via the `serde_json::json!` macro. Compile-time JSON
 //! syntax check; zero runtime startup cost.
+//!
+//! Each schema is paired with a `LazyLock<jsonschema::Validator>` compiled
+//! against its `input_schema` body. Hot-path dispatchers should use the
+//! validator with [`super::validate::validate_with`] to skip per-call
+//! schema compilation.
 
+use jsonschema::Validator;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
+
+/// Compile a `Validator` from a tool schema's `input_schema` body.
+fn compile(schema: &Value) -> Validator {
+    jsonschema::validator_for(&schema["input_schema"]).expect("hardcoded tool schema must compile")
+}
 
 pub static READ_FILE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
@@ -74,7 +85,7 @@ pub static EDIT_FILE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
 pub static DELETE_FILE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     json!({
         "name": "delete_file",
-        "description": "Remove a single file. Always allowed (releases quota).",
+        "description": "Remove a single file. Cannot be undone.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -279,7 +290,7 @@ pub static CRON_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
                 },
                 "message": {
                     "type": "string",
-                    "description": "REQUIRED when action='add'. Instruction for the agent to execute when the job triggers (e.g., 'Send a reminder to WeChat: xxx' or 'Check system status and report'). Not used for action='list' or action='remove'."
+                    "description": "REQUIRED when action='add'. Instruction for the agent to execute when the job triggers (e.g., 'Send a reminder to drink water' or 'Check disk usage and report if above 90%'). Not used for action='list' or action='remove'."
                 },
                 "every_seconds": {
                     "type": "integer",
@@ -333,6 +344,29 @@ pub static EXEC_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
         }
     })
 });
+
+// Validators — paired with each schema, compiled lazily on first use.
+// Use these on the dispatch hot path via `validate::validate_with`.
+
+pub static READ_FILE_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&READ_FILE_SCHEMA));
+pub static WRITE_FILE_VALIDATOR: LazyLock<Validator> =
+    LazyLock::new(|| compile(&WRITE_FILE_SCHEMA));
+pub static EDIT_FILE_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&EDIT_FILE_SCHEMA));
+pub static DELETE_FILE_VALIDATOR: LazyLock<Validator> =
+    LazyLock::new(|| compile(&DELETE_FILE_SCHEMA));
+pub static DELETE_FOLDER_VALIDATOR: LazyLock<Validator> =
+    LazyLock::new(|| compile(&DELETE_FOLDER_SCHEMA));
+pub static LIST_DIR_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&LIST_DIR_SCHEMA));
+pub static GLOB_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&GLOB_SCHEMA));
+pub static GREP_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&GREP_SCHEMA));
+pub static NOTEBOOK_EDIT_VALIDATOR: LazyLock<Validator> =
+    LazyLock::new(|| compile(&NOTEBOOK_EDIT_SCHEMA));
+pub static WEB_FETCH_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&WEB_FETCH_SCHEMA));
+pub static MESSAGE_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&MESSAGE_SCHEMA));
+pub static FILE_TRANSFER_VALIDATOR: LazyLock<Validator> =
+    LazyLock::new(|| compile(&FILE_TRANSFER_SCHEMA));
+pub static CRON_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&CRON_SCHEMA));
+pub static EXEC_VALIDATOR: LazyLock<Validator> = LazyLock::new(|| compile(&EXEC_SCHEMA));
 
 #[cfg(test)]
 mod tests {
