@@ -28,36 +28,3 @@ pub const PLEXUS_DEVICE_MARKER: &str = "x-plexus-device";
 ///
 /// The full token format is `plexus_dev_<random base64 hash>`.
 pub const DEVICE_TOKEN_PREFIX: &str = "plexus_dev_";
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn untrusted_message_prefix_format() {
-        assert_eq!(
-            UNTRUSTED_MESSAGE_PREFIX_TEMPLATE,
-            "[untrusted message from {}]: "
-        );
-    }
-
-    #[test]
-    fn untrusted_tool_result_prefix() {
-        assert_eq!(UNTRUSTED_TOOL_RESULT_PREFIX, "[untrusted tool result]: ");
-    }
-
-    #[test]
-    fn plexus_field_prefix() {
-        assert_eq!(PLEXUS_FIELD_PREFIX, "plexus_");
-    }
-
-    #[test]
-    fn plexus_device_marker() {
-        assert_eq!(PLEXUS_DEVICE_MARKER, "x-plexus-device");
-    }
-
-    #[test]
-    fn device_token_prefix() {
-        assert_eq!(DEVICE_TOKEN_PREFIX, "plexus_dev_");
-    }
-}

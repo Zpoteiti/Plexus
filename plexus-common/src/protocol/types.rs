@@ -16,7 +16,7 @@ pub enum FsPolicy {
 }
 
 /// Device configuration sent in `hello_ack` and `config_update` (ADR-050).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceConfig {
     /// Absolute workspace root path on the device.
     pub workspace_path: String,
@@ -37,14 +37,14 @@ pub struct DeviceConfig {
 }
 
 /// Per-MCP-server configuration (ADR-050, ADR-100).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Argv to spawn the subprocess (e.g. `["npx", "@plexus/mcp-google"]`).
     pub command: Vec<String>,
 
     /// Environment variables for the subprocess. Values may include secrets.
-    #[serde(default = "empty_object")]
-    pub env: serde_json::Value,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 
     #[serde(default)]
     pub description: Option<String>,
@@ -53,10 +53,6 @@ pub struct McpServerConfig {
     /// When `None`, every advertised capability registers.
     #[serde(default)]
     pub enabled: Option<Vec<String>>,
-}
-
-fn empty_object() -> serde_json::Value {
-    serde_json::Value::Object(Default::default())
 }
 
 /// All capabilities advertised by one MCP server (ADR-047, ADR-048).
@@ -162,7 +158,7 @@ mod tests {
     fn mcp_server_config_roundtrip() {
         let cfg = McpServerConfig {
             command: vec!["npx".into(), "@plexus/mcp-google".into()],
-            env: serde_json::json!({"GOOGLE_API_KEY": "redacted"}),
+            env: HashMap::from([("GOOGLE_API_KEY".to_string(), "redacted".to_string())]),
             description: Some("Google search".into()),
             enabled: Some(vec!["mcp_google_*".into()]),
         };
@@ -178,7 +174,7 @@ mod tests {
             "google".to_string(),
             McpServerConfig {
                 command: vec!["npx".into(), "@plexus/mcp-google".into()],
-                env: serde_json::json!({"GOOGLE_API_KEY": "x"}),
+                env: HashMap::from([("GOOGLE_API_KEY".to_string(), "x".to_string())]),
                 description: None,
                 enabled: None,
             },

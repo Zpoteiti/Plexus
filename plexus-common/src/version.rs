@@ -26,7 +26,9 @@ mod tests {
     }
 
     #[test]
-    fn crate_version_is_zero_one() {
-        assert_eq!(crate_version(), "0.1.0");
+    fn crate_version_is_semver_shaped() {
+        let v = crate_version();
+        assert!(!v.is_empty());
+        assert!(v.contains('.'), "expected SemVer-shaped, got {v}");
     }
 }

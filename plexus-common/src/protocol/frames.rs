@@ -415,7 +415,8 @@ mod proptests {
     }
 
     fn arb_string() -> impl Strategy<Value = String> {
-        "[a-zA-Z0-9 _.,/:-]{0,40}".prop_map(String::from)
+        // The regex strategy already returns Strings; no mapping needed.
+        "[a-zA-Z0-9 _.,/:-]{0,40}"
     }
 
     proptest! {

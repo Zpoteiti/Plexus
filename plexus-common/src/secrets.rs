@@ -47,10 +47,8 @@ macro_rules! secret_newtype {
             }
         }
 
-        // secrecy 0.10's `SecretString` (= `SecretBox<str>`) does not
-        // implement `Serialize`/`Deserialize` automatically because `str` is
-        // unsized and not `SerializableSecret`. We implement them by hand on
-        // the newtype, going through the plain `String` representation.
+        // Manual Serialize/Deserialize: SecretString wraps unsized str, so
+        // serde's blanket impls don't apply.
         impl Serialize for $name {
             fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
                 self.expose_secret().serialize(s)

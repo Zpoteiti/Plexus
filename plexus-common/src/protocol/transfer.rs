@@ -25,17 +25,15 @@ pub fn pack_chunk(transfer_id: Uuid, chunk: &[u8]) -> Vec<u8> {
 /// `chunk_bytes` borrows from the input; no allocation. Returns
 /// `ProtocolError::MalformedFrame` if the input is shorter than `HEADER_SIZE`.
 pub fn parse_chunk(payload: &[u8]) -> Result<(Uuid, &[u8]), ProtocolError> {
-    if payload.len() < HEADER_SIZE {
-        return Err(ProtocolError::MalformedFrame(format!(
+    let (head, tail) = payload.split_at_checked(HEADER_SIZE).ok_or_else(|| {
+        ProtocolError::MalformedFrame(format!(
             "binary frame payload is {} bytes; expected at least {} (header)",
             payload.len(),
             HEADER_SIZE
-        )));
-    }
-    let mut id_bytes = [0u8; HEADER_SIZE];
-    id_bytes.copy_from_slice(&payload[..HEADER_SIZE]);
-    let id = Uuid::from_bytes(id_bytes);
-    Ok((id, &payload[HEADER_SIZE..]))
+        ))
+    })?;
+    let id = Uuid::from_slice(head).expect("head is exactly HEADER_SIZE bytes");
+    Ok((id, tail))
 }
 
 #[cfg(test)]
