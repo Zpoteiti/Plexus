@@ -1,0 +1,34 @@
+[package]
+name = "plexus-common"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Shared types, errors, protocol, and tool infrastructure for the Plexus rebuild"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+secrecy = { workspace = true }
+zeroize = { workspace = true }
+tokio = { workspace = true }
+jsonschema = { workspace = true }
+async-trait = "0.1"
+globset = { workspace = true }
+rmcp = { workspace = true, features = ["server", "transport-io"] }
+
+[dev-dependencies]
+proptest = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[bin]]
+name = "fake-mcp"
+path = "tests/fixtures/fake-mcp/main.rs"
+test = false
+doc = false

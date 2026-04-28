@@ -1,0 +1,48 @@
+[workspace]
+members = ["plexus-common"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "Apache-2.0"
+authors = ["Plexus Authors"]
+repository = "https://github.com/yucheng/plexus"
+
+[workspace.dependencies]
+# Async runtime — used in Plan 2 (Tool trait) and beyond
+tokio = { version = "1", features = ["fs", "process", "macros", "rt-multi-thread", "time"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors
+thiserror = "2"
+
+# IDs
+uuid = { version = "1", features = ["v7", "serde"] }
+
+# Secrets
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = "1"
+
+# JSON Schema validation — used in Plan 2
+jsonschema = "0.30"
+
+# Glob matching for `enabled` filter — used in Plan 3
+globset = "0.4"
+
+# MCP client — pinned to exact version per spec §9 risk registry
+rmcp = { version = "=1.5.0", features = ["client", "transport-child-process"] }
+
+# Test-only
+proptest = "1"
+pretty_assertions = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
