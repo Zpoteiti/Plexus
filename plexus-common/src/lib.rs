@@ -4,5 +4,6 @@
 //! design and `docs/DECISIONS.md` for cross-cutting architecture decisions.
 
 pub mod consts;
+pub mod errors;
 pub mod secrets;
 pub mod version;
