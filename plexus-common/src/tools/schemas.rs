@@ -214,6 +214,126 @@ pub static WEB_FETCH_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
     })
 });
 
+pub static MESSAGE_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "name": "message",
+        "description": "Send a message (text, media, or interactive buttons) to a chat. If channel and chat_id are omitted, delivers to the current session's channel + chat_id (the default reply path). If specified, delivers cross-channel.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": { "type": "string", "description": "Message text" },
+                "channel": {
+                    "type": "string",
+                    "description": "Target channel (e.g. 'discord', 'telegram'). Optional — defaults to the current session's channel."
+                },
+                "chat_id": {
+                    "type": "string",
+                    "description": "Target chat identifier on that channel. Required if channel is set."
+                },
+                "media": {
+                    "type": "array",
+                    "description": "Workspace paths to media files to attach. Server-side workspace_fs path relative to user's workspace.",
+                    "items": { "type": "string" }
+                },
+                "buttons": {
+                    "type": "array",
+                    "description": "Inline keyboard buttons (e.g. ['Yes', 'No']). When pressed, the label is sent back as a normal user message.",
+                    "items": { "type": "string" }
+                }
+            },
+            "required": ["content"]
+        }
+    })
+});
+
+pub static FILE_TRANSFER_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "name": "file_transfer",
+        "description": "Copy or move a file or folder between devices (server ↔ device, device ↔ device). Same-device move is an atomic rename. Folders transfer recursively.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "src_path": { "type": "string" },
+                "dst_path": { "type": "string" },
+                "mode": {
+                    "type": "string",
+                    "enum": ["copy", "move"],
+                    "default": "copy"
+                }
+            },
+            "required": ["src_path", "dst_path"]
+        }
+    })
+});
+
+pub static CRON_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "name": "cron",
+        "description": "Manage scheduled agent invocations (add, list, remove). Triggered job runs in a dedicated session that inherits the current session's channel + chat_id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "list", "remove"]
+                },
+                "message": {
+                    "type": "string",
+                    "description": "REQUIRED when action='add'. Instruction for the agent to execute when the job triggers (e.g., 'Send a reminder to WeChat: xxx' or 'Check system status and report'). Not used for action='list' or action='remove'."
+                },
+                "every_seconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "For recurring jobs: interval in seconds. One of every_seconds, cron_expr, or at must be provided when action='add'."
+                },
+                "cron_expr": {
+                    "type": "string",
+                    "description": "For recurring jobs: standard cron expression (5 fields)."
+                },
+                "at": {
+                    "type": "string",
+                    "description": "ISO datetime for one-time execution (e.g. '2026-02-12T10:30:00'). Naive values use the tool's default timezone."
+                },
+                "tz": {
+                    "type": "string",
+                    "description": "Timezone (e.g. 'America/Los_Angeles'). Default: UTC."
+                },
+                "deliver": {
+                    "type": "boolean",
+                    "description": "Whether to deliver the execution result to the user channel (default true)",
+                    "default": true
+                },
+                "job_id": {
+                    "type": "string",
+                    "description": "REQUIRED when action='remove'. The id returned by add."
+                }
+            },
+            "required": ["action"]
+        }
+    })
+});
+
+pub static EXEC_SCHEMA: LazyLock<Value> = LazyLock::new(|| {
+    json!({
+        "name": "exec",
+        "description": "Execute a shell command and return its output. Prefer read_file/write_file/edit_file over cat/echo/sed, and grep/glob over shell find/grep. Use -y or --yes flags to avoid interactive prompts. Output is truncated at 10 000 chars; timeout defaults to 60s.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "The shell command to execute" },
+                "working_dir": { "type": "string", "description": "Optional working directory for the command" },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in seconds. Increase for long-running commands like compilation or installation (default 60, max 600).",
+                    "minimum": 1,
+                    "maximum": 600
+                }
+            },
+            "required": ["command"]
+        }
+    })
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +425,64 @@ mod tests {
         assert!(names.contains(&"path"));
         assert!(names.contains(&"old_text"));
         assert!(names.contains(&"new_text"));
+    }
+
+    #[test]
+    fn message_schema_well_formed() {
+        assert_well_formed(&MESSAGE_SCHEMA, "message");
+    }
+
+    #[test]
+    fn file_transfer_schema_well_formed() {
+        assert_well_formed(&FILE_TRANSFER_SCHEMA, "file_transfer");
+    }
+
+    #[test]
+    fn cron_schema_well_formed() {
+        assert_well_formed(&CRON_SCHEMA, "cron");
+    }
+
+    #[test]
+    fn exec_schema_well_formed() {
+        assert_well_formed(&EXEC_SCHEMA, "exec");
+    }
+
+    #[test]
+    fn cron_action_enum_has_three_values() {
+        let action = &CRON_SCHEMA["input_schema"]["properties"]["action"];
+        let values = action["enum"].as_array().unwrap();
+        let names: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(names, vec!["add", "list", "remove"]);
+    }
+
+    #[test]
+    fn exec_command_required() {
+        let required = EXEC_SCHEMA["input_schema"]["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("command")));
+    }
+
+    #[test]
+    fn all_14_schemas_are_distinct_names() {
+        let names: Vec<&str> = [
+            &*READ_FILE_SCHEMA,
+            &*WRITE_FILE_SCHEMA,
+            &*EDIT_FILE_SCHEMA,
+            &*DELETE_FILE_SCHEMA,
+            &*DELETE_FOLDER_SCHEMA,
+            &*LIST_DIR_SCHEMA,
+            &*GLOB_SCHEMA,
+            &*GREP_SCHEMA,
+            &*NOTEBOOK_EDIT_SCHEMA,
+            &*WEB_FETCH_SCHEMA,
+            &*MESSAGE_SCHEMA,
+            &*FILE_TRANSFER_SCHEMA,
+            &*CRON_SCHEMA,
+            &*EXEC_SCHEMA,
+        ]
+        .iter()
+        .map(|v| v["name"].as_str().unwrap())
+        .collect();
+        let unique: std::collections::HashSet<_> = names.iter().copied().collect();
+        assert_eq!(unique.len(), 14, "duplicate name in schemas: {:?}", names);
     }
 }
