@@ -85,7 +85,10 @@ async fn spawn_with_invalid_command_fails() {
         enabled: None,
     };
     let result = spawn_mcp(&config).await;
-    assert!(result.is_err(), "expected spawn to fail for nonexistent binary");
+    assert!(
+        result.is_err(),
+        "expected spawn to fail for nonexistent binary"
+    );
 }
 
 #[tokio::test]

@@ -16,7 +16,11 @@
 //! - [`tools`] — Tool trait + path validation + result wrap + format helpers
 //!   + 14 hardcoded tool schemas + JSON Schema arg validation.
 //!
-//! Plan 3 (`mcp`) extends the public surface.
+//! # Plan 3 surface (MCP)
+//!
+//! - [`mcp`] — typed-infix wrapped names + `enabled` glob filter + URI
+//!   template parsing + `McpSession` wrapping rmcp + `spawn_mcp` /
+//!   `teardown_mcp` lifecycle.
 
 pub mod consts;
 pub mod errors;
@@ -30,6 +34,13 @@ pub mod version;
 pub use errors::{
     AuthError, Code, ErrorCode, McpError, NetworkError, ProtocolError, ToolError, WorkspaceError,
 };
+pub use mcp::filter::EnabledFilter;
+pub use mcp::lifecycle::{spawn_mcp, teardown_mcp};
+pub use mcp::naming::{
+    McpSurface, WrappedName, parse_wrapped_name, wrap_prompt_name, wrap_resource_name,
+    wrap_tool_name,
+};
+pub use mcp::session::McpSession;
 pub use protocol::{
     ConfigUpdateFrame, DeviceConfig, ErrorFrame, FsPolicy, HEADER_SIZE, HelloAckFrame, HelloCaps,
     HelloFrame, McpSchemas, McpServerConfig, PingFrame, PongFrame, PromptArgument, PromptDef,

@@ -22,7 +22,7 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Spawn an MCP server subprocess, perform the rmcp handshake, list its
 /// tools / resources / prompts, and return the session + schemas.
 ///
-/// Bounded by [`SPAWN_TIMEOUT`] (30 seconds). On timeout or any other
+/// Bounded by 30 seconds (`SPAWN_TIMEOUT`). On timeout or any other
 /// failure during startup, returns `McpError::SpawnFailed` with detail.
 pub async fn spawn_mcp(config: &McpServerConfig) -> Result<(McpSession, McpSchemas), McpError> {
     if config.command.is_empty() {
@@ -71,10 +71,13 @@ async fn spawn_inner(config: &McpServerConfig) -> Result<(McpSession, McpSchemas
 
     // `()` implements `ClientHandler` (and thus `Service<RoleClient>`) in rmcp.
     // `.serve()` performs the MCP handshake and returns a RunningService.
-    let running = ().serve(transport).await.map_err(|e| McpError::SpawnFailed {
-        server: server_label.clone(),
-        detail: format!("rmcp handshake: {e}"),
-    })?;
+    let running =
+        ().serve(transport)
+            .await
+            .map_err(|e| McpError::SpawnFailed {
+                server: server_label.clone(),
+                detail: format!("rmcp handshake: {e}"),
+            })?;
 
     let session = McpSession::from_running(running);
 

@@ -24,9 +24,7 @@ pub struct McpSession {
 
 impl McpSession {
     /// Construct from a started rmcp service. Used by `lifecycle::spawn_mcp`.
-    pub(crate) fn from_running(
-        inner: rmcp::service::RunningService<rmcp::RoleClient, ()>,
-    ) -> Self {
+    pub(crate) fn from_running(inner: rmcp::service::RunningService<rmcp::RoleClient, ()>) -> Self {
         Self { inner }
     }
 
@@ -53,14 +51,14 @@ impl McpSession {
 
     /// List the resources advertised by the MCP server.
     pub async fn list_resources(&self) -> Result<Vec<ResourceDef>, McpError> {
-        let response = self
-            .inner
-            .list_resources(None)
-            .await
-            .map_err(|e| McpError::SpawnFailed {
-                server: "session".to_string(),
-                detail: format!("list_resources: {e}"),
-            })?;
+        let response =
+            self.inner
+                .list_resources(None)
+                .await
+                .map_err(|e| McpError::SpawnFailed {
+                    server: "session".to_string(),
+                    detail: format!("list_resources: {e}"),
+                })?;
         Ok(response
             .resources
             .into_iter()

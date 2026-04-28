@@ -34,8 +34,7 @@ impl EnabledFilter {
             if pat.is_empty() {
                 return Err(format!("empty pattern at index {idx}"));
             }
-            let glob = Glob::new(pat)
-                .map_err(|e| format!("invalid glob '{pat}': {e}"))?;
+            let glob = Glob::new(pat).map_err(|e| format!("invalid glob '{pat}': {e}"))?;
             builder.add(glob);
         }
         let set = builder
@@ -98,10 +97,7 @@ mod tests {
 
     #[test]
     fn multiple_patterns_union() {
-        let f = filter(Some(&[
-            "mcp_notion_search",
-            "mcp_notion_resource_*",
-        ]));
+        let f = filter(Some(&["mcp_notion_search", "mcp_notion_resource_*"]));
         assert!(f.accepts("mcp_notion_search"));
         assert!(f.accepts("mcp_notion_resource_page"));
         assert!(!f.accepts("mcp_notion_other_tool"));
