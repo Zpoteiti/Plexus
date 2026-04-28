@@ -1,20 +1,28 @@
+pub mod account;
 mod agent_loop;
 mod api;
 mod auth;
 mod bus;
 mod channels;
 mod config;
+mod consts;
 mod context;
 mod cron;
 mod db;
-mod file_store;
+mod device_stream;
+pub mod dream;
+pub mod evaluator;
+pub mod heartbeat;
+pub mod mcp;
 mod memory;
 mod providers;
 mod server_mcp;
 mod server_tools;
 mod session;
+pub mod skills_cache;
 mod state;
 mod tools_registry;
+pub mod workspace;
 mod ws;
 
 use crate::state::AppState;
@@ -38,7 +46,35 @@ async fn main() {
     let config = ServerConfig::from_env();
     let pool = db::init_db(&config.database_url).await;
 
+    db::system_config::seed_defaults_if_missing(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("Failed to seed system_config defaults: {e}"));
+
+    let dream_phase1_prompt = db::system_config::get(&pool, "dream_phase1_prompt")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| include_str!("../templates/prompts/dream_phase1.md").to_string());
+    let dream_phase2_prompt = db::system_config::get(&pool, "dream_phase2_prompt")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| include_str!("../templates/prompts/dream_phase2.md").to_string());
+    let heartbeat_phase1_prompt = db::system_config::get(&pool, "heartbeat_phase1_prompt")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| include_str!("../templates/prompts/heartbeat_phase1.md").to_string());
+
     let (outbound_tx, outbound_rx) = mpsc::channel::<crate::bus::OutboundEvent>(1000);
+
+    let quota = Arc::new(crate::workspace::QuotaCache::new(5 * 1024 * 1024 * 1024));
+    let skills_cache = Arc::new(crate::skills_cache::SkillsCache::new());
+    let workspace_fs = Arc::new(crate::workspace::WorkspaceFs::new(
+        std::path::PathBuf::from(&config.workspace_root),
+        quota.clone(),
+        skills_cache.clone(),
+    ));
 
     let state = Arc::new(AppState {
         db: pool,
@@ -47,38 +83,53 @@ async fn main() {
         devices: Default::default(),
         devices_by_user: Default::default(),
         pending: Default::default(),
+        streams: Default::default(),
         tool_schema_cache: Default::default(),
         rate_limiter: Default::default(),
         rate_limit_config: Arc::new(RwLock::new(0)),
         default_soul: Arc::new(RwLock::new(None)),
+        dream_phase1_prompt: Arc::from(dream_phase1_prompt.as_str()),
+        dream_phase2_prompt: Arc::from(dream_phase2_prompt.as_str()),
+        heartbeat_phase1_prompt: Arc::from(heartbeat_phase1_prompt.as_str()),
         sessions: Default::default(),
-        web_fetch_semaphore: Arc::new(Semaphore::new(
-            plexus_common::consts::WEB_FETCH_CONCURRENT_MAX,
-        )),
+        web_fetch_semaphore: Arc::new(Semaphore::new(crate::consts::WEB_FETCH_CONCURRENT_MAX)),
         http_client: reqwest::Client::new(),
         server_mcp: Arc::new(RwLock::new(server_mcp::ServerMcpManager::new())),
         gateway_sink: RwLock::new(None),
         web_fetch_client: reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(
-                plexus_common::consts::WEB_FETCH_TIMEOUT_SEC,
+                crate::consts::WEB_FETCH_TIMEOUT_SEC,
             ))
             .connect_timeout(std::time::Duration::from_secs(
-                plexus_common::consts::WEB_FETCH_CONNECT_TIMEOUT_SEC,
+                crate::consts::WEB_FETCH_CONNECT_TIMEOUT_SEC,
             ))
             .redirect(reqwest::redirect::Policy::limited(
-                plexus_common::consts::WEB_FETCH_MAX_REDIRECTS,
+                crate::consts::WEB_FETCH_MAX_REDIRECTS,
             ))
             .build()
             .expect("Failed to create web_fetch client"),
         outbound_tx,
         shutdown: CancellationToken::new(),
+        quota,
+        skills_cache,
+        workspace_fs,
     });
 
+    // Prime quota cache from existing workspace files before spawning any background tasks.
+    if let Err(e) = state
+        .quota
+        .initialize_from_disk(std::path::Path::new(&state.config.workspace_root))
+        .await
+    {
+        tracing::warn!(error = %e, "quota initialize_from_disk failed");
+        // Non-fatal — usage starts from 0 and converges as writes happen.
+    }
+
     // Background tasks
-    file_store::spawn_cleanup_task();
     ws::spawn_heartbeat_reaper(Arc::clone(&state));
     bus::spawn_rate_limit_refresh(Arc::clone(&state));
     cron::spawn_cron_poller(Arc::clone(&state));
+    heartbeat::spawn_heartbeat_tick(Arc::clone(&state));
 
     // Outbound dispatch loop (routes events to channels)
     channels::spawn_outbound_dispatch(Arc::clone(&state), outbound_rx);
@@ -104,23 +155,21 @@ async fn main() {
     if let Ok(Some(soul)) = crate::db::system_config::get(&state.db, "default_soul").await {
         *state.default_soul.write().await = Some(soul);
     }
-    if let Ok(Some(llm_json)) = crate::db::system_config::get(&state.db, "llm_config").await {
-        if let Ok(config) = serde_json::from_str::<crate::config::LlmConfig>(&llm_json) {
-            *state.llm_config.write().await = Some(config);
-        }
+    if let Ok(Some(llm_json)) = crate::db::system_config::get(&state.db, "llm_config").await
+        && let Ok(config) = serde_json::from_str::<crate::config::LlmConfig>(&llm_json)
+    {
+        *state.llm_config.write().await = Some(config);
     }
-    if let Ok(Some(rl)) = crate::db::system_config::get(&state.db, "rate_limit_per_min").await {
-        if let Ok(limit) = rl.parse::<u32>() {
-            *state.rate_limit_config.write().await = limit;
-        }
+    if let Ok(Some(rl)) = crate::db::system_config::get(&state.db, "rate_limit_per_min").await
+        && let Ok(limit) = rl.parse::<u32>()
+    {
+        *state.rate_limit_config.write().await = limit;
     }
     if let Ok(Some(mcp_json)) = crate::db::system_config::get(&state.db, "server_mcp_config").await
-    {
-        if let Ok(servers) =
+        && let Ok(servers) =
             serde_json::from_str::<Vec<plexus_common::protocol::McpServerEntry>>(&mcp_json)
-        {
-            state.server_mcp.write().await.initialize(&servers).await;
-        }
+    {
+        state.server_mcp.write().await.initialize(&servers).await;
     }
 
     let app = axum::Router::new()
@@ -128,7 +177,6 @@ async fn main() {
         .merge(auth::device::device_routes())
         .merge(auth::admin::admin_routes())
         .merge(auth::cron_api::cron_api_routes())
-        .merge(auth::skills_api::skills_api_routes())
         .merge(auth::discord_api::discord_api_routes())
         .merge(auth::telegram_api::telegram_api_routes())
         .merge(api::api_routes())
@@ -138,5 +186,48 @@ async fn main() {
     let addr = format!("0.0.0.0:{}", config.server_port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     info!("PLEXUS Server listening on {addr}");
-    axum::serve(listener, app).await.unwrap();
+
+    // Signal handler: SIGINT or SIGTERM → cancel shutdown token → all
+    // background tasks wind down gracefully via their tokio::select! branches.
+    let shutdown = state.shutdown.clone();
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        info!("Shutdown signal received; cancelling background tasks");
+        shutdown.cancel();
+    });
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown({
+            let shutdown = state.shutdown.clone();
+            async move { shutdown.cancelled().await }
+        })
+        .await
+        .unwrap();
+    info!("HTTP server stopped; exiting");
+}
+
+/// Wait for either SIGINT (Ctrl-C) or SIGTERM. Resolves on the first one.
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut s) = signal(SignalKind::terminate()) {
+            s.recv().await;
+        } else {
+            // SIGTERM handler install failed; fall through to ctrl_c only
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }

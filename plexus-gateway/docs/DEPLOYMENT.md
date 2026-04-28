@@ -23,8 +23,11 @@ RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --package plexus
 | `GATEWAY_PORT` | Yes | -- | Listen port (e.g. `9090`) |
 | `PLEXUS_SERVER_API_URL` | Yes | -- | Upstream plexus-server base URL for REST proxy (e.g. `http://server:8080`) |
 | `PLEXUS_FRONTEND_DIR` | No | `../plexus-frontend/dist` | Path to built frontend static files |
+| `PLEXUS_ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS and WebSocket `Origin` allow-list. `*` is dev-only. Production deployments **must** set an explicit list. |
 
 A `.env` file in the working directory is loaded automatically via `dotenvy`.
+
+**Production hardening:** set `PLEXUS_ALLOWED_ORIGINS` to your actual frontend origin(s), e.g. `https://plexus.example.com`. The gateway validates both the `Origin` HTTP header on WebSocket upgrade and the CORS policy for `/api/*` against this list; requests from other origins are rejected with HTTP 403. The default `*` exists only so `cargo run --package plexus-gateway` works out of the box in development.
 
 ## Deployment Topology
 
@@ -96,18 +99,31 @@ plexus.example.com {
 
 Caddy auto-provisions Let's Encrypt certs and handles WebSocket upgrade headers automatically.
 
-## CORS
+## CORS and WebSocket Origin Check
 
-The gateway applies a permissive CORS policy via `tower-http`:
+CORS and the WebSocket `Origin` header check are both driven by `PLEXUS_ALLOWED_ORIGINS`:
 
-```rust
-CorsLayer::new()
-    .allow_origin(Any)
-    .allow_methods(Any)
-    .allow_headers(Any)
+- `PLEXUS_ALLOWED_ORIGINS=*` (default) — permissive. CORS allows any origin; WebSocket upgrade does not check `Origin`. This mode is **development only**.
+- `PLEXUS_ALLOWED_ORIGINS=https://plexus.example.com,https://admin.plexus.example.com` — strict. Both the CORS preflight and the WebSocket upgrade handler reject requests whose `Origin` header is not in the list, with HTTP 403.
+
+The gateway parses the variable once at startup. Strict mode is required for production deployments.
+
+### Reverse-proxy configuration for strict mode
+
+When strict mode is enabled, the reverse proxy in front of the gateway **must** forward the browser's `Origin` header unchanged. For nginx, the default `proxy_pass` behavior preserves it, but if you have set `proxy_set_header Host ...`, also add:
+
+```nginx
+proxy_set_header Origin $http_origin;
 ```
 
-This is fine when the gateway is behind a reverse proxy that handles origin restrictions. For direct exposure, consider restricting `allow_origin` to your domain.
+Caddy preserves the `Origin` header by default with `reverse_proxy`.
+
+Also configure access logs to **redact the `token` query parameter** on `/ws/chat?token=<JWT>` to prevent JWTs from leaking into log files. For nginx:
+
+```nginx
+log_format main_redacted '$remote_addr - "$request_method $uri" $status';
+access_log /var/log/nginx/plexus.log main_redacted;
+```
 
 ## Systemd Service
 

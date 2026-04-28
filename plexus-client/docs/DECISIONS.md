@@ -28,7 +28,7 @@ We also adopt nanobot's pluggable backend pattern (`_BACKENDS` dict) so future s
 In `shell.rs::run_shell_command`, the process is spawned with `env_clear()` + `min_env()` regardless of `FsPolicy`. This is intentional.
 
 `min_env()` passes through exactly 4 variables:
-- `PATH` -- hardcoded safe default (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`), NOT inherited from the parent process
+- `PATH` -- inherited from the parent process so custom tools (like conda or node) can be found, falling back to a safe default if missing.
 - `HOME` -- from the parent (needed for `~` expansion)
 - `LANG` -- hardcoded `en_US.UTF-8`
 - `TERM` -- hardcoded `xterm-256color`

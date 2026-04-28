@@ -3,8 +3,9 @@
 //! Group policy: only respond when @mentioned or replied to.
 //! Access control: owner + allowed_users list.
 
-use crate::bus::{self, InboundEvent, OutboundEvent};
+use crate::bus::{self, EventKind, InboundEvent, OutboundEvent};
 use crate::state::AppState;
+use dashmap::DashMap;
 use plexus_common::consts::CHANNEL_DISCORD;
 use serenity::all::{
     ChannelId, Context, CreateAttachment, CreateMessage, EventHandler, GatewayIntents,
@@ -17,12 +18,18 @@ use tracing::{error, info, warn};
 
 const DISCORD_MSG_LIMIT: usize = 2000;
 
+/// Discord's native attachment size cap (non-Nitro). Files above this are
+/// rejected before we even try to download or upload.
+const DISCORD_ATTACHMENT_MAX_BYTES: usize = 25 * 1024 * 1024;
+
 /// Active Discord bots, keyed by user_id.
 type BotRegistry = Arc<RwLock<HashMap<String, BotHandle>>>;
 
 struct BotHandle {
-    /// Map of chat_id → ChannelId for outbound delivery
+    /// Map of chat_id (guild/channel) → ChannelId for outbound delivery
     channels: Arc<RwLock<HashMap<String, ChannelId>>>,
+    /// Cache of partner DM channel IDs, keyed by discord user id (u64)
+    dm_cache: Arc<DashMap<u64, ChannelId>>,
     /// Serenity HTTP client for sending messages
     http: Arc<RwLock<Option<Arc<serenity::http::Http>>>>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -36,6 +43,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
     stop_bot(&user_id).await;
 
     let channels: Arc<RwLock<HashMap<String, ChannelId>>> = Arc::new(RwLock::new(HashMap::new()));
+    let dm_cache: Arc<DashMap<u64, ChannelId>> = Arc::new(DashMap::new());
     let http: Arc<RwLock<Option<Arc<serenity::http::Http>>>> = Arc::new(RwLock::new(None));
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
@@ -44,6 +52,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
         user_id.clone(),
         BotHandle {
             channels: Arc::clone(&channels),
+            dm_cache: Arc::clone(&dm_cache),
             http: Arc::clone(&http),
             shutdown_tx: Some(shutdown_tx),
         },
@@ -64,6 +73,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
         .unwrap_or_default();
 
     let state_clone = Arc::clone(&state);
+    let state_shutdown = Arc::clone(&state);
     let channels_clone = Arc::clone(&channels);
     let http_clone = Arc::clone(&http);
     let user_id_clone = user_id.clone();
@@ -107,21 +117,25 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
                 info!("Discord bot shutdown for {user_id_clone}");
                 client.shard_manager.shutdown_all().await;
             }
+            _ = state_shutdown.shutdown.cancelled() => {
+                info!(user_id = %user_id_clone, "Discord bot shutting down");
+                client.shard_manager.shutdown_all().await;
+            }
         }
     });
 }
 
 /// Stop a Discord bot for a user.
 pub async fn stop_bot(user_id: &str) {
-    if let Some(mut handle) = BOT_REGISTRY.write().await.remove(user_id) {
-        if let Some(tx) = handle.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
+    if let Some(mut handle) = BOT_REGISTRY.write().await.remove(user_id)
+        && let Some(tx) = handle.shutdown_tx.take()
+    {
+        let _ = tx.send(());
     }
 }
 
 /// Deliver an outbound event via Discord.
-pub async fn deliver(state: &AppState, event: &OutboundEvent) {
+pub async fn deliver(state: &Arc<AppState>, event: &OutboundEvent) {
     let registry = BOT_REGISTRY.read().await;
     let handle = match registry.get(&event.user_id) {
         Some(h) => h,
@@ -138,25 +152,36 @@ pub async fn deliver(state: &AppState, event: &OutboundEvent) {
     };
     let http = Arc::clone(http);
 
-    // Parse chat_id to get ChannelId
+    // Parse chat_id and resolve to a ChannelId
     let channel_id = match event.chat_id.as_deref() {
-        Some(chat_id) => {
-            // chat_id format: "guild_id/channel_id" or "dm/user_id"
-            let parts: Vec<&str> = chat_id.split('/').collect();
-            if parts.len() == 2 {
-                if let Ok(id) = parts[1].parse::<u64>() {
-                    ChannelId::new(id)
-                } else {
-                    warn!("Discord: invalid channel_id in {chat_id}");
-                    return;
+        Some(chat_id) => match parse_chat_id(chat_id) {
+            Some(ChatIdKind::Guild { channel_id, .. }) => ChannelId::new(channel_id),
+            Some(ChatIdKind::Dm(user_id_raw)) => {
+                use serenity::all::UserId;
+                let uid = UserId::new(user_id_raw);
+                // Try cache first
+                let cached = handle.dm_cache.get(&uid.get()).map(|r| *r);
+                match cached {
+                    Some(cid) => cid,
+                    None => match uid.create_dm_channel(&http).await {
+                        Ok(dm) => {
+                            handle.dm_cache.insert(uid.get(), dm.id);
+                            dm.id
+                        }
+                        Err(e) => {
+                            warn!("Discord: create_dm_channel failed for {}: {}", uid.get(), e);
+                            return;
+                        }
+                    },
                 }
-            } else {
+            }
+            None => {
                 warn!("Discord: invalid chat_id format: {chat_id}");
                 return;
             }
-        }
+        },
         None => {
-            // Try to find a cached channel
+            // Existing fallback: pick any cached guild channel
             let channels = handle.channels.read().await;
             match channels.values().next() {
                 Some(id) => *id,
@@ -177,14 +202,20 @@ pub async fn deliver(state: &AppState, event: &OutboundEvent) {
         }
     }
 
-    // Send media as file attachments (or raw URLs for non-file-store paths)
-    for item in crate::file_store::resolve_media(&event.user_id, &event.media).await {
-        let msg = match item {
-            crate::file_store::ResolvedMedia::File { bytes, filename } => {
-                CreateMessage::new().add_file(CreateAttachment::bytes(bytes, filename))
+    // Send media as file attachments via workspace_fs
+    for path in &event.media {
+        let bytes = match state.workspace_fs.read(&event.user_id, path).await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Discord media read failed ({path}): {e}");
+                continue;
             }
-            crate::file_store::ResolvedMedia::Url(url) => CreateMessage::new().content(url),
         };
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file.bin".into());
+        let msg = CreateMessage::new().add_file(CreateAttachment::bytes(bytes, filename));
         if let Err(e) = channel_id.send_message(&http, msg).await {
             error!("Discord media send error: {e}");
         }
@@ -258,31 +289,73 @@ impl EventHandler for DiscordHandler {
             .insert(chat_id.clone(), msg.channel_id);
 
         // Strip bot mention from content
-        let content = strip_mentions(&msg.content, &ctx).await;
-        if content.trim().is_empty() {
-            return;
-        }
+        let mut content = strip_mentions(&msg.content, &ctx).await;
 
         let session_id = format!("discord:{}", msg.channel_id);
+
+        // Download any attachments into the file store.
+        let mut media_urls: Vec<String> = Vec::new();
+
+        for att in &msg.attachments {
+            if (att.size as usize) > DISCORD_ATTACHMENT_MAX_BYTES {
+                let marker = oversize_attachment_marker(&att.filename, att.size as u64);
+                content.push('\n');
+                content.push_str(&marker);
+                continue;
+            }
+            let bytes = match self.state.http_client.get(&att.url).send().await {
+                Ok(r) => match r.bytes().await {
+                    Ok(b) => b.to_vec(),
+                    Err(e) => {
+                        warn!("discord attachment read failed ({}): {}", att.filename, e);
+                        content.push('\n');
+                        content.push_str(&failed_download_marker(&att.filename));
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    warn!("discord attachment fetch failed ({}): {}", att.filename, e);
+                    content.push('\n');
+                    content.push_str(&failed_download_marker(&att.filename));
+                    continue;
+                }
+            };
+            let safe_name = super::safe_attachment_filename(&att.filename);
+            let rel = format!(".attachments/discord-{}/{}", msg.id, safe_name);
+            match self
+                .state
+                .workspace_fs
+                .write(&self.plexus_user_id, &rel, &bytes)
+                .await
+            {
+                Ok(()) => media_urls.push(rel),
+                Err(e) => {
+                    warn!("discord attachment save failed ({}): {}", att.filename, e);
+                    content.push('\n');
+                    content.push_str(&format!("[Attachment: {} — storage failed]", att.filename));
+                }
+            }
+        }
+
+        if content.trim().is_empty() && media_urls.is_empty() {
+            return;
+        }
 
         let event = InboundEvent {
             session_id,
             user_id: self.plexus_user_id.clone(),
+            kind: EventKind::UserTurn,
             content,
             channel: CHANNEL_DISCORD.to_string(),
             chat_id: Some(chat_id),
-            sender_id: Some(sender_id.clone()),
-            media: vec![],
+            media: media_urls,
             cron_job_id: None,
             identity: Some(crate::context::ChannelIdentity {
                 sender_name: sender_name.clone(),
                 sender_id,
                 is_partner,
-                partner_name: self.partner_discord_id.clone(),
-                partner_id: self.partner_discord_id.clone(),
                 channel_type: CHANNEL_DISCORD.to_string(),
             }),
-            metadata: Default::default(),
         };
 
         if let Err(e) = bus::publish_inbound(&self.state, event).await {
@@ -301,6 +374,20 @@ async fn strip_mentions(content: &str, ctx: &Context) -> String {
         .to_string()
 }
 
+/// Inline marker for an attachment that exceeds the upload size limit.
+fn oversize_attachment_marker(name: &str, size: u64) -> String {
+    format!(
+        "[Attachment: {name} ({:.1} MB) — exceeds {} MB limit, not downloaded]",
+        size as f64 / 1024.0 / 1024.0,
+        DISCORD_ATTACHMENT_MAX_BYTES / 1024 / 1024
+    )
+}
+
+/// Inline marker for an attachment that failed to download.
+fn failed_download_marker(name: &str) -> String {
+    format!("[Attachment: {name} — download failed]")
+}
+
 /// Split a message into chunks that fit within the character limit.
 fn split_message(text: &str, limit: usize) -> Vec<String> {
     if text.len() <= limit {
@@ -316,7 +403,75 @@ fn split_message(text: &str, limit: usize) -> Vec<String> {
         // Try to split at newline
         let split_at = remaining[..limit].rfind('\n').unwrap_or(limit);
         chunks.push(remaining[..split_at].to_string());
-        remaining = &remaining[split_at..].trim_start();
+        remaining = remaining[split_at..].trim_start();
     }
     chunks
+}
+
+/// Parses a chat_id string into a typed variant.
+/// Supports two formats:
+/// - `dm/<user_id>` — Direct message to a Discord user
+/// - `<guild_id>/<channel_id>` — Message in a guild channel
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ChatIdKind {
+    Dm(u64),
+    Guild { guild_id: u64, channel_id: u64 },
+}
+
+pub(crate) fn parse_chat_id(s: &str) -> Option<ChatIdKind> {
+    if let Some(rest) = s.strip_prefix("dm/") {
+        return rest.parse::<u64>().ok().map(ChatIdKind::Dm);
+    }
+    let mut parts = s.splitn(2, '/');
+    let guild_id: u64 = parts.next()?.parse().ok()?;
+    let channel_id: u64 = parts.next()?.parse().ok()?;
+    Some(ChatIdKind::Guild {
+        guild_id,
+        channel_id,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_oversize_attachment_marker() {
+        let marker =
+            oversize_attachment_marker("big.zip", (DISCORD_ATTACHMENT_MAX_BYTES + 1) as u64);
+        assert!(marker.contains("big.zip"));
+        assert!(marker.contains("exceeds"));
+        assert!(marker.contains("25 MB"));
+    }
+
+    #[test]
+    fn test_failed_download_marker() {
+        let marker = failed_download_marker("doc.pdf");
+        assert!(marker.contains("doc.pdf"));
+        assert!(marker.contains("download failed"));
+    }
+
+    #[test]
+    fn test_parse_chat_id_dm_form() {
+        assert_eq!(
+            parse_chat_id("dm/123456789"),
+            Some(ChatIdKind::Dm(123456789))
+        );
+        assert_eq!(parse_chat_id("dm/"), None);
+        assert_eq!(parse_chat_id("dm/abc"), None); // non-numeric
+    }
+
+    #[test]
+    fn test_parse_chat_id_guild_form() {
+        assert_eq!(
+            parse_chat_id("111/222"),
+            Some(ChatIdKind::Guild {
+                guild_id: 111,
+                channel_id: 222
+            }),
+        );
+        assert_eq!(parse_chat_id("111/abc"), None);
+        assert_eq!(parse_chat_id("bad-format"), None);
+        assert_eq!(parse_chat_id(""), None);
+    }
 }

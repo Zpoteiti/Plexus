@@ -4,18 +4,20 @@ mod env;
 mod guardrails;
 mod heartbeat;
 mod mcp;
+mod read_stream;
 mod sandbox;
+mod tool_schemas;
 mod tools;
 
+use base64::Engine;
 use connection::{WsSink, recv_message, send_message};
 use heartbeat::{ack_heartbeat, spawn_heartbeat};
 use plexus_common::consts::DEVICE_TOKEN_PREFIX;
-use plexus_common::error::{ErrorCode, PlexusError};
+use plexus_common::errors::{ErrorCode, PlexusError};
 use plexus_common::protocol::{ClientToServer, ServerToClient, ToolExecutionResult};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use tokio::sync::{Mutex, RwLock};
-use base64::Engine;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -83,11 +85,29 @@ async fn run_session(ws_url: &str, token: &str) -> Result<(), PlexusError> {
     tools::register_builtin_tools(&mut registry);
     let registry = Arc::new(registry);
 
-    // Collect and send tool schemas (built-in + MCP)
+    // Collect and send tool names (built-in + MCP) + client-only tool schemas.
     {
-        let mut schemas = registry.schemas();
-        schemas.extend(mcp_manager.lock().await.all_tool_schemas());
-        let msg = ClientToServer::RegisterTools { schemas };
+        let mut tool_names = registry.tool_names();
+        let (mcp_names, mcp_schemas) = {
+            let mgr = mcp_manager.lock().await;
+            let names: Vec<String> = mgr
+                .all_tool_schemas()
+                .into_iter()
+                .filter_map(|s| {
+                    s.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+            (names, mgr.all_mcp_schemas())
+        };
+        tool_names.extend(mcp_names);
+        let msg = ClientToServer::RegisterTools {
+            tool_names,
+            tool_schemas: crate::tool_schemas::client_tool_schemas(),
+            mcp_schemas,
+        };
         let mut s = sink.lock().await;
         send_message(&mut s, &msg).await?;
         info!(
@@ -102,6 +122,7 @@ async fn run_session(ws_url: &str, token: &str) -> Result<(), PlexusError> {
         Arc::clone(&missed_acks),
         dead_signal.clone(),
     );
+    let stream_semaphore = read_stream::new_stream_semaphore();
     let result = message_loop(
         &mut stream,
         &sink,
@@ -110,12 +131,14 @@ async fn run_session(ws_url: &str, token: &str) -> Result<(), PlexusError> {
         &registry,
         &mcp_manager,
         &dead_signal,
+        &stream_semaphore,
     )
     .await;
     hb.cancel();
     result
 }
 
+#[allow(clippy::too_many_arguments)] // collaborators; session-scoped, not worth bundling
 async fn message_loop(
     stream: &mut connection::WsStream,
     sink: &Arc<Mutex<WsSink>>,
@@ -124,6 +147,7 @@ async fn message_loop(
     registry: &Arc<tools::ToolRegistry>,
     mcp_manager: &Arc<Mutex<mcp::McpManager>>,
     dead_signal: &CancellationToken,
+    stream_semaphore: &Arc<tokio::sync::Semaphore>,
 ) -> Result<(), PlexusError> {
     loop {
         let msg = tokio::select! {
@@ -173,24 +197,49 @@ async fn message_loop(
                 fs_policy,
                 mcp_servers,
                 workspace_path,
-                shell_timeout,
+                shell_timeout_max,
                 ssrf_whitelist,
             } => {
                 let mut cfg = config.write().await;
-                let mcp_changed = cfg.merge_update(
+                let (mcp_changed, workspace_path_changed) = cfg.merge_update(
                     fs_policy,
                     mcp_servers.clone(),
                     workspace_path,
-                    shell_timeout,
+                    shell_timeout_max,
                     ssrf_whitelist,
                 );
+                if workspace_path_changed {
+                    // TODO: trigger reconnect so bwrap jail rebinds to new workspace_path.
+                    // For now, log — tools called after this point still see the new config
+                    // via the Arc<RwLock<ClientConfig>>; a clean reconnect would be cleaner.
+                    info!(
+                        "ConfigUpdate: workspace_path changed to {:?}; applying in-place (reconnect for bwrap rebind not yet wired)",
+                        cfg.workspace
+                    );
+                }
+                drop(cfg);
                 if mcp_changed && let Some(new_servers) = mcp_servers {
                     let mut mgr = mcp_manager.lock().await;
                     mgr.apply_config(&new_servers).await;
-                    // Re-register tools with updated MCP schemas
-                    let mut schemas = registry.schemas();
-                    schemas.extend(mgr.all_tool_schemas());
-                    let msg = ClientToServer::RegisterTools { schemas };
+                    // Re-register tools with updated MCP names + schemas.
+                    let mut tool_names = registry.tool_names();
+                    let mcp_names: Vec<String> = mgr
+                        .all_tool_schemas()
+                        .into_iter()
+                        .filter_map(|s| {
+                            s.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect();
+                    tool_names.extend(mcp_names);
+                    let mcp_schemas = mgr.all_mcp_schemas();
+                    let msg = ClientToServer::RegisterTools {
+                        tool_names,
+                        tool_schemas: crate::tool_schemas::client_tool_schemas(),
+                        mcp_schemas,
+                    };
                     let _ = send_message(&mut *sink.lock().await, &msg).await;
                 }
             }
@@ -241,10 +290,12 @@ async fn message_loop(
                     let cfg = config.read().await;
                     let ack_err = match tools::helpers::sanitize_path(&destination, &cfg, true) {
                         Ok(resolved) => {
-                            match base64::engine::general_purpose::STANDARD.decode(&content_base64) {
+                            match base64::engine::general_purpose::STANDARD.decode(&content_base64)
+                            {
                                 Ok(bytes) => {
                                     let mkdir_err = if let Some(parent) = resolved.parent() {
-                                        tokio::fs::create_dir_all(parent).await
+                                        tokio::fs::create_dir_all(parent)
+                                            .await
                                             .err()
                                             .map(|e| format!("Create dirs failed: {e}"))
                                     } else {
@@ -270,6 +321,35 @@ async fn message_loop(
                     if let Err(e) = send_message(&mut *sink.lock().await, &resp).await {
                         warn!("send FileSendAck failed: {e}");
                     }
+                });
+            }
+            ServerToClient::RegisterToolsError {
+                code,
+                message,
+                conflicts,
+            } => {
+                // Server rejected our RegisterTools frame due to MCP schema
+                // collision (spec §4.6 / FR6). The offending MCP entries are
+                // NOT registered. Surface prominently so the user can rename
+                // the MCP or ask the admin to upgrade the shared install.
+                warn!(
+                    "Server rejected tool registration ({code}): {message}; conflicts={}",
+                    serde_json::to_string(&conflicts).unwrap_or_else(|_| "[]".into())
+                );
+            }
+            ServerToClient::ReadStream { request_id, path } => {
+                // FR1b: server-initiated file streaming. Spawn so the
+                // message loop isn't blocked for the duration of the
+                // read. Concurrency is bounded by `stream_semaphore`
+                // (MAX_CONCURRENT_STREAMS permits); saturation yields
+                // an immediate StreamError to the server.
+                let sink_ws: Arc<dyn read_stream::FrameSink> = Arc::new(read_stream::WsFrameSink {
+                    sink: Arc::clone(sink),
+                });
+                let config = Arc::clone(config);
+                let sem = Arc::clone(stream_semaphore);
+                tokio::spawn(async move {
+                    read_stream::handle(sink_ws, config, sem, request_id, path).await;
                 });
             }
             other => {

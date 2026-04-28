@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+:root {
+  --accent: #39ff14;
+  --bg: #0d1117;
+  --sidebar: #0a0f18;
+  --card: #161b22;
+  --border: #1a2332;
+  --muted: #8b949e;
+  --text: #e6edf3;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Scale UI proportionally by screen size.
+   vh units are pre-zoom CSS px, so h-screen / min-h-screen must be
+   divided by the zoom factor to fill exactly the visible viewport. */
+@media (max-width: 1024px) {
+  :root        { zoom: 0.85; }
+  .h-screen    { height:     calc(100vh / 0.85) !important; }
+  .min-h-screen{ min-height: calc(100vh / 0.85) !important; }
+}
+@media (min-width: 2000px) {
+  :root        { zoom: 1.2; }
+  .h-screen    { height:     calc(100vh / 1.2) !important; }
+  .min-h-screen{ min-height: calc(100vh / 1.2) !important; }
+}
+@media (min-width: 2560px) {
+  :root        { zoom: 1.35; }
+  .h-screen    { height:     calc(100vh / 1.35) !important; }
+  .min-h-screen{ min-height: calc(100vh / 1.35) !important; }
+}
+@media (min-width: 3840px) {
+  :root        { zoom: 1.75; }
+  .h-screen    { height:     calc(100vh / 1.75) !important; }
+  .min-h-screen{ min-height: calc(100vh / 1.75) !important; }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, 'SFMono-Regular', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}

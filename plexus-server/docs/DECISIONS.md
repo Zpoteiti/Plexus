@@ -323,3 +323,292 @@ To reply here, respond with text directly. To send media, use the message tool w
 Each channel (Discord, Telegram, Gateway) constructs a `ChannelIdentity` with sender info and whether the sender is the partner or an authorized non-partner. For non-partner senders, the prompt includes a security warning. Gateway/cron default to partner identity.
 
 **Outcome:** The agent knows who it's talking to, can address them by name, and has the exact channel + chat_id needed for the message tool. Non-partner users get an untrusted-input wrapper on their messages plus a system prompt warning -- defense in depth against prompt injection via authorized guests.
+
+---
+
+## ADR-27: Server MCP is lightweight and shared; heavy MCPs belong on client devices
+
+**Context:** Server MCP servers (admin-configured via `PUT /api/server-mcp`) run as child processes on the Plexus server machine and are shared across all users. A pool of connections per MCP server was considered to handle ~1K concurrent users.
+
+**Decision:** No connection pool. One persistent child process per server MCP entry. Server MCP is restricted by policy to lightweight, cloud API-proxy style servers (e.g. web search, image understanding via external APIs). Heavy, resource-intensive MCPs (local filesystem tools, computation, single-threaded binaries) are not appropriate for server MCP -- users who need them configure their own MCP servers on their own client devices via the web UI (Settings > Devices).
+
+**Rationale:**
+- API-proxy MCPs are I/O-bound and handle concurrency internally (async HTTP to external API). One child process handles 1K parallel calls without queuing.
+- MCP protocol is JSON-RPC with request IDs -- rmcp multiplexes concurrent calls on one connection naturally.
+- The real bottleneck at scale is LLM API rate limits, not MCP call throughput.
+- A pool would multiply child process memory × N with no clear benefit for the intended workload.
+- Policy separation eliminates the problem: if a user needs a heavy local MCP, it runs on their device, using their hardware, and doesn't affect other users.
+
+**Outcome:** Simple, single-connection MCP manager. If a server MCP ever becomes a bottleneck (observable via call queue depth under load), a semaphore-limited process pool can be added then -- not speculative upfront design.
+
+---
+
+## ADR-28: Three-tier tool schema merge with unified device_name enum
+
+**Context:** The agent sees tools from three sources: native server tools, server MCP tools (admin-configured), and client tools (native + MCP). A user and an admin may independently configure the same MCP server (e.g. "minimax") with different API keys -- one on the server, one on a client device. The merge strategy must present a clean tool list to the LLM without duplicating tool descriptions.
+
+**Decision:** Three distinct tiers with different merge rules:
+
+1. **Native server tools** (e.g. `web_fetch`, `save_memory`): emitted as-is, no `device_name`. Always run on the server. Never deduped.
+
+2. **MCP tools** (`mcp_{server}_{tool}` prefix): dedup key = full prefixed name. `mcp_minimax_web_search` and `mcp_anthropic_web_search` are distinct keys -- never merged across MCP server names. Sources from server MCP ("server") and client devices accumulate into a single `device_name` enum per key. The agent selects which source to use by specifying `device_name`.
+
+3. **Client native tools** (e.g. `read_file`, `shell`): no prefix, dedup key = bare tool name. `device_name` enum = all client devices that have the tool. Server injects the enum -- client never injects its own `device_name`.
+
+**Example:** Admin configures "minimax" MCP on server (tools: `web_search`, `image_understanding`). User configures the same "minimax" MCP on their `linux_devbox`. Agent sees one tool `mcp_minimax_web_search` with `device_name: enum["server", "linux_devbox"]` -- two sources, one schema.
+
+**Outcome:** LLM sees a clean, deduplicated tool list. Overlapping MCP installs collapse into one tool with a source selector. Different MCP server names never collide regardless of shared tool names. Client native tools remain simple with device routing injected transparently.
+
+---
+
+## ADR-29: Claim-based cron execution with post-execution rescheduling (nanobot parity)
+
+**Context:** The original cron implementation used a fire-and-forget polling model: the poller claimed a job, dispatched it to the message bus, and immediately computed the next run time. This had two problems: (1) next_run_at was computed from dispatch time, not completion time, so a slow agent run would cause the next execution to fire while the previous one was still in progress; (2) there was no safe atomic ownership of a job across multiple server nodes, risking double-firing in multi-node deployments.
+
+**Options:**
+- Option A (old): Fire-and-forget — poller dispatches and reschedules immediately.
+- Option B (nanobot parity): Claim-based — poller atomically claims jobs (sets next_run_at = NULL, claimed_at = NOW()), agent loop computes next_run after execution completes, crash recovery resets stuck claims after 30 minutes.
+
+**Decision:** Option B — claim-based model mirroring nanobot's "wait-until-done-then-reschedule" pattern. Key properties:
+- `claim_due_jobs`: atomic `UPDATE ... RETURNING` prevents double-firing across nodes
+- `reschedule_after_completion`: called by agent_loop after full ReAct turn, computes next_run from Utc::now() (after execution)
+- `unclaim_job`: on dispatch failure, resets to retry in 1 minute rather than waiting 30 min
+- `recover_stuck_jobs`: crash recovery sweep resets jobs claimed > 30 min ago
+- `delete_after_run` and `disable_job` paths for one-shot semantics
+
+**Outcome:** Cron jobs are never double-fired. Next interval starts after execution finishes (nanobot parity). Crash recovery prevents permanent job loss. Two new DB columns: `claimed_at TIMESTAMPTZ`, `last_status TEXT`.
+
+---
+
+## ADR-30: Inbound media persisted as JSON Content blocks in messages.content
+
+**Context:** Users need to send images, audio, documents, and other files through Discord, Telegram, and the browser. Images should flow to vision-capable LLMs as content blocks; non-images should surface as paths the agent can move to a client via file_transfer. The 24h file-store TTL and source-platform deletion (Discord CDN expiry, Telegram file URL expiry) mean any durable reference to the file bytes must live in our DB.
+
+**Options:**
+- **A.** Serialize `Content::Blocks` as JSON into the existing `messages.content` column. Text-only messages keep the plain-string shape; multimodal messages become a JSON array.
+- **B.** Persist only a text placeholder (`[Image: filename]`) in DB. Base64 rebuilt from file store at context-build time; context rebuilds after TTL lose the image.
+- **C.** New `message_media` table keyed by message_id with base64 bytes.
+
+**Decision:** A — JSON in `messages.content`. Read path sniff-parses: strings starting with `[` attempt `serde_json::from_str::<Content>`, falling back to plain text on parse failure.
+
+**Outcome:** Zero schema migration. Text-only messages unaffected. Multimodal messages survive file-store TTL and source-platform deletion. Base64 encoding happens once at agent-loop save time; every subsequent iteration re-reads the same bytes from DB. Mid-ReAct-turn iterations can now "look again" at images because each iteration rebuilds context from DB. `build_user_content`'s `vision_stripped` parameter retired — stripping is a post-pass on the assembled `Vec<ChatMessage>` via the provider's `strip_images_in_place` helper.
+
+---
+
+## ADR-31: Gateway outbound routes by user_id + session_id, not chat_id
+
+**Context:** Gateway chat_ids are UUIDs minted per browser WebSocket connection. When a browser reloads or reconnects, the old UUID is stale. This breaks cron delivery (the stored chat_id points at a connection that no longer exists — gateway's router logs "no browser" and drops the message). It also blocks cross-channel addressing: the agent has no way to target the owner's browser from a session that started on Discord.
+
+**Options:**
+- **A.** New `session_update` frame with `{user_id, session_id}`; gateway iterates `browsers` and fans out to all connections with matching `user_id`. Browser decides (in-view → refresh; not-in-view → show badge).
+- **B.** Sentinel `chat_id="user:<id>"` processed specially.
+- **C.** Always fan out on gateway channel based on a heuristic (`event.cron_job_id.is_some()`).
+
+**Decision:** A — explicit new frame type. Content is a pointer; the browser fetches via the existing REST history endpoint. `OutboundEvent.is_progress` and `.metadata` fields retired as no channel reads them anymore.
+
+**Outcome:** Cron delivery survives browser reconnects. Cross-channel addressing is uniform: every `message` tool call on channel=gateway uses `ctx.session_id`, works whether the browser is currently viewing that session (updates inline) or not (shows on session list). The `BrowserConnection.user_id` field (previously dead-scaffolded) becomes load-bearing.
+
+---
+
+## ADR-32: Cross-channel addressing via chat_id shapes and a `## Channels` system-prompt section
+
+**Context:** The agent can only reply to the owner on the channel the owner currently uses. "Remind me on Telegram" from a Discord session doesn't work — the agent has no knowledge of the owner's Telegram address. `ChannelIdentity.partner_id` was populated by adapters but never surfaced.
+
+**Options:**
+- **A.** Expose configured channels via a compact `## Channels` system-prompt section listing addressable chat_id shapes per channel. DB configs queried per context-build.
+- **B.** Enumerate all Discord guild channels the bot can see plus DM via `UserId::create_dm_channel`; expose each with a friendly name.
+- **C.** Defer — users can paste channel IDs manually.
+
+**Decision:** A (partner DM only per channel). `chat_id="dm/<partner_discord_id>"` for Discord (resolved via a per-bot DM channel cache on demand), raw `<partner_telegram_id>` for Telegram, and `gateway` needs no chat_id (session_id is the routing key — see ADR-31). Guild channel enumeration deliberately out of scope — prompt bloat for a rare case. Non-partner senders are blocked from cross-channel relay via a `check_cross_channel` guard in the `message` tool, gated by a new `ToolContext.is_partner` bool threaded from `event.identity.is_partner`.
+
+**Outcome:** Agent can DM the owner on any configured channel. Non-partner authorized users can only reply on their inbound channel. Prompt stays small (~5 lines per section).
+
+---
+
+## ADR-33: Account deletion via cascade-enabled DB + unified teardown service
+
+**Context:** No path exists to delete a user. Raw `DELETE FROM users` fails on every FK (no cascade declared). Even if the row were deleted, in-memory state (sessions, rate-limit entries, device maps), on-disk file store, running channel bots, and live browser connections would remain, each with a dangling user_id.
+
+**Options:**
+- **A.** `ON DELETE CASCADE` on every user-referencing FK + a single `delete_user_everywhere(state, user_id)` service function that orchestrates the teardown sequence (stop bots → kick browsers → evict in-memory → wipe files → DB delete).
+- **B.** Explicit per-table `DELETE` in a transaction, no schema change.
+- **C.** Soft-delete with a tombstone flag, filter everywhere.
+
+**Decision:** A. Password re-entry required for self-serve `DELETE /api/user`; admin `DELETE /api/admin/users/{id}` uses admin JWT. A new gateway `kick_user` frame cancels live browser WSs. Admin self-delete allowed with a loud warn log; last-admin invariant not enforced (rely on direct DB access to bootstrap).
+
+**Outcome:** Hard delete is complete, idempotent, and one-directional. Re-registering with the same email starts from scratch. Service function returns a `DeletionSummary` for observability. `SessionHandle.user_id` (previously dead-scaffolded) becomes load-bearing for session eviction.
+
+---
+
+## ADR-34: Graceful shutdown via cancellation-token fan-out
+
+**Context:** `AppState.shutdown: CancellationToken` existed but no signal handler called `.cancel()` and no background task awaited `.cancelled()`. SIGTERM killed everything mid-flight.
+
+**Options:**
+- **A.** Signal handler on SIGINT/SIGTERM cancels the token; axum uses `.with_graceful_shutdown(...)`; each background loop selects against `shutdown.cancelled()`.
+- **B.** Use axum's built-in `TerminationExt` / tower middleware for signal handling.
+- **C.** Defer graceful shutdown to a later milestone.
+
+**Decision:** A, minimal scope. Signal watcher → `state.shutdown.cancel()` → 5 background loops (file_store cleanup, cron poller, rate-limit refresh, heartbeat reaper, outbound dispatch, gateway client) all participate. Discord/Telegram bots and per-session agent loops drop at runtime teardown — acceptable for M2.
+
+**Outcome:** Clean Ctrl-C / SIGTERM shutdown. In-flight HTTP requests drain; new requests rejected; background loops exit cleanly instead of mid-iteration. `AppState.shutdown` is no longer dead-scaffolded.
+
+---
+
+## ADR-35: Dream as a protected cron job with idle check
+
+**Context:** Plexus needs nanobot-parity dream — periodic memory consolidation and skill discovery — without running expensive LLM passes on idle users.
+
+**Options:**
+- **Dedicated scheduler thread.** Simple mental model but duplicates cron's claim/dispatch/reschedule infrastructure and requires a new set of migrations + recovery semantics.
+- **Dream as a system-kind cron job.** Reuses all of cron's machinery (poll, atomic claim, reschedule-after-execution) by introducing a single `cron_jobs.kind = 'system'` discriminator protected from user deletion.
+
+**Decision:** Dream is registered as a per-user system cron job at registration time with `(cron_expr: "0 */2 * * *", deliver: false, kind: 'system')`. The poller detects `kind='system' AND name='dream'` and dispatches to `dream::handle_dream_fire` instead of publishing a regular cron event. The handler does a cheap DB idle check before spending any Phase 1 budget; only on positive activity does it advance `users.last_dream_at` and run the standalone Phase 1 LLM call. Non-empty directives are published as `InboundEvent { kind: Dream }` which the agent loop routes to `PromptMode::Dream` + `ToolAllowlist::Only(DREAM_PHASE2_ALLOWLIST)` for the execution phase.
+
+**Outcome:** Near-zero LLM cost on idle users (N users × 1 DB query / 2h). On active users, Phase 1 emits structured directives that Phase 2 applies via the restricted 7-file-tool allowlist. Dream never publishes to channels (`deliver=false` → `publish_final` skips, C-2). C-3 + C-4 prevent users from deleting the dream job via tool or HTTP; C-5's `ensure_system_cron_job` guarantees exactly one dream job per user via a partial unique index. Consolidated memory edits happen inline in `{workspace}/MEMORY.md` + `SOUL.md`; new skills land at `{workspace}/skills/{name}/SKILL.md`.
+
+---
+
+## ADR-36: Heartbeat as in-process tick loop with evaluator-gated external-channel delivery
+
+**Date:** 2026-04-18
+**Status:** Accepted
+**Plan:** E (heartbeat subsystem)
+
+### Context
+
+Plexus needed periodic agent wake-ups driven by a user-owned task list, mirroring nanobot's heartbeat. Unlike dream (which is idempotent memory consolidation on idle users), heartbeat fires on a fixed interval regardless of conversation activity and must be able to notify the user through an external channel.
+
+Three architectural questions resolved here:
+
+1. **Scheduling:** tick loop vs. cron job?
+2. **Delivery:** how does the final agent message reach the user without becoming notification spam?
+3. **Channel selection:** where does the notification go?
+
+### Decision
+
+- **Scheduling:** A dedicated in-process tick loop (`heartbeat::spawn_heartbeat_tick`), not a cron job. Interval is fixed at 60 s (tick cadence), with the actual wake-up cadence tunable via `system_config.heartbeat_interval_seconds` (default 1800 s / 30 min). `0` is a global kill switch.
+- **Delivery:** Shared `evaluator::evaluate_notification` (Plan C) gates every heartbeat output with `purpose = "heartbeat wake-up"`. Default-silence on any evaluator error — the 4 AM guard fires here, not for dream.
+- **Channel selection:** Discord → Telegram → silence. The gateway is explicitly skipped: heartbeat must not interrupt an active browser session.
+
+### Consequences
+
+- **Positive:**
+  - Fixed-cadence semantics are cleaner than cron-style expression matching for "every N minutes".
+  - Tick loop watches `state.shutdown` — graceful shutdown is free.
+  - Reusing the agent loop + `publish_final` keeps the heartbeat path consistent with cron and dream (same compression, crash recovery, tool dispatch).
+- **Negative:**
+  - Server-specific state: a multi-server deployment would refire heartbeat per server unless an advisory lock or node-leader pattern is added later. Plexus is currently single-node; this is tracked as a follow-up.
+  - `last_heartbeat_at` is advanced *before* Phase 1 runs. A Phase 1 crash would skip that user until the next interval elapses. Same trade-off as dream's `last_dream_at` advance; preferred over re-firing after a poisoned Phase 1.
+
+### Alternatives considered
+
+- **Cron-based scheduling** (like dream): would require a per-user system cron job and make the "0 means disabled" knob awkward. Rejected.
+- **Evaluator applies to all turns** (user turns included): would break sync conversations. Evaluator is autonomy-only.
+- **Gateway delivery when no external channel is configured:** would interrupt active browser sessions for stale heartbeat output. Rejected per spec §9.7.
+
+---
+
+## ADR-37: Workspace REST API + frontend file manager
+
+**Date:** 2026-04-18
+**Status:** Accepted
+**Plan:** B (workspace frontend)
+
+### Context
+
+Plan A moved per-user state (soul, memory, skills, uploads) into a single `{WORKSPACE_ROOT}/{user_id}/` tree. The agent's server tools read and write this tree through `resolve_user_path` + `QuotaCache`. Plan A's cutover left the Settings page broken: its Soul + Memory textareas hit `PATCH /api/user/soul` / `PATCH /api/user/memory` which return 410 Gone, and the Skills tab's `/api/skills` endpoints also return 410. Users had no way to see or edit their workspace until Plan B landed.
+
+### Decision
+
+Add 7 REST endpoints under `/api/workspace/*` and one frontend page at `/settings/workspace`:
+
+- `GET /api/workspace/quota` — `{used_bytes, total_bytes}`.
+- `GET /api/workspace/tree` — flat sorted list of `{path, is_dir, size_bytes, modified_at}` under the user's root. Symlink escape rejected via canonicalized prefix check.
+- `GET /api/workspace/file?path=…` — stream bytes with Content-Type sniff.
+- `PUT /api/workspace/file?path=…` — write raw body bytes with quota enforcement.
+- `DELETE /api/workspace/file?path=…&recursive=bool` — delete with recursive-directory gate.
+- `POST /api/workspace/upload` — multipart upload; files land under `uploads/{YYYY-MM-DD}-{hash}-{filename}` matching the channel-adapter convention.
+- `GET /api/workspace/skills` — parsed SKILL.md frontmatter (reuses Plan A's SkillsCache).
+
+All path validation flows through `workspace::resolve_user_path` / `resolve_user_path_for_create` — the same sandbox the agent uses. Quota checks flow through `state.quota.check_and_reserve_upload`. No bypass path; no special-case frontend trust.
+
+The frontend page is a single-file React component (`pages/Workspace.tsx`) with a tree pane (client-side tree-built from the flat server response), a content pane that dispatches on MIME (markdown via `react-markdown`, text as `<pre>`, images inline, binaries as download link), a quota bar with amber/red thresholds, drag-and-drop multi-file upload, and a quick-access sidebar for SOUL/MEMORY/HEARTBEAT.
+
+The existing Settings page loses its Soul + Memory textareas and rewires the Skills tab from the dropped `/api/skills` to the new `/api/workspace/skills`. All 410-returning endpoints on the user flow are retired.
+
+### Consequences
+
+- **Positive:**
+  - Single sandbox enforcement: agent tools and frontend share `resolve_user_path` — no second path-validation code to get wrong.
+  - Quota state is global: the frontend quota bar reflects live state from the same counter the agent's writes touch.
+  - Deep-linkable via `?path=…` — the Skills tab can link directly to `skills/{name}/SKILL.md`.
+  - `react-markdown` is a single ~50 KB dep with no peer conflicts; the editor is a plain textarea so no code-editor dep is pulled in.
+- **Negative:**
+  - No rename endpoint in v1 (spec §7.2 listed rename as a UI action, but §7.3's endpoint list didn't include it). Users must delete + re-upload. Tracked in ISSUE.md.
+  - Frontend has no automated test harness — all verification is manual. Noted in ISSUE.md as a post-M2 effort.
+  - The upload "ERROR:{filename}" sentinel for failed partial uploads is a string-in-path hack; a cleaner shape would be `{path: string, size_bytes: number, error?: string}` but the current shape keeps the response monomorphic.
+  - `QuotaError` is bridged to `WorkspaceError::Io` via a string-prefix ("quota: ...") so the HTTP wrapper can string-match to route quota overages to ValidationFailed (422). A proper `WorkspaceError::Quota(QuotaError)` variant is cleaner but deferred.
+  - `GET /api/workspace/file` uses `tokio::fs::read` (loads entire file into memory). For large files near the 4 GB per-upload cap, this is an OOM risk. Streaming body should be added before this endpoint sees large-file traffic.
+
+### Alternatives considered
+
+- **Client-side rename via `upload-to-new + delete-old`:** rejected for this plan — silly for large binaries, and the spec doesn't require it. Re-add as an endpoint if users ask.
+- **Separate frontend route per file type** (e.g., `/settings/memory`, `/settings/soul`): rejected — the single Workspace page is simpler and reflects the underlying "it's all just files" model.
+- **TanStack Query for server-state caching:** overkill for a page with ~5 fetches. Local `useState` + manual refresh is fine.
+
+---
+
+## ADR-38: Unified file/tool model via `workspace_fs` + `device_name` routing
+
+### Context
+
+Post-M2, three drift axes had accumulated:
+
+1. **File storage** was split across a workspace tree (`workspace/<user_id>/...`) and an opaque `/api/files/<id>` store (`file_store.rs`). Messages carried `/api/files/<id>` URLs; channels had a `resolve_media` helper; `save_upload`/`load_file` duplicated the quota and path-escape logic that workspace handlers already owned.
+2. **Server file-tool schemas** (read_file, write_file, edit_file, delete_file, list_dir, glob, grep) were emitted as server-only tools. Client-reported versions of the same tools were emitted as a *separate* section with a `device_name` enum of client devices. The agent saw duplicate tool names with overlapping semantics.
+3. **Write path in the server** reimplemented the "resolve + escape-check + quota reserve + rollback + skills invalidate" pipeline in three places (`api.rs` PUT handler, `server_tools/file_ops::write_file`, `server_tools/file_transfer`).
+
+### Options
+
+- **A. Single file service + `device_name` on every file tool.** Introduce a `workspace_fs` service in the server that owns every read/write/delete/glob/grep path — including quota math, skills-cache invalidation, and symlink escape. Make `device_name` a first-class routing dimension: every file tool emits exactly one schema with `device_name` enum = `["server", ...clients_with_that_capability]`. Server ≡ device named "server" from the agent's perspective.
+- **B. Keep file_store, shim through workspace paths.** Build a translation layer so `/api/files/<id>` resolves to a workspace path on read, and stays as a sentinel for outbound. Less churn, but preserves dual-truth permanently.
+- **C. Status quo; factor duplication via helper fns.** Leaves opaque IDs in place, leaves duplicate tool-name emission in place; addresses only the write-path duplication.
+
+### Decision
+
+**Option A.** Delete `file_store.rs` entirely. Build `plexus-server/src/workspace/fs.rs::WorkspaceFs` as the single-writer service. Route REST handlers, tool handlers, channel adapters, and `agent_loop` large-message spill through it. Introduce `server_tools/dispatch.rs` + `server_tools/file_ops_schemas.rs` + `server_tools/shell_schema.rs` to make file-tool + shell-tool schemas canonical and server-owned; strip `description()` + `parameters()` from the client `Tool` trait (client reports only `RegisterTools { tool_names }`). `device_name` is the sole dispatch dimension for file tools: `"server"` → `workspace_fs` call; any other value → `tools_registry::route_to_device` WS forward. Shell stays client-only (no bwrap on server).
+
+Related unifications adopted in the same pass:
+
+- `OutboundEvent.media: Vec<String>` now carries workspace-relative paths (not URLs); channels read via `workspace_fs.read`; inbound attachments from Discord/Telegram write to `.attachments/<channel>-<msg_id>/<file>` via `workspace_fs.write` with a shared `safe_attachment_filename` sanitizer.
+- `UploadOutcome { Success(Uploaded), Error(UploadError) }` replaces the `format!("ERROR:{filename}")` sentinel in `WorkspaceUploadResult`.
+- `file_transfer` collapses to `workspace_fs.read`/`write` server-side + a 3-attempt retry wrapper around device RPCs.
+- `web_fetch` uses `plexus_common::network::validate_url(url, &[])` (hardcoded RFC-1918 block; per-device whitelist is a client-side concern).
+- `/api/devices/{name}/policy` → `/api/devices/{name}/config` accepting `workspace_path`, `shell_timeout_max`, `ssrf_whitelist`, `fs_policy` with 422-on-invalid, pushing `ConfigUpdate` to the device on success.
+- `dream_phase1_prompt` / `dream_phase2_prompt` / `heartbeat_phase1_prompt` flattened from `Arc<RwLock<String>>` to `Arc<str>` (load-once-at-boot; no hot-reload caller existed).
+
+### Consequences
+
+- **Positive:**
+  - One path for "write to user's workspace" — quota math, path resolution, symlink escape, skills-cache invalidation all live in one place. Reduced `file_transfer.rs` by 60 lines, `api.rs` workspace handlers by ~130 lines.
+  - Agent sees **one** schema per file tool. No more "read_file (server) vs read_file (devbox)" ambiguity in the tool list. `device_name` selects the target in a single slot.
+  - Server owns all schemas. Client just reports capability names. Easier to reason about what the LLM sees: server controls the contract.
+  - No opaque file IDs. Every reference is a workspace path the user (and agent) can inspect via `list_dir`/`glob`. `.attachments/<msg_id>/<file>` is a predictable structure.
+  - `cargo clippy --workspace -- -D warnings` exits 0 post-sweep; 328 tests pass.
+
+- **Negative / deferred:**
+  - **Frontend is out of sync** with the backend route/contract changes. `/api/workspace/file?path=` → `/api/workspace/files/{*path}` and `ERROR:{}` sentinel → typed `UploadOutcome` both break current frontend fetches. Captured as a single follow-up Open item in ISSUE.md; batched with P4.6/P7.5/P9.1/P9.2 frontend tasks.
+  - **P5.6 MCP collision wiring deferred.** The `mcp::wrap::check_mcp_schema_collision` helper is in place with unit tests, but wiring it into `PUT /api/devices/{name}/mcp` + `PUT /api/server-mcp` requires pre-connect tool-schema introspection at install time, which today only happens after a live WebSocket session. Tracked in ISSUE.md Deferred.
+  - **P4.5 `/api/device-stream/{device}/{path:.*}` endpoint deferred.** Needs a server→client WS `ReadStream` + `StreamChunk` implementation (the protocol frames exist in `plexus-common` per Phase 1, but no end-to-end plumbing).
+  - **Client `ConfigUpdate` reconnect on `workspace_path` change is log-only.** Clean reconnect needs coordination with in-flight tool calls; logged as a TODO in `plexus-client/src/main.rs`.
+  - **`workspace_fs::write_stream` not delta-aware** (unlike `write`). No overwrite caller currently wires through it; if one appears the delta math needs porting. Inline TODO comment left in `fs.rs`.
+  - **`workspace_fs::delete_prefix` silently skips symlinks-to-files** in the TTL sweep path. Defense-in-depth at the write boundary prevents symlinks from being created inside the workspace in the first place, but the reclaim accounting is imperfect if one ever exists.
+
+### Alternatives considered
+
+- **Keep duplicate tool emission, dedupe in the client.** Rejected — pushes complexity to the client and leaves the LLM's schema surface noisy.
+- **Keep `file_store` as a cache layer in front of workspace paths.** Rejected — adds a second source of truth to maintain; the workspace quota + TTL already handle the lifecycle concerns `file_store` was solving.
+- **Split the cleanup across two separate branches (file storage first, then tool unification).** Rejected — the two touch the same message/context/channel files and staging them would double the merge coordination. One coherent branch with 37 reviewable commits is cleaner.
+
+---

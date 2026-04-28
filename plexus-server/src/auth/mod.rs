@@ -4,9 +4,9 @@ pub mod admin;
 pub mod cron_api;
 pub mod device;
 pub mod discord_api;
-pub mod skills_api;
 pub mod telegram_api;
 
+use crate::consts::{BCRYPT_COST, JWT_EXPIRY_DAYS};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -14,8 +14,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use chrono::Utc;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use plexus_common::consts::{BCRYPT_COST, JWT_EXPIRY_DAYS};
-use plexus_common::error::{ApiError, ErrorCode};
+use plexus_common::errors::{ApiError, ErrorCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::info;
@@ -101,6 +100,18 @@ pub async fn register(
                 ApiError::new(ErrorCode::InternalError, format!("DB error: {e}"))
             }
         })?;
+
+    if let Err(e) = crate::workspace::initialize_user_workspace(
+        Some(&state.db),
+        std::path::Path::new(&state.config.workspace_root),
+        &user_id,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, user_id = %user_id, "failed to initialize workspace");
+        // Non-fatal: registration succeeded. First agent turn may fail until workspace
+        // is present. Admin intervention possible.
+    }
 
     let token = sign_jwt(&user_id, is_admin, &state.config.jwt_secret);
     info!("User registered: {}", req.email);

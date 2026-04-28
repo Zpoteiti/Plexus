@@ -16,15 +16,6 @@ impl Tool for ShellTool {
     fn name(&self) -> &str {
         "shell"
     }
-    fn description(&self) -> &str {
-        "Execute a shell command. Working directory defaults to workspace root."
-    }
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{
-            "command":{"type":"string"}, "timeout_sec":{"type":"integer"},
-            "working_dir":{"type":"string"}
-        },"required":["command"]})
-    }
     fn execute(
         &self,
         args: Value,
@@ -43,7 +34,7 @@ async fn exec(args: Value, config: &ClientConfig) -> ToolResult {
     let timeout_sec = args
         .get("timeout_sec")
         .and_then(Value::as_u64)
-        .unwrap_or(config.shell_timeout);
+        .unwrap_or(config.shell_timeout_max);
     let wd = args
         .get("working_dir")
         .and_then(Value::as_str)
@@ -59,7 +50,7 @@ async fn exec(args: Value, config: &ClientConfig) -> ToolResult {
 
     // Build command
     let mut cmd = if config.fs_policy == FsPolicy::Sandbox && *sandbox::BWRAP_AVAILABLE {
-        let a = sandbox::wrap_command(command, &config.workspace);
+        let a = sandbox::wrap_command(command, &config.workspace, &wd);
         let mut c = Command::new(&a[0]);
         c.args(&a[1..]);
         c
@@ -113,7 +104,7 @@ mod tests {
         ClientConfig {
             workspace: d.to_path_buf(),
             fs_policy: FsPolicy::Unrestricted,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         }
@@ -122,7 +113,7 @@ mod tests {
         ClientConfig {
             workspace: d.to_path_buf(),
             fs_policy: FsPolicy::Sandbox,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         }

@@ -1,26 +1,33 @@
 //! Message bus: InboundEvent routing to sessions, rate limiting, OutboundEvent dispatch.
 
+use crate::consts::RATE_LIMIT_CACHE_TTL_SEC;
 use crate::session::SessionHandle;
 use crate::state::AppState;
-use plexus_common::consts::RATE_LIMIT_CACHE_TTL_SEC;
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{info, warn};
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum EventKind {
+    UserTurn,
+    Cron,
+    Dream,
+    Heartbeat,
+}
 
 #[derive(Debug, Clone)]
 pub struct InboundEvent {
     pub session_id: String,
     pub user_id: String,
+    pub kind: EventKind,
     pub content: String,
     pub channel: String,
     pub chat_id: Option<String>,
-    pub sender_id: Option<String>,
     pub media: Vec<String>,
     pub cron_job_id: Option<String>,
     pub identity: Option<crate::context::ChannelIdentity>,
-    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,15 +38,13 @@ pub struct OutboundEvent {
     pub user_id: String,
     pub content: String,
     pub media: Vec<String>,
-    pub is_progress: bool,
-    pub metadata: HashMap<String, String>,
 }
 
 /// Publish an inbound event: rate limit check → find/create session → send to inbox.
 /// If the session doesn't exist yet, spawns a new agent loop.
 pub async fn publish_inbound(state: &Arc<AppState>, event: InboundEvent) -> Result<(), String> {
-    // Rate limit check (cron events exempt)
-    if event.cron_job_id.is_none() {
+    // Rate limit check (only UserTurn events are subject to rate limiting)
+    if event.kind == EventKind::UserTurn {
         check_rate_limit(state, &event.user_id).await?;
     }
 
@@ -60,11 +65,12 @@ pub async fn publish_inbound(state: &Arc<AppState>, event: InboundEvent) -> Resu
         // Create inbox channel
         let (tx, rx) = mpsc::channel(100);
 
-        let handle = SessionHandle {
+        let handle = Arc::new(SessionHandle {
             user_id: event.user_id.clone(),
             inbox_tx: tx.clone(),
             lock: Arc::new(Mutex::new(())),
-        };
+            vision_stripped: Arc::new(AtomicBool::new(false)),
+        });
 
         // Use entry API to atomically insert only if still absent (prevents double-spawn)
         let session_id = event.session_id.clone();
@@ -162,8 +168,15 @@ pub fn spawn_rate_limit_refresh(state: Arc<AppState>) {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(RATE_LIMIT_CACHE_TTL_SEC));
         loop {
-            interval.tick().await;
-            refresh_rate_limit_config(&state).await;
+            tokio::select! {
+                _ = state.shutdown.cancelled() => {
+                    info!("rate limit refresh shutting down");
+                    break;
+                }
+                _ = interval.tick() => {
+                    refresh_rate_limit_config(&state).await;
+                }
+            }
         }
     });
 }

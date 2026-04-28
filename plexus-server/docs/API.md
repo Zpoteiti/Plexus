@@ -254,15 +254,6 @@ Get the server-wide default soul.
 { "message": "Default soul updated" }
 ```
 
-### GET /api/admin/skills  (admin)
-
-List all skills across all users.
-
-```json
-// Response 200
-{ "skills": [{ "skill_id": "...", "user_id": "...", "name": "...", "description": "...", "always_on": false, "skill_path": "..." }] }
-```
-
 ### GET /api/admin/rate-limit  (admin)
 
 ```json
@@ -390,10 +381,14 @@ Enable/disable or change the message.
 
 ### DELETE /api/cron-jobs/{job_id}  (auth required)
 
-```json
-// Response 200
-{ "message": "Cron job deleted" }
 ```
+// Response 204 No Content  (empty body)
+
+// Response 404 Not Found  — job does not exist, or belongs to a different user
+// Response 403 Forbidden  — job has kind='system' (managed by the server; not user-deletable)
+```
+
+System-kind cron jobs (e.g. Plan D's per-user "dream" job) cannot be deleted through this endpoint or via the `cron` server tool; both paths return the same refusal shape. Ownership mismatch returns 404 rather than 403 to avoid leaking the existence of other users' job IDs.
 
 ---
 
@@ -505,6 +500,42 @@ Create or update Discord bot config for the current user.
 
 ---
 
+## Telegram Config
+
+### POST /api/telegram-config  (auth required)
+
+Create or update Telegram bot config for the current user. Starts the bot immediately on success.
+
+```json
+// Request
+{ "bot_token": "123456:ABC...", "partner_telegram_id": "987654321", "allowed_users": ["user_id_1"], "group_policy": "mention" }
+
+// Response 200
+{ "user_id": "uuid", "enabled": true, "partner_telegram_id": "987654321", "allowed_users": ["user_id_1"], "group_policy": "mention" }
+```
+
+`group_policy` defaults to `"mention"` if omitted. Options: `"mention"` (respond only when @mentioned in groups), `"all"` (respond to all messages in groups).
+
+### GET /api/telegram-config  (auth required)
+
+```json
+// Response 200
+{ "user_id": "uuid", "enabled": true, "partner_telegram_id": "987654321", "allowed_users": ["..."], "group_policy": "mention" }
+```
+
+**Errors:** `404 Not Found` if Telegram not configured.
+
+### DELETE /api/telegram-config  (auth required)
+
+Stops the bot and removes config.
+
+```json
+// Response 200
+{ "message": "Telegram config deleted" }
+```
+
+---
+
 ## WebSocket
 
 ### GET /ws
@@ -523,3 +554,51 @@ Client device WebSocket connection. Not JWT-authenticated -- uses device token h
 - File transfer: `FileUploadResponse`, `FileDownloadResponse`
 
 Heartbeat interval: 15s (`HEARTBEAT_INTERVAL_SEC` constant). Timeout: 4 missed heartbeats = 60s (built-in constant, not configurable).
+
+---
+
+## Workspace API
+
+All endpoints require a valid user JWT. Paths in the `path` query param are relative to `{WORKSPACE_ROOT}/{user_id}/`. Traversal attempts return 403 Forbidden. Quota overflows return 413 Payload Too Large (or 422 ValidationFailed, per current ApiError mapping).
+
+### GET /api/workspace/quota
+
+Returns the user's current workspace usage and total quota.
+
+**Response:** `{ "used_bytes": number, "total_bytes": number }` (200 OK)
+
+### GET /api/workspace/tree
+
+Returns a flat list of the user's workspace entries. Directories first, then alphabetical.
+
+**Response:** `[{ "path": string, "is_dir": bool, "size_bytes": number, "modified_at": "RFC3339" }]` (200 OK)
+
+### GET /api/workspace/file?path={path}
+
+Streams the file's bytes. Content-Type sniffed from extension.
+
+**Response:** raw bytes (200 OK), or 403/404 on error.
+
+### PUT /api/workspace/file?path={path}
+
+Body is raw bytes. Parent dirs are created as needed. Quota-checked.
+
+**Response:** 204 No Content on success; 403/422/500 on failure.
+
+### DELETE /api/workspace/file?path={path}&recursive={bool}
+
+Deletes the file (or directory if `recursive=true`).
+
+**Response:** 204 No Content; 422 if directory without recursive; 403 on traversal.
+
+### POST /api/workspace/upload (multipart/form-data)
+
+Accepts one or more files under any form-field name. Each is saved at `uploads/{date}-{hash}-{filename}`.
+
+**Response:** `[{ "path": string, "size_bytes": number }]` — failed files appear with `path="ERROR:{filename}"` + `size_bytes: 0`.
+
+### GET /api/workspace/skills
+
+Returns the user's skills as parsed frontmatter. Reuses the server's SkillsCache.
+
+**Response:** `[{ "name": string, "description": string, "always_on": bool }]`.

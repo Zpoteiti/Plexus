@@ -14,6 +14,7 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert(
     pool: &PgPool,
     message_id: &str,
@@ -48,7 +49,7 @@ pub async fn list_uncompressed(
         "SELECT * FROM messages WHERE session_id = $1 AND compressed = FALSE ORDER BY created_at ASC LIMIT $2",
     )
     .bind(session_id)
-    .bind(plexus_common::consts::MAX_UNCOMPRESSED_MESSAGES)
+    .bind(crate::consts::MAX_UNCOMPRESSED_MESSAGES)
     .fetch_all(pool)
     .await
 }
@@ -78,4 +79,52 @@ pub async fn mark_compressed(pool: &PgPool, message_ids: &[String]) -> Result<()
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Most recent message timestamp across all non-autonomous sessions for a user.
+/// Excludes 'dream:*' and 'heartbeat:*' sessions (these are autonomous pipelines;
+/// including them would create a feedback loop where dream retriggers itself).
+/// Returns None if the user has never sent / received a message.
+pub async fn last_activity_for_user(
+    pool: &PgPool,
+    user_id: &str,
+) -> sqlx::Result<Option<chrono::DateTime<chrono::Utc>>> {
+    let row: Option<(Option<chrono::DateTime<chrono::Utc>>,)> = sqlx::query_as(
+        "SELECT MAX(m.created_at) \
+         FROM messages m \
+         JOIN sessions s ON m.session_id = s.session_id \
+         WHERE s.user_id = $1 \
+           AND s.session_id NOT LIKE 'dream:%' \
+           AND s.session_id NOT LIKE 'heartbeat:%'",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(v,)| v))
+}
+
+/// Fetch the user's messages created strictly after `since`, bounded by `limit`.
+/// Excludes dream: and heartbeat: sessions. Ordered ascending by created_at.
+/// Used by Plan D's Phase 1 to feed the analysis LLM the activity window.
+pub async fn get_messages_since(
+    pool: &PgPool,
+    user_id: &str,
+    since: chrono::DateTime<chrono::Utc>,
+    limit: i64,
+) -> sqlx::Result<Vec<Message>> {
+    sqlx::query_as::<_, Message>(
+        "SELECT m.* FROM messages m \
+         JOIN sessions s ON m.session_id = s.session_id \
+         WHERE s.user_id = $1 \
+           AND s.session_id NOT LIKE 'dream:%' \
+           AND s.session_id NOT LIKE 'heartbeat:%' \
+           AND m.created_at > $2 \
+         ORDER BY m.created_at ASC \
+         LIMIT $3",
+    )
+    .bind(user_id)
+    .bind(since)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
 }

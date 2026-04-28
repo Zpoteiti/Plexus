@@ -11,7 +11,7 @@ You ── Browser ── Gateway ── Server ── Client (your laptop)
                                     └── Client (...)
 ```
 
-Heavily inspired by [nanobot](https://github.com/nanobot-ai/nanobot) — a brilliant Python-based personal AI assistant framework. Plexus takes the patterns we learned from studying nanobot (multi-channel support, tool orchestration, memory, skills, cron, security) and re-architects them for distributed, multi-user, multi-user, multi-machine deployment in Rust.
+Heavily inspired by [nanobot](https://github.com/nanobot-ai/nanobot) — a brilliant Python-based personal AI assistant framework. Plexus takes the patterns we learned from studying nanobot (multi-channel support, tool orchestration, memory, skills, cron, security) and re-architects them for distributed, multi-user, multi-machine deployment in Rust.
 
 ## Why Plexus?
 
@@ -27,13 +27,20 @@ Plexus solves all of these by splitting the architecture: the server handles the
 ## Features
 
 - **Distributed tool execution** — connect any machine as an execution node
-- **Multi-channel** — talk to your agent via web UI, Discord, or API (Telegram, Slack planned)
+- **Multi-channel** — talk to your agent via web UI, Discord, or Telegram
 - **ReAct agent loop** — up to 200 iterations, tool call deduplication, automatic rethink
-- **Per-device security policies** — sandbox, whitelist, or unrestricted filesystem access
+- **Per-device security policies** — two-tier: Sandbox (workspace only) or Unrestricted, enforced server-side
 - **Shell sandbox** — dangerous pattern blocking, env isolation, optional bubblewrap (Linux)
 - **MCP support** — mount any MCP server on any client, tools auto-discovered
-- **Skills system** — install from GitHub, always-on or on-demand, progressive disclosure
-- **Memory & context compression** — persistent memory per user, automatic conversation compression
+- **Skills system** — agent creates reusable skills via file tools; auto-discovered by dream from conversation patterns
+- **Per-user workspace** — each user gets `{workspace_root}/{user_id}/` with SOUL.md, MEMORY.md, HEARTBEAT.md, skills/, uploads/; 5 GB quota with soft-lock at 100%
+- **Memory & context compression** — persistent MEMORY.md per user, automatic conversation compression; dream autonomously consolidates memory every 2 hours
+- **Dream** — idle-gated autonomous pass every 2 hours: consolidates recent conversations into long-term memory, extracts reusable skills; zero LLM cost when nothing happened
+- **Heartbeat** — every 30 minutes, reads the user's HEARTBEAT.md task list and decides whether to wake the agent; evaluator-gated delivery (Discord → Telegram → silence; never interrupts active browser sessions)
+- **Workspace browser** — full file-manager UI at `/settings/workspace`: tree view, markdown render/edit, image preview, drag-drop upload, quota bar, confirm-modal delete
+- **Shared post-run evaluator** — small LLM call decides whether cron / heartbeat output warrants a user ping; default-silence on error (the "4 AM guard")
+- **Account lifecycle** — users delete their own accounts (password-gated); admins delete any user (JWT-gated); full teardown: bots stop, browsers kicked, in-memory state evicted, workspace wiped, DB cascades
+- **Admin user management** — Users tab in the admin panel with search filter and delete button
 - **Cron jobs** — schedule recurring tasks, one-shot reminders, cross-channel delivery
 - **Rate limiting** — per-user message throttle, admin-configurable
 - **Built for scale** — DashMap-based routing, concurrent DB pool, designed for 1K users and 500 concurrent sessions
@@ -65,6 +72,7 @@ export GATEWAY_PORT=9090
 export PLEXUS_GATEWAY_WS_URL=ws://localhost:9090/ws/plexus
 export PLEXUS_GATEWAY_TOKEN=your-gateway-secret
 export PLEXUS_SERVER_API_URL=http://localhost:8080
+export PLEXUS_WORKSPACE_ROOT=/var/lib/plexus/workspace
 
 # Start the server
 cd plexus-server && cargo run &
@@ -118,20 +126,30 @@ plexus-frontend/   React web UI — chat, settings, admin panel
 
 ## How It Works
 
-1. You send a message (from browser or Discord and more in the future — all chat goes through WebSocket)
-2. The server's agent loop builds a system prompt with your soul, memory, available tools, and skills
+**Interactive flow:**
+
+1. You send a message (from browser, Discord, or Telegram — all chat goes through WebSocket)
+2. The server's agent loop builds a system prompt from your SOUL.md, MEMORY.md, available tools, and skills
 3. The LLM responds — either with text (done) or tool calls (continue)
 4. Tool calls get routed to the right client by device name
 5. The client executes the tool (with security guards) and returns the result
 6. Loop back to step 3 until the LLM says it's done (or hits 200 iterations)
 
-All messages, tool results, and memory are persisted in PostgreSQL. Context compression kicks in automatically when the conversation gets long.
+All messages, tool results, and workspace files are persisted. Context compression kicks in automatically when the conversation gets long.
+
+**Unified file model:** every user has a workspace at `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`. Per-message attachments land in `.attachments/` with a 30-day TTL. All file and shell tools accept a `device_name` parameter — `"server"` routes to the user's server-side workspace; any other name routes to that client device's bwrap jail. There is no separate file upload API; files are written via the file tools.
+
+**Autonomous subsystems:**
+
+- **Dream** (every 2 hours, idle-gated) — reads recent conversations, consolidates insights into MEMORY.md, and extracts reusable skills into the skills/ directory. Does nothing — and costs nothing — if there's been no activity since the last run.
+- **Heartbeat** (every 30 minutes) — reads HEARTBEAT.md, uses a lightweight LLM call to decide whether to wake the full agent, then runs if warranted. Output is delivered via Discord or Telegram; browser sessions are never interrupted. A shared post-run evaluator ("4 AM guard") silences pings unless the result is genuinely worth surfacing.
+- **Cron** — user-scheduled tasks run on their own timers, delivered through the same evaluator-gated channel pipeline.
 
 ## Security
 
 Plexus uses a server-authoritative security model — the server defines policy, clients enforce it.
 
-- **Filesystem policy** — per-device: Sandbox (workspace only), Whitelist (workspace + listed paths), or Unrestricted
+- **Filesystem policy** — per-device, two-tier: Sandbox (workspace only) or Unrestricted; enforced server-authoritative, not by the client
 - **Shell guards** — dangerous pattern blocking (`rm -rf`, `mkfs`, fork bombs, etc.), environment variable isolation (always on, even in Unrestricted mode)
 - **Bubblewrap sandbox** — optional Linux process isolation, workspace rw + system ro + secrets hidden
 - **SSRF protection** — blocks private IPs, link-local, CGNAT on both client shell and server web_fetch

@@ -3,7 +3,7 @@
 use crate::config::ClientConfig;
 use futures_util::{SinkExt, StreamExt};
 use plexus_common::consts::PROTOCOL_VERSION;
-use plexus_common::error::{ErrorCode, PlexusError};
+use plexus_common::errors::{ErrorCode, PlexusError};
 use plexus_common::protocol::{ClientToServer, ServerToClient};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, info};
@@ -47,7 +47,10 @@ pub async fn recv_message(stream: &mut WsStream) -> Result<ServerToClient, Plexu
                 ));
             }
             None => {
-                return Err(PlexusError::new(ErrorCode::ConnectionFailed, "stream ended"));
+                return Err(PlexusError::new(
+                    ErrorCode::ConnectionFailed,
+                    "stream ended",
+                ));
             }
             _ => continue,
         }
@@ -95,7 +98,7 @@ pub async fn connect_and_auth(
             fs_policy,
             mcp_servers,
             workspace_path,
-            shell_timeout,
+            shell_timeout_max,
             ssrf_whitelist,
         } => {
             info!("Login success: user={user_id}, device={device_name}");
@@ -105,7 +108,7 @@ pub async fn connect_and_auth(
                 ClientConfig::from_login(
                     workspace_path,
                     fs_policy,
-                    shell_timeout,
+                    shell_timeout_max,
                     ssrf_whitelist,
                     mcp_servers,
                 ),

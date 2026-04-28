@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub struct ClientConfig {
     pub workspace: PathBuf,
     pub fs_policy: FsPolicy,
-    pub shell_timeout: u64,
+    pub shell_timeout_max: u64,
     pub ssrf_whitelist: Vec<String>,
     pub mcp_servers: Vec<McpServerEntry>,
 }
@@ -38,45 +38,53 @@ impl ClientConfig {
     pub fn from_login(
         workspace_path: String,
         fs_policy: FsPolicy,
-        shell_timeout: u64,
+        shell_timeout_max: u64,
         ssrf_whitelist: Vec<String>,
         mcp_servers: Vec<McpServerEntry>,
     ) -> Self {
         Self {
             workspace: resolve_workspace(&workspace_path),
             fs_policy,
-            shell_timeout,
+            shell_timeout_max,
             ssrf_whitelist,
             mcp_servers,
         }
     }
 
-    /// Merge a ConfigUpdate. Returns true if mcp_servers changed (caller must reinit MCP).
+    /// Merge a ConfigUpdate.
+    /// Returns `(mcp_changed, workspace_path_changed)`.
+    /// `mcp_changed` — caller must reinit MCP sessions.
+    /// `workspace_path_changed` — bwrap jail root has shifted; a reconnect would
+    /// rebind the sandbox to the new path. For now the caller logs + applies in-place;
+    /// see the TODO in main.rs.
     pub fn merge_update(
         &mut self,
         fs_policy: Option<FsPolicy>,
         mcp_servers: Option<Vec<McpServerEntry>>,
         workspace_path: Option<String>,
-        shell_timeout: Option<u64>,
+        shell_timeout_max: Option<u64>,
         ssrf_whitelist: Option<Vec<String>>,
-    ) -> bool {
+    ) -> (bool, bool) {
         if let Some(v) = fs_policy {
             self.fs_policy = v;
         }
-        if let Some(v) = workspace_path {
+        let workspace_path_changed = if let Some(v) = workspace_path {
             self.workspace = resolve_workspace(&v);
-        }
-        if let Some(v) = shell_timeout {
-            self.shell_timeout = v;
+            true
+        } else {
+            false
+        };
+        if let Some(v) = shell_timeout_max {
+            self.shell_timeout_max = v;
         }
         if let Some(v) = ssrf_whitelist {
             self.ssrf_whitelist = v;
         }
         if let Some(v) = mcp_servers {
             self.mcp_servers = v;
-            return true;
+            return (true, workspace_path_changed);
         }
-        false
+        (false, workspace_path_changed)
     }
 }
 
@@ -98,16 +106,17 @@ mod tests {
     #[test]
     fn test_merge_partial() {
         let mut c = cfg();
-        let mcp = c.merge_update(Some(FsPolicy::Unrestricted), None, None, Some(120), None);
+        let (mcp, wp) = c.merge_update(Some(FsPolicy::Unrestricted), None, None, Some(120), None);
         assert!(!mcp);
+        assert!(!wp);
         assert_eq!(c.fs_policy, FsPolicy::Unrestricted);
-        assert_eq!(c.shell_timeout, 120);
+        assert_eq!(c.shell_timeout_max, 120);
     }
 
     #[test]
     fn test_merge_mcp_returns_true() {
         let mut c = cfg();
-        let mcp = c.merge_update(
+        let (mcp, wp) = c.merge_update(
             None,
             Some(vec![McpServerEntry {
                 name: "t".into(),
@@ -125,13 +134,25 @@ mod tests {
             None,
         );
         assert!(mcp);
+        assert!(!wp);
         assert_eq!(c.mcp_servers.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_workspace_path_changed() {
+        let mut c = cfg();
+        let (mcp, wp) = c.merge_update(None, None, Some("/home/u/new_ws".into()), None, None);
+        assert!(!mcp);
+        assert!(wp);
+        assert_eq!(c.workspace, PathBuf::from("/home/u/new_ws"));
     }
 
     #[test]
     fn test_merge_none_preserves() {
         let mut c = cfg();
-        c.merge_update(None, None, None, None, None);
+        let (mcp, wp) = c.merge_update(None, None, None, None, None);
+        assert!(!mcp);
+        assert!(!wp);
         assert_eq!(c.fs_policy, FsPolicy::Sandbox);
     }
 }

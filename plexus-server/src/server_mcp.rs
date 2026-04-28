@@ -78,6 +78,29 @@ impl ServerMcpManager {
             .collect()
     }
 
+    /// For each live MCP session, return `(server_name, raw (name, params)
+    /// tuples)` suitable for `mcp::wrap::McpInstall::tools`. Used by the
+    /// schema-collision check (spec §4.6).
+    pub fn raw_tool_schemas_by_server(&self) -> Vec<(String, Vec<(String, Value)>)> {
+        self.sessions
+            .values()
+            .map(|s| {
+                let tools = s
+                    .tools
+                    .iter()
+                    .map(|t| {
+                        let params = {
+                            let v = serde_json::to_value(&*t.input_schema).unwrap_or_default();
+                            normalize_schema_for_openai(&v)
+                        };
+                        (t.name.to_string(), params)
+                    })
+                    .collect();
+                (s.server_name.clone(), tools)
+            })
+            .collect()
+    }
+
     /// Call an MCP tool by prefixed name. Extracts server name from prefix.
     pub async fn call_tool(&self, prefixed_name: &str, args: Value) -> Result<String, String> {
         let rest = prefixed_name
@@ -91,20 +114,73 @@ impl ServerMcpManager {
         }
         Err(format!("Server MCP not found for: {prefixed_name}"))
     }
+}
 
-    /// Check if a prefixed tool name belongs to server MCP.
-    pub fn has_tool(&self, prefixed_name: &str) -> bool {
-        if let Some(rest) = prefixed_name.strip_prefix("mcp_") {
-            self.sessions
-                .keys()
-                .any(|name| rest.starts_with(&format!("{name}_")))
-        } else {
-            false
-        }
+/// Hard cap on transient MCP introspection so a broken/slow MCP can't hold
+/// an admin PUT open. Applies to BOTH spawn+initialize AND the subsequent
+/// `tools/list` call.
+pub const MCP_INTROSPECTION_TIMEOUT_SEC: u64 = 10;
+
+/// Spawn the MCP described by `entry`, run `initialize` + `tools/list`,
+/// then close the subprocess. Returns `(tool_name, parameters)` tuples
+/// (raw, unprefixed). Used by `PUT /api/server-mcp` to validate schemas
+/// before persisting (spec §4.6, FR6).
+///
+/// Both stdio and HTTP transports are supported. On any error (spawn
+/// failure, protocol error, timeout) the subprocess is killed before
+/// return. The caller gets a short string suitable for a 400/502 body.
+pub async fn introspect_entry(entry: &McpServerEntry) -> Result<Vec<(String, Value)>, String> {
+    // Treat `url` presence as the HTTP transport selector to mirror the
+    // rest of the MCP config shape (matches `McpServerEntry.transport_type`
+    // == "http" when set, with `url` as the authoritative switch).
+    if entry.url.is_some() {
+        return Err(format!(
+            "MCP '{}': HTTP transport introspection not yet implemented; file an issue or use stdio",
+            entry.name
+        ));
     }
 
-    pub fn session_count(&self) -> usize {
-        self.sessions.len()
+    let deadline = std::time::Duration::from_secs(MCP_INTROSPECTION_TIMEOUT_SEC);
+    let entry = entry.clone();
+    let entry_name = entry.name.clone();
+    let fut = async move {
+        let mut cmd = tokio::process::Command::new(&entry.command);
+        cmd.args(&entry.args);
+        if let Some(env) = &entry.env {
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+        }
+        // TokioChildProcess owns kill-on-drop via its internal handle;
+        // when the service future is dropped on timeout the child is
+        // reaped by tokio.
+        let child =
+            TokioChildProcess::new(cmd).map_err(|e| format!("spawn '{}': {e}", entry.name))?;
+        let service = ().serve(child).await.map_err(|e| format!("init '{}': {e}", entry.name))?;
+        let tools = service
+            .list_all_tools()
+            .await
+            .map_err(|e| format!("tools/list '{}': {e}", entry.name))?;
+        // Close the subprocess cleanly before returning.
+        let _ = service.cancel().await;
+        let raw: Vec<(String, Value)> = tools
+            .into_iter()
+            .map(|t| {
+                let params = {
+                    let v = serde_json::to_value(&*t.input_schema).unwrap_or_default();
+                    normalize_schema_for_openai(&v)
+                };
+                (t.name.to_string(), params)
+            })
+            .collect();
+        Ok::<Vec<(String, Value)>, String>(raw)
+    };
+
+    match tokio::time::timeout(deadline, fut).await {
+        Ok(res) => res,
+        Err(_) => Err(format!(
+            "MCP '{entry_name}' introspection timed out after {MCP_INTROSPECTION_TIMEOUT_SEC}s"
+        )),
     }
 }
 
@@ -178,4 +254,56 @@ async fn call_mcp_tool(
         .join("\n");
 
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `introspect_entry` surfaces spawn failure as a string error instead of
+    /// panicking or hanging — exercises the 400 path in PUT /api/server-mcp.
+    #[tokio::test]
+    async fn introspect_reports_spawn_failure() {
+        let entry = McpServerEntry {
+            name: "bogus".into(),
+            transport_type: None,
+            command: "/bin/definitely-not-a-real-mcp-binary".into(),
+            args: vec![],
+            env: None,
+            url: None,
+            headers: None,
+            tool_timeout: None,
+            enabled: true,
+        };
+        let res = introspect_entry(&entry).await;
+        assert!(res.is_err(), "expected introspect error for missing binary");
+        let msg = res.unwrap_err();
+        assert!(
+            msg.contains("spawn")
+                || msg.contains("bogus")
+                || msg.contains("init")
+                || msg.contains("No such file"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    /// HTTP transport isn't wired yet; introspection must fail fast rather
+    /// than silently succeed with zero tools.
+    #[tokio::test]
+    async fn introspect_http_transport_not_supported() {
+        let entry = McpServerEntry {
+            name: "http-mcp".into(),
+            transport_type: Some("http".into()),
+            command: String::new(),
+            args: vec![],
+            env: None,
+            url: Some("https://example.invalid/mcp".into()),
+            headers: None,
+            tool_timeout: None,
+            enabled: true,
+        };
+        let res = introspect_entry(&entry).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("HTTP"));
+    }
 }

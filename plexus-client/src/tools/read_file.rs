@@ -13,16 +13,6 @@ impl Tool for ReadFileTool {
     fn name(&self) -> &str {
         "read_file"
     }
-    fn description(&self) -> &str {
-        "Read file contents with line numbers. Relative paths resolve from workspace. Images return metadata."
-    }
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type":"object","properties":{
-            "path":{"type":"string","description":"File path"},
-            "offset":{"type":"integer","description":"Start line (1-indexed)","default":1},
-            "limit":{"type":"integer","description":"Max lines","default":2000}
-        },"required":["path"]})
-    }
     fn execute(
         &self,
         args: Value,
@@ -105,7 +95,7 @@ mod tests {
         ClientConfig {
             workspace: dir.to_path_buf(),
             fs_policy: FsPolicy::Unrestricted,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         }

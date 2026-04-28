@@ -26,7 +26,7 @@ pub static BWRAP_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
 });
 
 /// Build a bwrap-wrapped command argument list.
-pub fn wrap_command(command: &str, workspace: &Path) -> Vec<String> {
+pub fn wrap_command(command: &str, workspace: &Path, cwd: &Path) -> Vec<String> {
     let ws = workspace.to_string_lossy().to_string();
     let parent = workspace
         .parent()
@@ -71,13 +71,14 @@ pub fn wrap_command(command: &str, workspace: &Path) -> Vec<String> {
         "--bind".into(),
         ws.clone(),
         ws,
+        "--chdir".into(),
+        cwd.to_string_lossy().to_string(),
         "--new-session".into(),
         "--die-with-parent".into(),
         "--".into(),
-        "bash".into(),
-        "-l".into(),
+        "sh".into(),
         "-c".into(),
-        format!("'{}'", command.replace('\'', "'\\''")),
+        command.to_string(),
     ]
 }
 
@@ -88,14 +89,22 @@ mod tests {
 
     #[test]
     fn test_structure() {
-        let c = wrap_command("echo hi", &PathBuf::from("/home/u/ws"));
+        let c = wrap_command(
+            "echo hi",
+            &PathBuf::from("/home/u/ws"),
+            &PathBuf::from("/home/u/ws"),
+        );
         assert_eq!(c[0], "bwrap");
         assert!(c.contains(&"--new-session".into()) && c.contains(&"--die-with-parent".into()));
     }
 
     #[test]
     fn test_workspace_bind() {
-        let c = wrap_command("ls", &PathBuf::from("/home/u/ws"));
+        let c = wrap_command(
+            "ls",
+            &PathBuf::from("/home/u/ws"),
+            &PathBuf::from("/home/u/ws"),
+        );
         let i = c.iter().position(|a| a == "--bind").unwrap();
         assert_eq!(c[i + 1], "/home/u/ws");
     }

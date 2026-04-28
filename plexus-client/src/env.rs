@@ -18,7 +18,9 @@ pub fn safe_env() -> Vec<(&'static str, String)> {
         vec![
             (
                 "PATH",
-                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+                std::env::var("PATH").unwrap_or_else(|_| {
+                    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+                }),
             ),
             ("HOME", std::env::var("HOME").unwrap_or_default()),
             ("LANG", "en_US.UTF-8".to_string()),

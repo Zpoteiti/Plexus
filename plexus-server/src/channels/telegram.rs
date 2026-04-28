@@ -1,7 +1,7 @@
 //! Telegram per-user bot channel via teloxide.
 //! Long polling. Group @mention detection. Access control via allowed_users.
 
-use crate::bus::{self, InboundEvent, OutboundEvent};
+use crate::bus::{self, EventKind, InboundEvent, OutboundEvent};
 use crate::state::AppState;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,6 +11,10 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 const TELEGRAM_MSG_LIMIT: usize = 4096;
+
+/// Telegram's native attachment size cap. Files above this are rejected
+/// before we even try to download or upload.
+const TELEGRAM_ATTACHMENT_MAX_BYTES: usize = 20 * 1024 * 1024;
 
 type BotRegistry = Arc<RwLock<HashMap<String, BotHandle>>>;
 
@@ -57,6 +61,7 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
         .unwrap_or_else(|| "mention".into());
 
     let state_clone = Arc::clone(&state);
+    let state_shutdown = Arc::clone(&state);
     let bot_holder_clone = Arc::clone(&bot_holder);
 
     tokio::spawn(async move {
@@ -109,16 +114,27 @@ pub async fn start_bot(state: Arc<AppState>, user_id: String, bot_token: String)
                 info!("Telegram bot stopped for {}", &user_id_log);
             }
             _ = &mut shutdown_rx => {
-                info!("Telegram bot shutdown requested");
-                dispatcher.shutdown_token().shutdown().expect("shutdown");
+                info!("Telegram bot shutdown requested for {}", &user_id_log);
+                match dispatcher.shutdown_token().shutdown() {
+                    Ok(fut) => fut.await,
+                    Err(e) => warn!("Telegram shutdown failed: {e}"),
+                }
+            }
+            _ = state_shutdown.shutdown.cancelled() => {
+                info!(user_id = %user_id_log, "Telegram bot shutting down");
+                match dispatcher.shutdown_token().shutdown() {
+                    Ok(fut) => fut.await,
+                    Err(e) => warn!("Telegram shutdown failed: {e}"),
+                }
             }
         }
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_message(
     state: &Arc<AppState>,
-    _bot: &Bot,
+    bot: &Bot,
     msg: &Message,
     plexus_user_id: &str,
     partner_telegram_id: &str,
@@ -126,11 +142,8 @@ async fn handle_message(
     group_policy: &str,
     bot_username: &str,
 ) {
-    // Extract text content
-    let text = match msg.text() {
-        Some(t) => t.to_string(),
-        None => return,
-    };
+    // Extract text content (empty if the message is media-only).
+    let text = msg.text().unwrap_or("").to_string();
 
     // Get sender info
     let sender = match msg.from.as_ref() {
@@ -164,11 +177,116 @@ async fn handle_message(
     }
 
     // Strip @mention from content
-    let content = text
+    let mut content = text
         .replace(&format!("@{bot_username}"), "")
         .trim()
         .to_string();
-    if content.is_empty() {
+
+    // Harvest inbound attachments into the file store.
+    let now = chrono::Utc::now();
+    let mut media_urls: Vec<String> = Vec::new();
+
+    let attachments: Vec<(String, String)> = {
+        let mut v: Vec<(String, String)> = Vec::new();
+        if let Some(photos) = msg.photo()
+            && let Some(largest) = photos.last()
+        {
+            v.push((largest.file.id.clone(), synth_filename_for_photo(now)));
+        }
+        if let Some(voice) = msg.voice() {
+            v.push((voice.file.id.clone(), synth_filename_for_voice(now)));
+        }
+        if let Some(audio) = msg.audio() {
+            let name = audio
+                .title
+                .clone()
+                .unwrap_or_else(|| synth_filename_for_audio(now));
+            v.push((audio.file.id.clone(), name));
+        }
+        if let Some(document) = msg.document() {
+            let name = document
+                .file_name
+                .clone()
+                .unwrap_or_else(|| format!("document_{}", now.format("%Y%m%d_%H%M%S")));
+            v.push((document.file.id.clone(), name));
+        }
+        if let Some(video) = msg.video() {
+            let name = video
+                .file_name
+                .clone()
+                .unwrap_or_else(|| synth_filename_for_video(now));
+            v.push((video.file.id.clone(), name));
+        }
+        if let Some(video_note) = msg.video_note() {
+            v.push((
+                video_note.file.id.clone(),
+                synth_filename_for_video_note(now),
+            ));
+        }
+        if let Some(animation) = msg.animation() {
+            let name = animation
+                .file_name
+                .clone()
+                .unwrap_or_else(|| synth_filename_for_animation(now));
+            v.push((animation.file.id.clone(), name));
+        }
+        v
+    };
+
+    for (file_id, filename) in attachments {
+        let file = match bot.get_file(&file_id).await {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("telegram getFile failed ({filename}): {e}");
+                content.push('\n');
+                content.push_str(&format!("[Attachment: {filename} — download failed]"));
+                continue;
+            }
+        };
+
+        if (file.size as usize) > TELEGRAM_ATTACHMENT_MAX_BYTES {
+            content.push('\n');
+            content.push_str(&oversize_attachment_marker(&filename, file.size as u64));
+            continue;
+        }
+
+        let download_url = format!(
+            "https://api.telegram.org/file/bot{}/{}",
+            bot.token(),
+            file.path
+        );
+
+        let bytes = match state.http_client.get(&download_url).send().await {
+            Ok(r) => match r.bytes().await {
+                Ok(b) => b.to_vec(),
+                Err(e) => {
+                    warn!("telegram file read failed ({filename}): {e}");
+                    content.push('\n');
+                    content.push_str(&format!("[Attachment: {filename} — download failed]"));
+                    continue;
+                }
+            },
+            Err(e) => {
+                warn!("telegram file fetch failed ({filename}): {e}");
+                content.push('\n');
+                content.push_str(&format!("[Attachment: {filename} — download failed]"));
+                continue;
+            }
+        };
+
+        let safe_name = super::safe_attachment_filename(&filename);
+        let rel = format!(".attachments/telegram-{}/{}", msg.id, safe_name);
+        match state.workspace_fs.write(plexus_user_id, &rel, &bytes).await {
+            Ok(()) => media_urls.push(rel),
+            Err(e) => {
+                warn!("telegram attachment save failed ({filename}): {e}");
+                content.push('\n');
+                content.push_str(&format!("[Attachment: {filename} — storage failed]"));
+            }
+        }
+    }
+
+    if content.is_empty() && media_urls.is_empty() {
         return;
     }
 
@@ -178,21 +296,18 @@ async fn handle_message(
     let event = InboundEvent {
         session_id,
         user_id: plexus_user_id.to_string(),
+        kind: EventKind::UserTurn,
         content,
         channel: crate::channels::CHANNEL_TELEGRAM.to_string(),
         chat_id: Some(chat_id),
-        sender_id: Some(sender_id.clone()),
-        media: vec![],
+        media: media_urls,
         cron_job_id: None,
         identity: Some(crate::context::ChannelIdentity {
             sender_name: sender_name.clone(),
             sender_id,
             is_partner,
-            partner_name: partner_telegram_id.to_string(),
-            partner_id: partner_telegram_id.to_string(),
             channel_type: crate::channels::CHANNEL_TELEGRAM.to_string(),
         }),
-        metadata: Default::default(),
     };
 
     if let Err(e) = bus::publish_inbound(state, event).await {
@@ -202,15 +317,15 @@ async fn handle_message(
 
 /// Stop a Telegram bot for a user.
 pub async fn stop_bot(user_id: &str) {
-    if let Some(mut handle) = BOT_REGISTRY.write().await.remove(user_id) {
-        if let Some(tx) = handle.shutdown_tx.take() {
-            let _ = tx.send(());
-        }
+    if let Some(mut handle) = BOT_REGISTRY.write().await.remove(user_id)
+        && let Some(tx) = handle.shutdown_tx.take()
+    {
+        let _ = tx.send(());
     }
 }
 
 /// Deliver an outbound event via Telegram.
-pub async fn deliver(_state: &AppState, event: &OutboundEvent) {
+pub async fn deliver(state: &Arc<AppState>, event: &OutboundEvent) {
     let registry = BOT_REGISTRY.read().await;
     let handle = match registry.get(&event.user_id) {
         Some(h) => h,
@@ -251,20 +366,22 @@ pub async fn deliver(_state: &AppState, event: &OutboundEvent) {
         }
     }
 
-    // Send media as file attachments (or raw URLs for non-file-store paths)
-    for item in crate::file_store::resolve_media(&event.user_id, &event.media).await {
-        match item {
-            crate::file_store::ResolvedMedia::File { bytes, filename } => {
-                let input = teloxide::types::InputFile::memory(bytes).file_name(filename);
-                if let Err(e) = bot.send_document(chat_id, input).await {
-                    error!("Telegram media send error: {e}");
-                }
+    // Send media as file attachments via workspace_fs
+    for path in &event.media {
+        let bytes = match state.workspace_fs.read(&event.user_id, path).await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("Telegram media read failed ({path}): {e}");
+                continue;
             }
-            crate::file_store::ResolvedMedia::Url(url) => {
-                if let Err(e) = bot.send_message(chat_id, url).await {
-                    error!("Telegram media url send error: {e}");
-                }
-            }
+        };
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file.bin".into());
+        let input = teloxide::types::InputFile::memory(bytes).file_name(filename);
+        if let Err(e) = bot.send_document(chat_id, input).await {
+            error!("Telegram media send error: {e}");
         }
     }
 }
@@ -285,4 +402,67 @@ fn split_message(text: &str, limit: usize) -> Vec<String> {
         remaining = remaining[split_at..].trim_start();
     }
     chunks
+}
+
+fn synth_filename_for_voice(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("voice_message_{}.ogg", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_photo(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("photo_{}.jpg", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_video(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("video_{}.mp4", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_audio(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("audio_{}.mp3", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_animation(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("animation_{}.mp4", ts.format("%Y%m%d_%H%M%S"))
+}
+
+fn synth_filename_for_video_note(ts: chrono::DateTime<chrono::Utc>) -> String {
+    format!("video_note_{}.mp4", ts.format("%Y%m%d_%H%M%S"))
+}
+
+/// Inline marker for an attachment that exceeds the upload size limit.
+fn oversize_attachment_marker(name: &str, size: u64) -> String {
+    format!(
+        "[Attachment: {name} ({:.1} MB) — exceeds {} MB limit, not downloaded]",
+        size as f64 / 1024.0 / 1024.0,
+        TELEGRAM_ATTACHMENT_MAX_BYTES / 1024 / 1024
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn test_synth_filename_voice() {
+        let ts = Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 5).unwrap();
+        assert_eq!(
+            synth_filename_for_voice(ts),
+            "voice_message_20260415_103005.ogg"
+        );
+    }
+
+    #[test]
+    fn test_synth_filename_photo() {
+        let ts = Utc.with_ymd_and_hms(2026, 4, 15, 10, 30, 5).unwrap();
+        assert_eq!(synth_filename_for_photo(ts), "photo_20260415_103005.jpg");
+    }
+
+    #[test]
+    fn test_oversize_attachment_marker() {
+        let marker =
+            oversize_attachment_marker("big.zip", (TELEGRAM_ATTACHMENT_MAX_BYTES + 1) as u64);
+        assert!(marker.contains("big.zip"));
+        assert!(marker.contains("exceeds"));
+        assert!(marker.contains("20 MB"));
+    }
 }

@@ -4,11 +4,11 @@ use crate::auth::extract_claims;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::routing::{delete, get, patch, post, put};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::SinkExt;
 use plexus_common::consts::DEVICE_TOKEN_PREFIX;
-use plexus_common::error::{ApiError, ErrorCode};
+use plexus_common::errors::{ApiError, ErrorCode};
 use plexus_common::protocol::{FsPolicy, McpServerEntry, ServerToClient};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -110,9 +110,9 @@ async fn list_devices(
     Ok(Json(serde_json::json!(devices)))
 }
 
-// -- Policy --
+// -- Config --
 
-async fn get_policy(
+async fn get_config(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Path(device_name): Path<String>,
@@ -125,42 +125,146 @@ async fn get_policy(
     Ok(Json(serde_json::json!({
         "device_name": dt.device_name,
         "fs_policy": dt.fs_policy,
+        "workspace_path": dt.workspace_path,
+        "shell_timeout_max": dt.shell_timeout_max,
+        "ssrf_whitelist": dt.ssrf_whitelist,
+        "mcp_servers": dt.mcp_config,
     })))
 }
 
-#[derive(Deserialize)]
-struct PolicyUpdate {
-    fs_policy: serde_json::Value,
+#[derive(Deserialize, Default)]
+struct PatchDeviceConfig {
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    #[serde(default)]
+    pub shell_timeout_max: Option<i32>,
+    #[serde(default)]
+    pub ssrf_whitelist: Option<Vec<String>>,
+    #[serde(default)]
+    pub fs_policy: Option<serde_json::Value>,
 }
 
-async fn patch_policy(
+fn validate_patch(req: &PatchDeviceConfig) -> Result<(), ApiError> {
+    let mut errors: Vec<String> = Vec::new();
+
+    if let Some(wp) = &req.workspace_path
+        && (wp.is_empty() || !wp.starts_with('/'))
+    {
+        errors.push("workspace_path=not absolute".to_string());
+    }
+    if let Some(n) = req.shell_timeout_max
+        && !(10..=1800).contains(&n)
+    {
+        errors.push("shell_timeout_max=out of range (10-1800)".to_string());
+    }
+    if let Some(whitelist) = &req.ssrf_whitelist {
+        for entry in whitelist {
+            if entry.parse::<ipnet::IpNet>().is_err() {
+                errors.push(format!("ssrf_whitelist=invalid CIDR: {entry}"));
+                break;
+            }
+        }
+    }
+    if let Some(fp) = &req.fs_policy
+        && serde_json::from_value::<FsPolicy>(fp.clone()).is_err()
+    {
+        errors.push("fs_policy=must be \"sandbox\" or \"unrestricted\"".to_string());
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            ErrorCode::ValidationFailed,
+            format!("field errors: {}", errors.join("; ")),
+        ))
+    }
+}
+
+async fn patch_config(
     headers: HeaderMap,
     State(state): State<Arc<AppState>>,
     Path(device_name): Path<String>,
-    Json(req): Json<PolicyUpdate>,
+    Json(req): Json<PatchDeviceConfig>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let c = claims(&headers, &state)?;
-    let updated =
-        crate::db::devices::update_fs_policy(&state.db, &c.sub, &device_name, &req.fs_policy)
+
+    validate_patch(&req)?;
+
+    // Verify the device exists
+    let _ = crate::db::devices::find_by_user_and_device(&state.db, &c.sub, &device_name)
+        .await
+        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "Device not found"))?;
+
+    // Apply each Some field to DB
+    if let Some(wp) = &req.workspace_path {
+        let updated =
+            crate::db::devices::update_workspace_path(&state.db, &c.sub, &device_name, wp)
+                .await
+                .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
+        if !updated {
+            return Err(ApiError::new(ErrorCode::NotFound, "Device not found"));
+        }
+    }
+    if let Some(st) = req.shell_timeout_max {
+        crate::db::devices::update_shell_timeout_max(&state.db, &c.sub, &device_name, st)
             .await
             .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
-    if !updated {
-        return Err(ApiError::new(ErrorCode::NotFound, "Device not found"));
     }
-    push_config_update(&state, &c.sub, &device_name, |msg| {
-        let fs_policy: FsPolicy = serde_json::from_value(req.fs_policy.clone()).unwrap_or_default();
-        *msg = ServerToClient::ConfigUpdate {
-            fs_policy: Some(fs_policy),
-            mcp_servers: None,
-            workspace_path: None,
-            shell_timeout: None,
-            ssrf_whitelist: None,
-        };
-    })
-    .await;
+    if let Some(whitelist) = &req.ssrf_whitelist {
+        let val = serde_json::to_value(whitelist)
+            .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
+        crate::db::devices::update_ssrf_whitelist(&state.db, &c.sub, &device_name, &val)
+            .await
+            .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
+    }
+    if let Some(fp) = &req.fs_policy {
+        crate::db::devices::update_fs_policy(&state.db, &c.sub, &device_name, fp)
+            .await
+            .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?;
+    }
+
+    // Build ConfigUpdate with all changed fields
+    let new_fs_policy = req
+        .fs_policy
+        .as_ref()
+        .and_then(|v| serde_json::from_value::<FsPolicy>(v.clone()).ok());
+    let new_workspace_path = req.workspace_path.clone();
+    let new_shell_timeout_max = req
+        .shell_timeout_max
+        .map(|n| u64::try_from(n).unwrap_or(n.unsigned_abs() as u64));
+    let new_ssrf_whitelist = req.ssrf_whitelist.clone();
+
+    if new_fs_policy.is_some()
+        || new_workspace_path.is_some()
+        || new_shell_timeout_max.is_some()
+        || new_ssrf_whitelist.is_some()
+    {
+        push_config_update(&state, &c.sub, &device_name, |msg| {
+            *msg = ServerToClient::ConfigUpdate {
+                fs_policy: new_fs_policy,
+                mcp_servers: None,
+                workspace_path: new_workspace_path,
+                shell_timeout_max: new_shell_timeout_max,
+                ssrf_whitelist: new_ssrf_whitelist,
+            };
+        })
+        .await;
+    }
+
+    // Re-read from DB for canonical response
+    let dt = crate::db::devices::find_by_user_and_device(&state.db, &c.sub, &device_name)
+        .await
+        .map_err(|e| ApiError::new(ErrorCode::InternalError, format!("{e}")))?
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound, "Device not found"))?;
     Ok(Json(serde_json::json!({
-        "device_name": device_name,
-        "fs_policy": req.fs_policy,
+        "device_name": dt.device_name,
+        "fs_policy": dt.fs_policy,
+        "workspace_path": dt.workspace_path,
+        "shell_timeout_max": dt.shell_timeout_max,
+        "ssrf_whitelist": dt.ssrf_whitelist,
+        "mcp_servers": dt.mcp_config,
     })))
 }
 
@@ -208,7 +312,7 @@ async fn put_mcp(
             fs_policy: None,
             mcp_servers: Some(mcp_servers),
             workspace_path: None,
-            shell_timeout: None,
+            shell_timeout_max: None,
             ssrf_whitelist: None,
         };
     })
@@ -243,8 +347,8 @@ pub fn device_routes() -> Router<Arc<AppState>> {
         .route("/api/device-tokens/{token}", delete(delete_token))
         .route("/api/devices", get(list_devices))
         .route(
-            "/api/devices/{device_name}/policy",
-            get(get_policy).patch(patch_policy),
+            "/api/devices/{device_name}/config",
+            get(get_config).patch(patch_config),
         )
         .route("/api/devices/{device_name}/mcp", get(get_mcp).put(put_mcp))
 }

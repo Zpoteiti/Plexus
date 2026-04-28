@@ -9,7 +9,7 @@ pub struct DeviceToken {
     pub fs_policy: serde_json::Value,
     pub mcp_config: serde_json::Value,
     pub workspace_path: String,
-    pub shell_timeout: i64,
+    pub shell_timeout_max: i64,
     pub ssrf_whitelist: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }
@@ -80,6 +80,57 @@ pub async fn update_mcp_config(
         "UPDATE device_tokens SET mcp_config = $1 WHERE user_id = $2 AND device_name = $3",
     )
     .bind(mcp_config)
+    .bind(user_id)
+    .bind(device_name)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_workspace_path(
+    pool: &PgPool,
+    user_id: &str,
+    device_name: &str,
+    workspace_path: &str,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE device_tokens SET workspace_path = $1 WHERE user_id = $2 AND device_name = $3",
+    )
+    .bind(workspace_path)
+    .bind(user_id)
+    .bind(device_name)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_shell_timeout_max(
+    pool: &PgPool,
+    user_id: &str,
+    device_name: &str,
+    shell_timeout_max: i32,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE device_tokens SET shell_timeout_max = $1 WHERE user_id = $2 AND device_name = $3",
+    )
+    .bind(shell_timeout_max)
+    .bind(user_id)
+    .bind(device_name)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn update_ssrf_whitelist(
+    pool: &PgPool,
+    user_id: &str,
+    device_name: &str,
+    ssrf_whitelist: &serde_json::Value,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE device_tokens SET ssrf_whitelist = $1 WHERE user_id = $2 AND device_name = $3",
+    )
+    .bind(ssrf_whitelist)
     .bind(user_id)
     .bind(device_name)
     .execute(pool)

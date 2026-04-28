@@ -525,7 +525,7 @@ Defined in `sandbox.rs`. Checked once at startup via `LazyLock<bool>` (probe `bw
 ### 10.3 Command Wrapping
 
 ```
-bwrap [mount flags] -- bash -l -c '{escaped_command}'
+bwrap [mount flags] -- sh -c '{command}'
 ```
 
 Arguments shell-escaped (single-quote special chars).

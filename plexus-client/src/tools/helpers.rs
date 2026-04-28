@@ -1,7 +1,9 @@
 //! Shared tool helpers: path sanitization, output truncation, ignored dirs.
 
 use crate::config::ClientConfig;
-use plexus_common::consts::{MAX_TOOL_OUTPUT_CHARS, TOOL_OUTPUT_HEAD_CHARS, TOOL_OUTPUT_TAIL_CHARS};
+use plexus_common::consts::{
+    MAX_TOOL_OUTPUT_CHARS, TOOL_OUTPUT_HEAD_CHARS, TOOL_OUTPUT_TAIL_CHARS,
+};
 use plexus_common::protocol::FsPolicy;
 use std::path::{Path, PathBuf};
 
@@ -106,7 +108,7 @@ mod tests {
         ClientConfig {
             workspace: PathBuf::from(ws),
             fs_policy: FsPolicy::Sandbox,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         }
@@ -163,7 +165,7 @@ mod tests {
         let c = ClientConfig {
             workspace: PathBuf::from("/tmp"),
             fs_policy: FsPolicy::Unrestricted,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         };

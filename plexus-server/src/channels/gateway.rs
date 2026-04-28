@@ -2,7 +2,7 @@
 //! Connects to plexus-gateway, authenticates, forwards messages.
 //! Stub for now — full implementation in M4 when gateway exists.
 
-use crate::bus::{self, InboundEvent, OutboundEvent};
+use crate::bus::{self, EventKind, InboundEvent, OutboundEvent};
 use crate::state::AppState;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -15,18 +15,36 @@ pub fn spawn_gateway_client(state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut backoff = 1u64;
         loop {
+            if state.shutdown.is_cancelled() {
+                info!("Gateway client shutting down");
+                break;
+            }
             info!("Gateway: connecting to {ws_url}...");
-            match connect_and_run(&state, &ws_url, &token).await {
-                Ok(()) => {
-                    info!("Gateway: connection closed cleanly");
-                    backoff = 1;
+            tokio::select! {
+                _ = state.shutdown.cancelled() => {
+                    info!("Gateway client shutting down mid-connection attempt");
+                    break;
                 }
-                Err(e) => {
-                    warn!("Gateway: connection error: {e}");
+                result = connect_and_run(&state, &ws_url, &token) => {
+                    match result {
+                        Ok(()) => {
+                            info!("Gateway: connection closed cleanly");
+                            backoff = 1;
+                        }
+                        Err(e) => {
+                            warn!("Gateway: connection error: {e}");
+                        }
+                    }
                 }
             }
             info!("Gateway: reconnecting in {backoff}s...");
-            tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+            tokio::select! {
+                _ = state.shutdown.cancelled() => {
+                    info!("Gateway client shutting down during reconnect wait");
+                    break;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff)) => {}
+            }
             backoff = (backoff * 2).min(30);
         }
     });
@@ -111,7 +129,12 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
             .unwrap_or("")
             .to_string();
 
-        if content.is_empty() || session_id.is_empty() {
+        let media = extract_media(&parsed);
+
+        if session_id.is_empty() {
+            continue;
+        }
+        if content.is_empty() && media.is_empty() {
             continue;
         }
 
@@ -122,14 +145,13 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
         let event = InboundEvent {
             session_id,
             user_id: user_id.clone(),
+            kind: EventKind::UserTurn,
             content,
             channel: plexus_common::consts::CHANNEL_GATEWAY.to_string(),
             chat_id,
-            sender_id: Some(user_id.clone()),
-            media: vec![],
+            media,
             cron_job_id: None,
             identity: None, // Gateway = always partner, built from User in agent_loop
-            metadata: Default::default(),
         };
 
         if let Err(e) = bus::publish_inbound(state, event).await {
@@ -146,6 +168,18 @@ async fn connect_and_run(state: &Arc<AppState>, ws_url: &str, token: &str) -> Re
     Ok(())
 }
 
+fn extract_media(parsed: &serde_json::Value) -> Vec<String> {
+    parsed
+        .get("media")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Deliver an outbound event to the gateway.
 pub async fn deliver(state: &AppState, event: &OutboundEvent) {
     let sink = state.gateway_sink.read().await;
@@ -153,27 +187,7 @@ pub async fn deliver(state: &AppState, event: &OutboundEvent) {
         warn!("Gateway: not connected, dropping outbound message");
         return;
     };
-
-    let mut msg = serde_json::json!({
-        "type": "send",
-        "chat_id": event.chat_id,
-        "content": event.content,
-    });
-
-    let mut metadata = serde_json::Map::new();
-    if event.is_progress {
-        metadata.insert("_progress".into(), serde_json::json!(true));
-    }
-    if !event.media.is_empty() {
-        metadata.insert("media".into(), serde_json::json!(event.media));
-    }
-    if let Some(sender_id) = event.metadata.get("sender_id") {
-        metadata.insert("sender_id".into(), serde_json::json!(sender_id));
-    }
-    if !metadata.is_empty() {
-        msg["metadata"] = serde_json::Value::Object(metadata);
-    }
-
+    let msg = build_deliver_frame(event);
     let json = serde_json::to_string(&msg).unwrap();
     let mut s = sink.lock().await;
     if let Err(e) = futures_util::SinkExt::send(
@@ -182,6 +196,110 @@ pub async fn deliver(state: &AppState, event: &OutboundEvent) {
     )
     .await
     {
-        warn!("Gateway send error: {e}");
+        warn!("Gateway: send failed: {e}");
+    }
+}
+
+/// Build the WS frame sent to plexus-gateway. Always a session_update
+/// pointer — browsers fetch content via the existing REST history endpoint.
+fn build_deliver_frame(event: &crate::bus::OutboundEvent) -> serde_json::Value {
+    serde_json::json!({
+        "type": "session_update",
+        "user_id": event.user_id,
+        "session_id": event.session_id,
+    })
+}
+
+fn build_kick_user_frame(user_id: &str) -> serde_json::Value {
+    serde_json::json!({ "type": "kick_user", "user_id": user_id })
+}
+
+/// Send a kick_user frame to plexus-gateway. The gateway will cancel
+/// every browser WebSocket whose user_id matches. Used by the account
+/// deletion flow (AD-5) to close live browser connections for a
+/// deleted user.
+pub async fn kick_user(state: &AppState, user_id: &str) {
+    let sink_guard = state.gateway_sink.read().await;
+    let Some(sink) = sink_guard.as_ref() else {
+        warn!(user_id, "Gateway: not connected, cannot kick user");
+        return;
+    };
+    let frame = build_kick_user_frame(user_id);
+    let json = serde_json::to_string(&frame).unwrap();
+    let mut s = sink.lock().await;
+    if let Err(e) = futures_util::SinkExt::send(
+        &mut *s,
+        tokio_tungstenite::tungstenite::Message::Text(json.into()),
+    )
+    .await
+    {
+        warn!(error = %e, user_id, "Gateway: kick_user send failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_media_from_gateway_frame() {
+        let raw = r#"{
+            "type": "message",
+            "chat_id": "c1",
+            "sender_id": "u1",
+            "session_id": "s1",
+            "content": "hi",
+            "media": [".attachments/gateway-test/a.png", ".attachments/gateway-test/b.png"]
+        }"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let media = extract_media(&parsed);
+        assert_eq!(
+            media,
+            vec![
+                ".attachments/gateway-test/a.png".to_string(),
+                ".attachments/gateway-test/b.png".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_media_missing() {
+        let raw = r#"{"type":"message","chat_id":"c","session_id":"s","content":"hi"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(extract_media(&parsed).is_empty());
+    }
+
+    #[test]
+    fn test_parse_media_malformed() {
+        let raw = r#"{"type":"message","media":"not-an-array"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert!(extract_media(&parsed).is_empty());
+    }
+
+    #[test]
+    fn test_deliver_produces_session_update_frame() {
+        let event = crate::bus::OutboundEvent {
+            channel: "gateway".into(),
+            chat_id: Some("stale-chat-id".into()),
+            session_id: "session-123".into(),
+            user_id: "user-alice".into(),
+            content: "hello".into(),
+            media: vec![],
+        };
+        let frame = build_deliver_frame(&event);
+        assert_eq!(frame["type"], "session_update");
+        assert_eq!(frame["user_id"], "user-alice");
+        assert_eq!(frame["session_id"], "session-123");
+        // Chat_id must NOT leak into the outbound frame — it's a stale per-connect UUID.
+        assert!(frame.get("chat_id").is_none());
+        assert!(frame.get("content").is_none());
+        assert!(frame.get("media").is_none());
+    }
+
+    #[test]
+    fn test_build_kick_user_frame() {
+        let frame = build_kick_user_frame("user-42");
+        assert_eq!(frame["type"], "kick_user");
+        assert_eq!(frame["user_id"], "user-42");
     }
 }

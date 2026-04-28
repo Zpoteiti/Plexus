@@ -52,10 +52,9 @@ impl ToolResult {
 }
 
 /// Trait for all tools (built-in and MCP wrappers).
+/// Schemas are owned by the server; the client only needs name + execute.
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn parameters(&self) -> Value;
     fn execute(
         &self,
         args: Value,
@@ -87,21 +86,9 @@ impl ToolRegistry {
         }
     }
 
-    /// Build OpenAI function-calling schemas for all registered tools.
-    pub fn schemas(&self) -> Vec<Value> {
-        self.tools
-            .values()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": t.name(),
-                        "description": t.description(),
-                        "parameters": t.parameters(),
-                    }
-                })
-            })
-            .collect()
+    /// Return the names of all registered tools.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.keys().cloned().collect()
     }
 
     pub fn tool_count(&self) -> usize {
@@ -130,12 +117,6 @@ mod tests {
         fn name(&self) -> &str {
             "dummy"
         }
-        fn description(&self) -> &str {
-            "test"
-        }
-        fn parameters(&self) -> Value {
-            serde_json::json!({"type":"object","properties":{},"required":[]})
-        }
         fn execute(
             &self,
             _: Value,
@@ -149,7 +130,7 @@ mod tests {
         ClientConfig {
             workspace: PathBuf::from("/tmp"),
             fs_policy: plexus_common::protocol::FsPolicy::Sandbox,
-            shell_timeout: 60,
+            shell_timeout_max: 60,
             ssrf_whitelist: vec![],
             mcp_servers: vec![],
         }
@@ -185,10 +166,10 @@ mod tests {
     }
 
     #[test]
-    fn test_schemas_format() {
+    fn test_tool_names() {
         let mut r = ToolRegistry::new();
         r.register(Box::new(DummyTool));
-        let s = r.schemas();
-        assert_eq!(s[0]["function"]["name"], "dummy");
+        let names = r.tool_names();
+        assert!(names.contains(&"dummy".to_string()));
     }
 }

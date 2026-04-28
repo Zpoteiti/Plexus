@@ -15,7 +15,7 @@ Orchestration hub -- runs the ReAct agent loop, manages users/sessions/devices, 
 | `context` | Assembles the full prompt (system prompt + history + soul + memory + tool schemas) before each LLM call |
 | `cron` | Cron scheduler -- polls DB for due jobs every 10s and injects prompts into agent loop via bus |
 | `db` | All PostgreSQL interactions (SQLx). Pure async CRUD, no business logic. Sub-modules: users, sessions, messages, devices, discord, cron, skills, checkpoints |
-| `file_store` | Centralized file storage for uploads/media/temp files (25MB max, hourly cleanup of files >24h old) |
+| `workspace` | Per-user workspace service: path validation, quota enforcement, skills-cache invalidation |
 | `memory` | Context compression -- when remaining context window drops below 16K tokens, compresses history into a summary |
 | `providers` | OpenAI-compatible LLM provider with retry logic |
 | `server_mcp` | Server-side MCP client manager -- admins configure shared MCP servers whose tools appear as `device_name="server"` |
@@ -29,16 +29,18 @@ Orchestration hub -- runs the ReAct agent loop, manages users/sessions/devices, 
 
 These tools run on the server, not on client devices. No `device_name` routing needed.
 
+All server tools accept `device_name` ∈ `["server", <client_name>...]`. When `device_name = "server"`, file and shell operations target the user's workspace; client names route to that device's bwrap jail.
+
 | Tool | Description |
 |------|-------------|
-| `save_memory` | Save text to the user's persistent memory |
-| `edit_memory` | Edit existing memory text |
 | `message` | Send a message to any channel, optionally with file attachments. Files are pulled from the specified `from_device` and delivered to the target channel. This is the only way to send files to users. |
 | `file_transfer` | Move files between devices. Server acts as relay: pulls from `from_device`, pushes to `to_device`. Supports server → client and client → client (via server relay). |
 | `cron` | Manage scheduled jobs: create, list, remove. Supports `cron_expr`, `every_seconds`, and one-shot `at` scheduling. |
-| `read_skill` | Read a skill's full SKILL.md instructions (per-user isolated, on-demand for progressive disclosure) |
-| `install_skill` | Install a skill from a GitHub repo for the current user. Per-user isolated — each user has their own skill set. |
-| `web_fetch` | Fetch a URL and extract readable content. SSRF-protected. Output flagged as untrusted. |
+| `web_fetch` | Fetch a URL and extract readable content. SSRF-protected (unconditional RFC-1918 block). Output flagged as untrusted. |
+
+### Unified File Model
+
+All user files live in `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`. Per-message attachments are stored under `.attachments/` within the workspace with a 30-day TTL. There is no separate `/api/files` upload endpoint — files are written via file tools (`write_file`, `edit_file`) routed through the workspace service. Quota is enforced per-user (default 5 GB).
 
 ## Environment Variables
 
@@ -50,7 +52,7 @@ These tools run on the server, not on client devices. No `device_name` routing n
 | `SERVER_PORT` | Yes | -- | HTTP listen port (e.g. `8080`) |
 | `PLEXUS_GATEWAY_WS_URL` | Yes | -- | WebSocket URL for the gateway connection (e.g. `ws://localhost:9090/ws/plexus`) |
 | `PLEXUS_GATEWAY_TOKEN` | Yes | -- | Shared secret for gateway authentication |
-| `PLEXUS_SKILLS_DIR` | No | `~/.plexus/skills` | Directory where skill scripts are stored |
+| `PLEXUS_WORKSPACE_ROOT` | Yes | -- | Root directory for all user workspaces (`{root}/{user_id}/`) |
 
 LLM configuration (`api_base`, `api_key`, `model`, `context_window`) is managed via the `/api/llm-config` API and persisted in the `system_config` DB table -- not env vars.
 
@@ -95,10 +97,6 @@ LLM configuration (`api_base`, `api_key`, `model`, `context_window`) is managed 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/user/profile` | Get user profile |
-| GET | `/api/user/soul` | Get user's soul (system prompt) |
-| PATCH | `/api/user/soul` | Update user's soul |
-| GET | `/api/user/memory` | Get user's persistent memory text |
-| PATCH | `/api/user/memory` | Update user's memory text |
 
 ### Discord (JWT required)
 
@@ -107,15 +105,6 @@ LLM configuration (`api_base`, `api_key`, `model`, `context_window`) is managed 
 | POST | `/api/discord-config` | Create/update Discord bot config |
 | GET | `/api/discord-config` | Get Discord bot config |
 | DELETE | `/api/discord-config` | Delete Discord bot config |
-
-### Skills (JWT required)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/skills` | List user's skills |
-| POST | `/api/skills` | Create a skill |
-| POST | `/api/skills/install` | Install a skill from URL |
-| DELETE | `/api/skills/{name}` | Delete a skill |
 
 ### Cron Jobs (JWT required)
 
@@ -126,20 +115,12 @@ LLM configuration (`api_base`, `api_key`, `model`, `context_window`) is managed 
 | PATCH | `/api/cron-jobs/{job_id}` | Update a cron job |
 | DELETE | `/api/cron-jobs/{job_id}` | Delete a cron job |
 
-### Files (JWT required)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/files` | Upload a file |
-| GET | `/api/files/{file_id}` | Download a file |
-
 ### Admin (JWT required, admin only)
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/admin/default-soul` | Get default soul (system prompt) |
 | PUT | `/api/admin/default-soul` | Set default soul |
-| GET | `/api/admin/skills` | List all users' skills |
 | GET | `/api/llm-config` | Get LLM configuration |
 | PUT | `/api/llm-config` | Update LLM configuration |
 | GET | `/api/server-mcp` | Get server MCP config |
@@ -151,7 +132,7 @@ LLM configuration (`api_base`, `api_key`, `model`, `context_window`) is managed 
 
 | Table | Purpose |
 |-------|---------|
-| `users` | User accounts (email, password hash, admin flag, soul, memory text) |
+| `users` | User accounts (email, password hash, admin flag, timezone) |
 | `device_tokens` | Per-device auth tokens with filesystem policy and MCP config (JSONB) |
 | `sessions` | Chat sessions, one per user per channel context |
 | `messages` | Message history (role, content, tool call metadata, compressed flag) |

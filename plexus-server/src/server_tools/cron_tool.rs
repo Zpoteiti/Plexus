@@ -102,7 +102,7 @@ async fn add_job(state: &Arc<AppState>, ctx: &ToolContext, args: &Value) -> (i32
     };
 
     // For at mode, default delete_after_run to true
-    let delete_after_run = if at.is_some() && !args.get("delete_after_run").is_some() {
+    let delete_after_run = if at.is_some() && args.get("delete_after_run").is_none() {
         true
     } else {
         delete_after_run
@@ -165,6 +165,27 @@ async fn remove_job(state: &Arc<AppState>, user_id: &str, args: &Value) -> (i32,
         Some(id) => id,
         None => return (1, "Missing required parameter: job_id".into()),
     };
+
+    // Load the job first to check ownership and kind before deleting.
+    let job = match crate::db::cron::find_by_id(&state.db, job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => return (1, format!("Cron job {job_id} not found.")),
+        Err(e) => return (1, format!("Failed to look up cron job: {e}")),
+    };
+
+    // Ownership check: only the owning user may remove a job.
+    if job.user_id != user_id {
+        return (1, format!("Cron job {job_id} not found."));
+    }
+
+    // Kind guard: system jobs are server-managed and must not be removed by users.
+    if job.kind == crate::db::cron::SYSTEM_KIND {
+        return (
+            1,
+            "Cannot remove system cron jobs (these are managed by the server).".into(),
+        );
+    }
+
     match crate::db::cron::delete_job(&state.db, job_id, user_id).await {
         Ok(true) => (0, format!("Cron job {job_id} deleted.")),
         Ok(false) => (1, format!("Cron job {job_id} not found.")),
@@ -223,4 +244,142 @@ pub fn parse_at_datetime(
         .single()
         .map(|d| d.with_timezone(&chrono::Utc))
         .ok_or_else(|| "Ambiguous datetime".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server_tools::ToolContext;
+
+    fn make_ctx(user_id: &str) -> ToolContext {
+        ToolContext {
+            user_id: user_id.into(),
+            session_id: "sess-test".into(),
+            channel: "gateway".into(),
+            chat_id: None,
+            is_cron: false,
+            is_partner: true,
+        }
+    }
+
+    /// Requires a running Postgres with DATABASE_URL set and the full schema
+    /// applied (including the `kind` column on `cron_jobs`).
+    /// Run with: cargo test --package plexus-server cron_tool -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn test_remove_refuses_system_job() {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run this test");
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("failed to connect to test DB");
+
+        // Insert a throwaway user (idempotent via ON CONFLICT DO NOTHING).
+        sqlx::query(
+            "INSERT INTO users (user_id, username, email, password_hash, is_admin) \
+             VALUES ('test-c3-alice', 'c3alice', 'c3alice@test.invalid', '', false) \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert test user");
+
+        // Insert a system-kind cron job directly (ensure_system_cron_job lives in C-5).
+        let job_id = "c3-sys-01";
+        sqlx::query(
+            "INSERT INTO cron_jobs \
+             (job_id, user_id, name, timezone, message, channel, chat_id, \
+              delete_after_run, deliver, kind) \
+             VALUES ($1, 'test-c3-alice', 'dream', 'UTC', 'dream prompt', \
+                     'gateway', '-', false, false, 'system') \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .expect("insert system cron job");
+
+        // Build a minimal AppState backed by the real pool.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = crate::state::AppState::test_with_pool(pool.clone(), tmp.path());
+
+        let ctx = make_ctx("test-c3-alice");
+        let args = serde_json::json!({"action": "remove", "job_id": job_id});
+        let (code, out) = cron(&state, &ctx, &args).await;
+
+        assert_eq!(code, 1, "expected exit 1 for system job, got: {out}");
+        assert!(
+            out.contains("system"),
+            "expected 'system' in output, got: {out}"
+        );
+
+        // Confirm the job still exists.
+        let still = crate::db::cron::find_by_id(&pool, job_id).await.unwrap();
+        assert!(still.is_some(), "system job must not have been deleted");
+
+        // Cleanup
+        sqlx::query("DELETE FROM cron_jobs WHERE job_id = $1")
+            .bind(job_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM users WHERE user_id = 'test-c3-alice'")
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    /// Requires DATABASE_URL. Verifies that user-kind jobs CAN be removed.
+    /// Run with: cargo test --package plexus-server cron_tool -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn test_remove_allows_user_job() {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set to run this test");
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("failed to connect to test DB");
+
+        sqlx::query(
+            "INSERT INTO users (user_id, username, email, password_hash, is_admin) \
+             VALUES ('test-c3-bob', 'c3bob', 'c3bob@test.invalid', '', false) \
+             ON CONFLICT DO NOTHING",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert test user");
+
+        let job_id = "c3-usr-01";
+        sqlx::query(
+            "INSERT INTO cron_jobs \
+             (job_id, user_id, name, timezone, message, channel, chat_id, \
+              delete_after_run, deliver, kind) \
+             VALUES ($1, 'test-c3-bob', 'my-job', 'UTC', 'hello', \
+                     'gateway', '-', false, false, 'user') \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .expect("insert user cron job");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = crate::state::AppState::test_with_pool(pool.clone(), tmp.path());
+
+        let ctx = make_ctx("test-c3-bob");
+        let args = serde_json::json!({"action": "remove", "job_id": job_id});
+        let (code, out) = cron(&state, &ctx, &args).await;
+
+        assert_eq!(code, 0, "expected exit 0 for user job remove, got: {out}");
+
+        // Confirm the job is gone.
+        let gone = crate::db::cron::find_by_id(&pool, job_id).await.unwrap();
+        assert!(gone.is_none(), "user job should have been deleted");
+
+        // Cleanup
+        sqlx::query("DELETE FROM users WHERE user_id = 'test-c3-bob'")
+            .execute(&pool)
+            .await
+            .ok();
+    }
 }
