@@ -169,7 +169,7 @@ uuid = { version = "1", features = ["v7", "serde"] }
 secrecy = { version = "0.8", features = ["serde"] }
 jsonschema = "0.18"
 globset = "0.4"
-rmcp = { version = "0.x", features = ["client", "transport-child-process"] }  # exact version pinned during the dependency-setup step of implementation; see Risk Registry §9
+rmcp = { version = "=1.5.0", features = ["client", "transport-child-process"] }  # pinned to 1.5.0; bumps only between milestones, never mid-implementation
 zeroize = "1"   # transitive via secrecy but worth pinning
 
 [dev-dependencies]
@@ -355,21 +355,33 @@ This spec implements the following ADRs in `docs/DECISIONS.md`:
 
 ## 9. Risk Registry
 
-Risks specific to M0 worth tracking:
+Risks specific to M0 worth tracking. All five accepted; mitigations applied at the points below.
 
-| Risk | Mitigation |
-|---|---|
-| **rmcp API churn during M0** — rmcp is young; breaking changes between releases possible | Pin to a specific version in `Cargo.toml`. Update only between milestones, not mid-implementation. |
-| **JSON Schema validation crate (`jsonschema`) compile times** — validation crates can pull heavy deps | Verify clean musl build during dependency-pinning stage. If too heavy, switch to lighter alternative. |
-| **Cross-platform fake-mcp fixture** — stdio subprocess on Windows has CRLF and async-IO quirks | Fixture is Linux-only in M0 per the testing strategy; Windows verification deferred to M2 when client crate adds Windows code paths. |
-| **`secrecy` crate's `serde` integration** — `SecretString` via serde requires care to avoid leaking through serialization | Audit every `Serialize` impl that includes a secret field; either skip the field or use a manually-redacting impl. Tests in `tests/secret_no_leak.rs` cover the common cases. |
-| **Public API surface drift during implementation** — easy to add small public items piecemeal | Code review at end of M0 explicitly walks the `lib.rs` re-exports + every `pub` in submodules and asks "should this be public?" |
+| Risk | Status | Mitigation |
+|---|---|---|
+| **rmcp API churn during M0** — rmcp is young; breaking changes between releases possible | accepted | **Pinned to `rmcp = "=1.5.0"`** (exact-version constraint) in `Cargo.toml`. Update only between milestones, never mid-implementation. |
+| **JSON Schema validation crate (`jsonschema`) compile times** — heavy deps possible | accepted | Compile times accepted as-is. No fallback alternative explored in M0; revisit only if it becomes a measured pain point. |
+| **Cross-platform fake-mcp fixture** — stdio subprocess on Windows has CRLF and async-IO quirks | accepted | Fixture is Linux-only in M0 per the testing strategy; Windows verification deferred to M2 when the client crate adds Windows code paths. |
+| **`secrecy` crate's `serde` integration** — `SecretString` via serde requires care to avoid leaking through serialization | accepted | Audit every `Serialize` impl that includes a secret field; either skip the field or use a manually-redacting impl. Tests in `tests/secret_no_leak.rs` cover the common cases. |
+| **Public API surface drift during implementation** — easy to add small public items piecemeal | accepted | Plan 3 closing pass explicitly walks `lib.rs` re-exports + every `pub` in submodules and asks "should this be public?" before signoff. |
 
 ---
 
 ## 10. Implementation Order
 
-Suggested sequence within M0 (not strictly enforced; some ordering can flex):
+M0 is split into **three sequential plans**, each independently committable. The plans share this one spec; each plan turns its scope into a granular task list via `superpowers:writing-plans`.
+
+| Plan | Scope | Modules | Estimated effort |
+|---|---|---|---|
+| **Plan 1 — Foundation + Protocol** | Workspace skeleton, foundation types, wire format | `consts.rs`, `version.rs`, `secrets.rs`, `errors/`, `protocol/` (all 3 files), CI YAML | ~1 week |
+| **Plan 2 — Tools** | All shared tool infrastructure | `tools/` (all 6 files), `tests/end_to_end_schema_pipeline.rs`, `tests/secret_no_leak.rs` | ~1 week |
+| **Plan 3 — MCP + Polish** | rmcp wrapper + lifecycle + final polish | `mcp/` (all 5 files), `tests/fixtures/fake-mcp/`, `tests/mcp_lifecycle.rs`, `README.md`, doc-comment pass, public-API audit | ~1-2 weeks |
+
+Each plan's exit criterion: subset of §7 acceptance criteria checked, CI green for the modules in scope. End of Plan 3 = M0 done = full §7 satisfied.
+
+### Suggested sequence within each plan
+
+Below is the granular ordering across all three plans, used as the input scaffold when each plan is expanded into a `writing-plans` task list:
 
 1. **Workspace skeleton** — `Cargo.toml`, `plexus-common/Cargo.toml`, basic `lib.rs`, CI YAML stub. Compile-check only.
 2. **`consts.rs` + `version.rs`** — trivial; gets the simplest content in.
