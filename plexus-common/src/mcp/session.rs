@@ -3,8 +3,8 @@
 //! errors (`McpError`) instead of leaking rmcp's error type.
 //!
 //! See ADR-047 for the wrapping rationale. Tests live in
-//! `tests/mcp_lifecycle.rs` (Task 9) — they spawn the `fake-mcp` fixture
-//! to exercise the full client/server protocol.
+//! `tests/mcp_lifecycle.rs` — they spawn the `fake-mcp` fixture to exercise
+//! the full client/server protocol.
 
 use crate::errors::McpError;
 use crate::protocol::{PromptArgument, PromptDef, ResourceDef, ToolDef};
@@ -12,7 +12,8 @@ use rmcp::model::{
     CallToolRequestParams, GetPromptRequestParams, PromptMessageContent, RawContent,
     ReadResourceRequestParams, ResourceContents,
 };
-use serde_json::Value;
+use serde_json::{Map, Value};
+use std::fmt::Display;
 
 /// MCP client session. Hides the underlying rmcp running service.
 ///
@@ -20,6 +21,23 @@ use serde_json::Value;
 /// types do not leak through.
 pub struct McpSession {
     inner: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+}
+
+fn session_err(detail: impl Display) -> McpError {
+    McpError::CallFailed {
+        server: "session".to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+/// Convert a JSON value into the owned `Map` rmcp expects, moving the
+/// inner map when the value is already an object (no clone) and returning
+/// `None` for null/non-object values.
+fn args_to_map(args: Value) -> Option<Map<String, Value>> {
+    match args {
+        Value::Object(map) => Some(map),
+        _ => None,
+    }
 }
 
 impl McpSession {
@@ -34,10 +52,7 @@ impl McpSession {
             .inner
             .list_tools(None)
             .await
-            .map_err(|e| McpError::SpawnFailed {
-                server: "session".to_string(),
-                detail: format!("list_tools: {e}"),
-            })?;
+            .map_err(|e| session_err(format!("list_tools: {e}")))?;
         Ok(response
             .tools
             .into_iter()
@@ -51,14 +66,11 @@ impl McpSession {
 
     /// List the resources advertised by the MCP server.
     pub async fn list_resources(&self) -> Result<Vec<ResourceDef>, McpError> {
-        let response =
-            self.inner
-                .list_resources(None)
-                .await
-                .map_err(|e| McpError::SpawnFailed {
-                    server: "session".to_string(),
-                    detail: format!("list_resources: {e}"),
-                })?;
+        let response = self
+            .inner
+            .list_resources(None)
+            .await
+            .map_err(|e| session_err(format!("list_resources: {e}")))?;
         Ok(response
             .resources
             .into_iter()
@@ -77,10 +89,7 @@ impl McpSession {
             .inner
             .list_prompts(None)
             .await
-            .map_err(|e| McpError::SpawnFailed {
-                server: "session".to_string(),
-                detail: format!("list_prompts: {e}"),
-            })?;
+            .map_err(|e| session_err(format!("list_prompts: {e}")))?;
         Ok(response
             .prompts
             .into_iter()
@@ -103,17 +112,13 @@ impl McpSession {
 
     /// Call a tool. Returns the tool result content concatenated as text.
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<String, McpError> {
-        let arguments = args.as_object().cloned();
         let mut params = CallToolRequestParams::new(name.to_string());
-        params.arguments = arguments;
+        params.arguments = args_to_map(args);
         let response = self
             .inner
             .call_tool(params)
             .await
-            .map_err(|e| McpError::SpawnFailed {
-                server: "session".to_string(),
-                detail: format!("call_tool {name}: {e}"),
-            })?;
+            .map_err(|e| session_err(format!("call_tool {name}: {e}")))?;
         Ok(content_blocks_to_string(response.content))
     }
 
@@ -123,10 +128,7 @@ impl McpSession {
             .inner
             .read_resource(ReadResourceRequestParams::new(uri))
             .await
-            .map_err(|e| McpError::SpawnFailed {
-                server: "session".to_string(),
-                detail: format!("read_resource {uri}: {e}"),
-            })?;
+            .map_err(|e| session_err(format!("read_resource {uri}: {e}")))?;
         Ok(resource_contents_to_string(response.contents))
     }
 
@@ -134,23 +136,21 @@ impl McpSession {
     /// joined with `"\n"` per ADR-048's prompt-output stringify convention.
     /// Empty result → `"(no output)"`.
     pub async fn get_prompt(&self, name: &str, args: Value) -> Result<String, McpError> {
-        let arguments = args.as_object().cloned();
         let mut params = GetPromptRequestParams::new(name.to_string());
-        params.arguments = arguments;
+        params.arguments = args_to_map(args);
         let response = self
             .inner
             .get_prompt(params)
             .await
-            .map_err(|e| McpError::SpawnFailed {
-                server: "session".to_string(),
-                detail: format!("get_prompt {name}: {e}"),
-            })?;
+            .map_err(|e| session_err(format!("get_prompt {name}: {e}")))?;
         Ok(prompt_messages_to_string(response.messages))
     }
 
     /// Cancel and tear down the session. Used by `lifecycle::teardown_mcp`.
     pub(crate) async fn cancel(self) {
-        let _ = self.inner.cancel().await;
+        if let Err(e) = self.inner.cancel().await {
+            eprintln!("[plexus-common] mcp cancel error: {e}");
+        }
     }
 }
 
@@ -181,8 +181,8 @@ fn resource_contents_to_string(contents: Vec<ResourceContents>) -> String {
 
 /// Stringify a list of PromptMessage per ADR-048 (`get_prompt` output).
 ///
-/// Iterates messages, extracts text content from each, joins with `"\n"`.
-/// Non-text content stringified via Debug. Empty list → `"(no output)"`.
+/// Joins text content with `"\n"`. Non-text content stringified via Debug.
+/// Empty list → `"(no output)"`.
 fn prompt_messages_to_string(messages: Vec<rmcp::model::PromptMessage>) -> String {
     if messages.is_empty() {
         return "(no output)".to_string();

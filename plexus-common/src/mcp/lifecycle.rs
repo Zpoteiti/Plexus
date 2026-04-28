@@ -6,8 +6,8 @@
 //!
 //! `teardown_mcp` cancels the running service cleanly.
 //!
-//! Tests live in `tests/mcp_lifecycle.rs` (Task 9) using the `fake-mcp`
-//! fixture binary to exercise the full client/server flow.
+//! Tests live in `tests/mcp_lifecycle.rs` using the `fake-mcp` fixture
+//! binary to exercise the full client/server flow.
 
 use crate::errors::McpError;
 use crate::mcp::session::McpSession;
@@ -25,20 +25,14 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// Bounded by 30 seconds (`SPAWN_TIMEOUT`). On timeout or any other
 /// failure during startup, returns `McpError::SpawnFailed` with detail.
 pub async fn spawn_mcp(config: &McpServerConfig) -> Result<(McpSession, McpSchemas), McpError> {
-    if config.command.is_empty() {
+    let Some(server_label) = config.command.first().cloned() else {
         return Err(McpError::SpawnFailed {
             server: "spawn".to_string(),
             detail: "empty command argv".to_string(),
         });
-    }
+    };
 
-    let server_label = config
-        .command
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "<unknown>".to_string());
-
-    tokio::time::timeout(SPAWN_TIMEOUT, spawn_inner(config))
+    tokio::time::timeout(SPAWN_TIMEOUT, spawn_inner(config, &server_label))
         .await
         .map_err(|_| McpError::SpawnFailed {
             server: server_label.clone(),
@@ -46,16 +40,10 @@ pub async fn spawn_mcp(config: &McpServerConfig) -> Result<(McpSession, McpSchem
         })?
 }
 
-async fn spawn_inner(config: &McpServerConfig) -> Result<(McpSession, McpSchemas), McpError> {
-    let server_label = config
-        .command
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "<unknown>".to_string());
-
-    // Build the tokio Command, then hand it to TokioChildProcess.
-    // TokioChildProcess::new accepts impl Into<CommandWrap>, and
-    // tokio::process::Command implements Into<CommandWrap> via process-wrap.
+async fn spawn_inner(
+    config: &McpServerConfig,
+    server_label: &str,
+) -> Result<(McpSession, McpSchemas), McpError> {
     let mut cmd = Command::new(&config.command[0]);
     if config.command.len() > 1 {
         cmd.args(&config.command[1..]);
@@ -65,28 +53,29 @@ async fn spawn_inner(config: &McpServerConfig) -> Result<(McpSession, McpSchemas
     }
 
     let transport = TokioChildProcess::new(cmd).map_err(|e| McpError::SpawnFailed {
-        server: server_label.clone(),
+        server: server_label.to_string(),
         detail: format!("subprocess transport: {e}"),
     })?;
 
-    // `()` implements `ClientHandler` (and thus `Service<RoleClient>`) in rmcp.
-    // `.serve()` performs the MCP handshake and returns a RunningService.
+    // No-op handler: Plexus doesn't act on server-initiated requests.
     let running =
         ().serve(transport)
             .await
             .map_err(|e| McpError::SpawnFailed {
-                server: server_label.clone(),
+                server: server_label.to_string(),
                 detail: format!("rmcp handshake: {e}"),
             })?;
 
     let session = McpSession::from_running(running);
 
-    let tools = session.list_tools().await?;
-    let resources = session.list_resources().await?;
-    let prompts = session.list_prompts().await?;
+    let (tools, resources, prompts) = tokio::try_join!(
+        session.list_tools(),
+        session.list_resources(),
+        session.list_prompts(),
+    )?;
 
     let schemas = McpSchemas {
-        server_name: server_label,
+        server_name: server_label.to_string(),
         tools,
         resources,
         prompts,

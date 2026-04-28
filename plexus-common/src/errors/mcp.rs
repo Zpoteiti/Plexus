@@ -16,6 +16,9 @@ pub enum McpError {
 
     #[error("MCP server '{server}' failed to spawn: {detail}")]
     SpawnFailed { server: String, detail: String },
+
+    #[error("MCP server '{server}' call failed: {detail}")]
+    CallFailed { server: String, detail: String },
 }
 
 impl Code for McpError {
@@ -24,6 +27,7 @@ impl Code for McpError {
             McpError::SchemaCollision { .. } => ErrorCode::SchemaCollision,
             McpError::WithinServerCollision { .. } => ErrorCode::WithinServerCollision,
             McpError::SpawnFailed { .. } => ErrorCode::SpawnFailed,
+            McpError::CallFailed { .. } => ErrorCode::McpUnavailable,
         }
     }
 }
@@ -58,5 +62,14 @@ mod tests {
         let disp = format!("{}", e);
         assert!(disp.contains("google"));
         assert!(disp.contains("GOOGLE_API_KEY"));
+    }
+
+    #[test]
+    fn call_failed_maps_to_mcp_unavailable() {
+        let e = McpError::CallFailed {
+            server: "notion".into(),
+            detail: "list_tools: connection reset".into(),
+        };
+        assert_eq!(e.code(), ErrorCode::McpUnavailable);
     }
 }

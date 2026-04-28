@@ -8,11 +8,13 @@
 use crate::errors::McpError;
 use serde_json::{Value, json};
 
-/// Extract the placeholder variable names from a URI template.
+/// Extract the unique placeholder variable names from a URI template.
 ///
-/// Order matches occurrence order in the template; duplicates preserved.
+/// Order matches first-occurrence order in the template; duplicates are
+/// dropped so the same `{x}` appearing twice yields one schema property
+/// and one substitution pass.
 pub fn parse_uri_placeholders(uri: &str) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     let bytes = uri.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -22,8 +24,8 @@ pub fn parse_uri_placeholders(uri: &str) -> Vec<String> {
         }
         let start = i + 1;
         let mut end = start;
+        // Per ADR-099, placeholder names match `\w+` — ASCII letters, digits, underscore.
         while end < bytes.len() && bytes[end] != b'}' {
-            // Per ADR-099, placeholder names match `\w+` — ASCII letters, digits, underscore.
             let c = bytes[end];
             if !(c.is_ascii_alphanumeric() || c == b'_') {
                 break;
@@ -31,9 +33,10 @@ pub fn parse_uri_placeholders(uri: &str) -> Vec<String> {
             end += 1;
         }
         if end < bytes.len() && bytes[end] == b'}' && end > start {
-            // Valid placeholder: between start and end.
-            // SAFETY: ASCII slice from valid UTF-8 input is valid UTF-8.
-            out.push(uri[start..end].to_string());
+            let name = &uri[start..end];
+            if !out.iter().any(|existing| existing == name) {
+                out.push(name.to_string());
+            }
             i = end + 1;
         } else {
             i += 1;
@@ -69,13 +72,13 @@ pub fn build_resource_input_schema(uri: &str) -> Value {
 ///
 /// Each `{name}` is replaced with the string form of `args[name]`. Numeric
 /// values are rendered without quotes; strings without quotes; booleans as
-/// "true"/"false". Returns `McpError::SpawnFailed`-style error if any
-/// placeholder has no corresponding key in `args`.
+/// "true"/"false". Returns `McpError::CallFailed` if any placeholder has
+/// no corresponding key in `args`.
 pub fn substitute_uri(uri: &str, args: &Value) -> Result<String, McpError> {
     let placeholders = parse_uri_placeholders(uri);
     let mut out = uri.to_string();
     for name in placeholders {
-        let value = args.get(&name).ok_or_else(|| McpError::SpawnFailed {
+        let value = args.get(&name).ok_or_else(|| McpError::CallFailed {
             server: "uri-substitute".to_string(),
             detail: format!("missing placeholder '{name}' in args"),
         })?;
@@ -189,5 +192,24 @@ mod tests {
         // Numeric arg — substituted as its JSON-string form (without quotes).
         let result = substitute_uri("api://item/{id}", &json!({"id": 42})).unwrap();
         assert_eq!(result, "api://item/42");
+    }
+
+    #[test]
+    fn duplicate_placeholders_deduplicated() {
+        // `{x}` appearing twice yields one entry; schema lists it once.
+        let placeholders = parse_uri_placeholders("api://{x}/{x}");
+        assert_eq!(placeholders, vec!["x"]);
+
+        let schema = build_resource_input_schema("api://{x}/{x}");
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(required, vec!["x"]);
+
+        let result = substitute_uri("api://{x}/{x}", &json!({"x": "a"})).unwrap();
+        assert_eq!(result, "api://a/a");
     }
 }
