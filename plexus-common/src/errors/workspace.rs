@@ -14,10 +14,7 @@ pub enum WorkspaceError {
     SoftLocked,
 
     #[error("upload size {actual_bytes} exceeds 80% of quota ({quota_bytes} bytes)")]
-    UploadTooLarge {
-        actual_bytes: u64,
-        quota_bytes: u64,
-    },
+    UploadTooLarge { actual_bytes: u64, quota_bytes: u64 },
 
     #[error("path {0} resolves outside the workspace root")]
     PathOutsideWorkspace(PathBuf),

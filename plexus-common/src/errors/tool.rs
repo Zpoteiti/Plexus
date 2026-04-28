@@ -13,10 +13,7 @@ pub enum ToolError {
     SandboxFailure(String),
 
     #[error("MCP server '{server}' is not running. Last error: {last_error}")]
-    McpUnavailable {
-        server: String,
-        last_error: String,
-    },
+    McpUnavailable { server: String, last_error: String },
 
     #[error("MCP server '{server}' is restarting; try again in a moment")]
     McpRestarting { server: String },

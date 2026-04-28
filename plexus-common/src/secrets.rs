@@ -29,7 +29,9 @@ macro_rules! secret_newtype {
 
         impl fmt::Debug for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_tuple(stringify!($name)).field(&"<redacted>").finish()
+                f.debug_tuple(stringify!($name))
+                    .field(&"<redacted>")
+                    .finish()
             }
         }
 
@@ -91,14 +93,22 @@ mod tests {
     fn device_token_debug_redacts() {
         let token = DeviceToken::new("plexus_dev_abc123secret".into());
         let dbg = format!("{:?}", token);
-        assert!(!dbg.contains("abc123secret"), "Debug leaked secret: {}", dbg);
+        assert!(
+            !dbg.contains("abc123secret"),
+            "Debug leaked secret: {}",
+            dbg
+        );
     }
 
     #[test]
     fn device_token_display_redacts() {
         let token = DeviceToken::new("plexus_dev_abc123secret".into());
         let disp = format!("{}", token);
-        assert!(!disp.contains("abc123secret"), "Display leaked secret: {}", disp);
+        assert!(
+            !disp.contains("abc123secret"),
+            "Display leaked secret: {}",
+            disp
+        );
     }
 
     #[test]
