@@ -27,6 +27,8 @@ impl Code for McpError {
             McpError::SchemaCollision { .. } => ErrorCode::SchemaCollision,
             McpError::WithinServerCollision { .. } => ErrorCode::WithinServerCollision,
             McpError::SpawnFailed { .. } => ErrorCode::SpawnFailed,
+            // Treat in-flight call failures as unavailable to the caller —
+            // the M1 worker queue may restart the server and retry.
             McpError::CallFailed { .. } => ErrorCode::McpUnavailable,
         }
     }

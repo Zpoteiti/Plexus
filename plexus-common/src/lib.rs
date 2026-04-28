@@ -3,20 +3,23 @@
 //! See `docs/superpowers/specs/2026-04-28-plexus-m0-design.md` for the full
 //! design and `docs/DECISIONS.md` for cross-cutting architecture decisions.
 //!
-//! # Plan 1 surface (Foundation + Protocol)
+//! # Foundation
 //!
 //! - [`consts`] — wire-level reserved string constants.
 //! - [`version`] — `PROTOCOL_VERSION` + `crate_version()`.
 //! - [`secrets`] — redacting newtypes for tokens / API keys.
 //! - [`errors`] — typed error enums + `ErrorCode` + `Code` trait.
+//!
+//! # Protocol
+//!
 //! - [`protocol`] — WS frame types + binary transfer header.
 //!
-//! # Plan 2 surface (Tools)
+//! # Tools
 //!
 //! - [`tools`] — Tool trait + path validation + result wrap + format helpers
 //!   + 14 hardcoded tool schemas + JSON Schema arg validation.
 //!
-//! # Plan 3 surface (MCP)
+//! # MCP
 //!
 //! - [`mcp`] — typed-infix wrapped names + `enabled` glob filter + URI
 //!   template parsing + `McpSession` wrapping rmcp + `spawn_mcp` /

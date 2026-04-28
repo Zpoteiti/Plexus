@@ -61,30 +61,13 @@ pub fn parse_wrapped_name(wrapped: &str) -> Option<WrappedName> {
         return None;
     }
 
-    if let Some(idx) = after_prefix.find(RESOURCE_INFIX) {
-        let server = &after_prefix[..idx];
-        let raw = &after_prefix[idx + RESOURCE_INFIX.len()..];
-        if !server.is_empty() && !raw.is_empty() {
-            return Some(WrappedName {
-                server: server.to_string(),
-                surface: McpSurface::Resource,
-                raw_name: raw.to_string(),
-            });
-        }
-        return None;
+    // Once a typed infix is present, the surface is decided — never fall back
+    // to tool parsing, even if server/raw_name validation fails.
+    if after_prefix.contains(RESOURCE_INFIX) {
+        return parse_with_infix(after_prefix, RESOURCE_INFIX, McpSurface::Resource);
     }
-
-    if let Some(idx) = after_prefix.find(PROMPT_INFIX) {
-        let server = &after_prefix[..idx];
-        let raw = &after_prefix[idx + PROMPT_INFIX.len()..];
-        if !server.is_empty() && !raw.is_empty() {
-            return Some(WrappedName {
-                server: server.to_string(),
-                surface: McpSurface::Prompt,
-                raw_name: raw.to_string(),
-            });
-        }
-        return None;
+    if after_prefix.contains(PROMPT_INFIX) {
+        return parse_with_infix(after_prefix, PROMPT_INFIX, McpSurface::Prompt);
     }
 
     let (server, raw) = after_prefix.split_once('_')?;
@@ -94,6 +77,21 @@ pub fn parse_wrapped_name(wrapped: &str) -> Option<WrappedName> {
     Some(WrappedName {
         server: server.to_string(),
         surface: McpSurface::Tool,
+        raw_name: raw.to_string(),
+    })
+}
+
+/// Try to split `after_prefix` on a typed infix; both halves must be non-empty.
+fn parse_with_infix(after_prefix: &str, infix: &str, surface: McpSurface) -> Option<WrappedName> {
+    let idx = after_prefix.find(infix)?;
+    let server = &after_prefix[..idx];
+    let raw = &after_prefix[idx + infix.len()..];
+    if server.is_empty() || raw.is_empty() {
+        return None;
+    }
+    Some(WrappedName {
+        server: server.to_string(),
+        surface,
         raw_name: raw.to_string(),
     })
 }

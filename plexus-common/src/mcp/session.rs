@@ -18,16 +18,12 @@ use std::fmt::Display;
 /// MCP client session. Hides the underlying rmcp running service.
 ///
 /// Every method returns `McpError` on failure — the inner rmcp error
-/// types do not leak through.
+/// types do not leak through. The `server` name is threaded into every
+/// `McpError::CallFailed` so log readers can identify which MCP server
+/// produced an error.
 pub struct McpSession {
     inner: rmcp::service::RunningService<rmcp::RoleClient, ()>,
-}
-
-fn session_err(detail: impl Display) -> McpError {
-    McpError::CallFailed {
-        server: "session".to_string(),
-        detail: detail.to_string(),
-    }
+    server: String,
 }
 
 /// Convert a JSON value into the owned `Map` rmcp expects, moving the
@@ -42,8 +38,19 @@ fn args_to_map(args: Value) -> Option<Map<String, Value>> {
 
 impl McpSession {
     /// Construct from a started rmcp service. Used by `lifecycle::spawn_mcp`.
-    pub(crate) fn from_running(inner: rmcp::service::RunningService<rmcp::RoleClient, ()>) -> Self {
-        Self { inner }
+    pub(crate) fn from_running(
+        inner: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+        server: String,
+    ) -> Self {
+        Self { inner, server }
+    }
+
+    /// Build a `CallFailed` error tagged with this session's server name.
+    fn err(&self, detail: impl Display) -> McpError {
+        McpError::CallFailed {
+            server: self.server.clone(),
+            detail: detail.to_string(),
+        }
     }
 
     /// List the tools advertised by the MCP server.
@@ -52,7 +59,7 @@ impl McpSession {
             .inner
             .list_tools(None)
             .await
-            .map_err(|e| session_err(format!("list_tools: {e}")))?;
+            .map_err(|e| self.err(format!("list_tools: {e}")))?;
         Ok(response
             .tools
             .into_iter()
@@ -70,7 +77,7 @@ impl McpSession {
             .inner
             .list_resources(None)
             .await
-            .map_err(|e| session_err(format!("list_resources: {e}")))?;
+            .map_err(|e| self.err(format!("list_resources: {e}")))?;
         Ok(response
             .resources
             .into_iter()
@@ -89,7 +96,7 @@ impl McpSession {
             .inner
             .list_prompts(None)
             .await
-            .map_err(|e| session_err(format!("list_prompts: {e}")))?;
+            .map_err(|e| self.err(format!("list_prompts: {e}")))?;
         Ok(response
             .prompts
             .into_iter()
@@ -118,7 +125,7 @@ impl McpSession {
             .inner
             .call_tool(params)
             .await
-            .map_err(|e| session_err(format!("call_tool {name}: {e}")))?;
+            .map_err(|e| self.err(format!("call_tool {name}: {e}")))?;
         Ok(content_blocks_to_string(response.content))
     }
 
@@ -128,7 +135,7 @@ impl McpSession {
             .inner
             .read_resource(ReadResourceRequestParams::new(uri))
             .await
-            .map_err(|e| session_err(format!("read_resource {uri}: {e}")))?;
+            .map_err(|e| self.err(format!("read_resource {uri}: {e}")))?;
         Ok(resource_contents_to_string(response.contents))
     }
 
@@ -142,7 +149,7 @@ impl McpSession {
             .inner
             .get_prompt(params)
             .await
-            .map_err(|e| session_err(format!("get_prompt {name}: {e}")))?;
+            .map_err(|e| self.err(format!("get_prompt {name}: {e}")))?;
         Ok(prompt_messages_to_string(response.messages))
     }
 

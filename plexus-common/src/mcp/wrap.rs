@@ -5,7 +5,6 @@
 //! (operators, query strings, fragments) are NOT supported; if a real
 //! MCP needs them we revisit.
 
-use crate::errors::McpError;
 use serde_json::{Value, json};
 
 /// Extract the unique placeholder variable names from a URI template.
@@ -72,16 +71,16 @@ pub fn build_resource_input_schema(uri: &str) -> Value {
 ///
 /// Each `{name}` is replaced with the string form of `args[name]`. Numeric
 /// values are rendered without quotes; strings without quotes; booleans as
-/// "true"/"false". Returns `McpError::CallFailed` if any placeholder has
-/// no corresponding key in `args`.
-pub fn substitute_uri(uri: &str, args: &Value) -> Result<String, McpError> {
+/// "true"/"false". Returns `Err(detail)` if any placeholder has no
+/// corresponding key in `args`. The caller wraps the detail with its own
+/// server identity (e.g. via `McpError::CallFailed`).
+pub fn substitute_uri(uri: &str, args: &Value) -> Result<String, String> {
     let placeholders = parse_uri_placeholders(uri);
     let mut out = uri.to_string();
     for name in placeholders {
-        let value = args.get(&name).ok_or_else(|| McpError::CallFailed {
-            server: "uri-substitute".to_string(),
-            detail: format!("missing placeholder '{name}' in args"),
-        })?;
+        let value = args
+            .get(&name)
+            .ok_or_else(|| format!("missing placeholder '{name}' in args"))?;
         let replacement = match value {
             Value::String(s) => s.clone(),
             Value::Number(n) => n.to_string(),

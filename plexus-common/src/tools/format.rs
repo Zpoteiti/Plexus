@@ -18,7 +18,11 @@ pub fn with_line_numbers(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
-    let mut out = String::with_capacity(text.len() + 16);
+    // Each line gains "<number>|" — average 4–7 bytes for files up to ~100K
+    // lines. Sized accurately up front to avoid repeated reallocs on large
+    // file reads (read_file's default cap is 128K characters).
+    let line_count = bytecount_newlines(text) + 1;
+    let mut out = String::with_capacity(text.len() + line_count * 8);
     for (i, line) in text.lines().enumerate() {
         if i > 0 {
             out.push('\n');
@@ -29,6 +33,10 @@ pub fn with_line_numbers(text: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+fn bytecount_newlines(text: &str) -> usize {
+    text.bytes().filter(|&b| b == b'\n').count()
 }
 
 /// Truncate `text` to at most `max_chars` Unicode characters, appending

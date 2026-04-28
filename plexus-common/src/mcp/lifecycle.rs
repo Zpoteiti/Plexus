@@ -66,7 +66,7 @@ async fn spawn_inner(
                 detail: format!("rmcp handshake: {e}"),
             })?;
 
-    let session = McpSession::from_running(running);
+    let session = McpSession::from_running(running, server_label.to_string());
 
     let (tools, resources, prompts) = tokio::try_join!(
         session.list_tools(),

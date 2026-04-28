@@ -84,8 +84,8 @@ pub struct ToolDef {
 /// One resource advertised by an MCP server (raw shape from `list_resources`).
 ///
 /// `uri` may be a static URI or a URI template with `{var}` placeholders
-/// (ADR-099). The wrap step (Plan 3) converts the template into schema
-/// properties.
+/// (ADR-099). [`mcp::wrap`](crate::mcp::wrap) converts the template into
+/// schema properties at advertise time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceDef {
     pub name: String,
