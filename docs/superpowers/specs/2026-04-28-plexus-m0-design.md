@@ -164,10 +164,10 @@ rust-version = "1.90"
 tokio = { version = "1", features = ["fs", "process", "macros", "rt-multi-thread", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
-secrecy = { version = "0.8", features = ["serde"] }
-jsonschema = "0.18"
+secrecy = { version = "0.10", features = ["serde"] }
+jsonschema = "0.30"
 globset = "0.4"
 rmcp = { version = "=1.5.0", features = ["client", "transport-child-process"] }  # pinned to 1.5.0; bumps only between milestones, never mid-implementation
 zeroize = "1"   # transitive via secrecy but worth pinning

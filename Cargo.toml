@@ -19,17 +19,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Errors
-thiserror = "1"
+thiserror = "2"
 
 # IDs
 uuid = { version = "1", features = ["v7", "serde"] }
 
 # Secrets
-secrecy = { version = "0.8", features = ["serde"] }
+secrecy = { version = "0.10", features = ["serde"] }
 zeroize = "1"
 
 # JSON Schema validation — used in Plan 2
-jsonschema = "0.18"
+jsonschema = "0.30"
 
 # Glob matching for `enabled` filter — used in Plan 3
 globset = "0.4"
