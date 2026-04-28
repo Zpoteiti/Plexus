@@ -27,5 +27,5 @@ pub use protocol::{
     DeviceConfig, FsPolicy, McpSchemas, McpServerConfig, PromptArgument, PromptDef, ResourceDef,
     ToolDef, WsFrame,
 };
-pub use secrets::{DeviceToken, JwtSecret, LlmApiKey, McpEnvSecret};
+pub use secrets::{DeviceToken, JwtSecret, LlmApiKey};
 pub use version::{PROTOCOL_VERSION, crate_version};

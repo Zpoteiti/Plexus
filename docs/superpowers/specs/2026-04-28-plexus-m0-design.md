@@ -43,7 +43,7 @@ plexus-common/
     ├── lib.rs              # top-level re-exports; thin facade
     ├── consts.rs           # reserved string prefixes + schema markers
     ├── version.rs          # PROTOCOL_VERSION + crate_version!() helper
-    ├── secrets.rs          # secrecy newtypes (DeviceToken, JwtSecret, LlmApiKey, McpEnvSecret)
+    ├── secrets.rs          # secrecy newtypes (DeviceToken, JwtSecret, LlmApiKey)
     │
     ├── errors/             # ADR-046 — one file per typed error
     │   ├── mod.rs          # ErrorCode enum + Code trait (fn code(&self) -> ErrorCode)

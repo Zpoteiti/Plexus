@@ -3,13 +3,19 @@
 //! All frames serialize via serde with `#[serde(tag = "type")]` —
 //! `{"type": "<name>", ...fields}` on the wire.
 
+use crate::errors::ErrorCode;
 use crate::protocol::types::{DeviceConfig, McpSchemas};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// All WebSocket text frames, internally tagged by `type`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `#[non_exhaustive]` because PROTOCOL.md §6 commits to additive evolution —
+/// new variants land without bumping the protocol version. Match sites in
+/// downstream crates must include a fallback arm.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WsFrame {
     Hello(HelloFrame),
     HelloAck(HelloAckFrame),
@@ -25,7 +31,7 @@ pub enum WsFrame {
     Error(ErrorFrame),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloFrame {
     pub id: Uuid,
     pub version: String,
@@ -34,14 +40,14 @@ pub struct HelloFrame {
     pub caps: HelloCaps,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloCaps {
     pub sandbox: String,
     pub exec: bool,
     pub fs: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HelloAckFrame {
     pub id: Uuid,
     pub device_name: String,
@@ -49,24 +55,24 @@ pub struct HelloAckFrame {
     pub config: DeviceConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallFrame {
     pub id: Uuid,
     pub name: String,
     pub args: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResultFrame {
     pub id: Uuid,
     pub content: String,
     #[serde(default)]
     pub is_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
+    pub code: Option<ErrorCode>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegisterMcpFrame {
     pub id: Uuid,
     #[serde(default)]
@@ -75,14 +81,14 @@ pub struct RegisterMcpFrame {
     pub spawn_failures: Vec<SpawnFailure>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnFailure {
     pub server_name: String,
     pub error: String,
     pub failed_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigUpdateFrame {
     pub id: Uuid,
     pub config: DeviceConfig,
@@ -95,7 +101,7 @@ pub enum TransferDirection {
     ServerToClient,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferBeginFrame {
     pub id: Uuid,
     pub direction: TransferDirection,
@@ -109,13 +115,13 @@ pub struct TransferBeginFrame {
     pub mime: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferProgressFrame {
     pub id: Uuid,
     pub bytes_sent: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferEndFrame {
     pub id: Uuid,
     pub ok: bool,
@@ -125,21 +131,21 @@ pub struct TransferEndFrame {
     pub sha256: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PingFrame {
     pub id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PongFrame {
     pub id: Uuid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<Uuid>,
-    pub code: String,
+    pub code: ErrorCode,
     pub message: String,
 }
 
@@ -183,7 +189,7 @@ mod tests {
                 fs_policy: crate::protocol::types::FsPolicy::Sandbox,
                 shell_timeout_max: 300,
                 ssrf_whitelist: vec![],
-                mcp_servers: serde_json::json!({}),
+                mcp_servers: std::collections::HashMap::new(),
             },
         });
         let json = serde_json::to_string(&frame).unwrap();
@@ -234,13 +240,15 @@ mod tests {
             id: id(),
             content: "MCP server 'google' is not running".into(),
             is_error: true,
-            code: Some("mcp_unavailable".into()),
+            code: Some(ErrorCode::McpUnavailable),
         });
         let json = serde_json::to_string(&frame).unwrap();
+        // Wire format keeps snake_case strings — same as before.
+        assert!(json.contains("\"code\":\"mcp_unavailable\""));
         let back: WsFrame = serde_json::from_str(&json).unwrap();
         if let WsFrame::ToolResult(r) = back {
             assert!(r.is_error);
-            assert_eq!(r.code.as_deref(), Some("mcp_unavailable"));
+            assert_eq!(r.code, Some(ErrorCode::McpUnavailable));
         } else {
             panic!();
         }
@@ -277,7 +285,7 @@ mod tests {
                 fs_policy: crate::protocol::types::FsPolicy::Unrestricted,
                 shell_timeout_max: 600,
                 ssrf_whitelist: vec!["10.180.20.30:8080".into()],
-                mcp_servers: serde_json::json!({}),
+                mcp_servers: std::collections::HashMap::new(),
             },
         });
         let json = serde_json::to_string(&frame).unwrap();
@@ -354,10 +362,11 @@ mod tests {
     fn error_frame_roundtrip() {
         let frame = WsFrame::Error(ErrorFrame {
             id: Some(id()),
-            code: "malformed_frame".into(),
+            code: ErrorCode::MalformedFrame,
             message: "expected field 'name'".into(),
         });
         let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains("\"code\":\"malformed_frame\""));
         let _back: WsFrame = serde_json::from_str(&json).unwrap();
     }
 
@@ -366,6 +375,21 @@ mod tests {
         let json = r#"{"type": "totally_unknown", "id": "abc"}"#;
         let result: Result<WsFrame, _> = serde_json::from_str(json);
         assert!(result.is_err(), "should fail on unknown frame type");
+    }
+
+    #[test]
+    fn missing_required_field_fails() {
+        // ToolCallFrame requires `name` and `args`; only `id` provided.
+        let json = r#"{"type":"tool_call","id":"00000000-0000-0000-0000-000000000000"}"#;
+        assert!(serde_json::from_str::<WsFrame>(json).is_err());
+    }
+
+    #[test]
+    fn extra_unknown_fields_are_tolerated() {
+        // PROTOCOL.md §6: additive evolution — recipients ignore unknown fields.
+        let json =
+            r#"{"type":"ping","id":"00000000-0000-0000-0000-000000000000","future_field":42}"#;
+        assert!(serde_json::from_str::<WsFrame>(json).is_ok());
     }
 
     fn assert_matches_hello(a: &WsFrame, b: &WsFrame) {

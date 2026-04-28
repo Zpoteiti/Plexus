@@ -24,6 +24,7 @@ pub use workspace::WorkspaceError;
 /// New variants are additive; never repurpose an existing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ErrorCode {
     // Workspace
     NotFound,

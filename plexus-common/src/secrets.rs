@@ -1,6 +1,6 @@
 //! Newtypes for secret values, wrapping `secrecy::SecretString`.
 //!
-//! All four types' `Debug`/`Display` impls redact. Exposing the inner value
+//! Each type's `Debug`/`Display` impls redact. Exposing the inner value
 //! requires explicit `secrecy::ExposeSecret`. See ADR-104.
 
 use secrecy::{ExposeSecret, SecretString};
@@ -80,11 +80,6 @@ secret_newtype!(
     "API key for the OpenAI-compatible LLM endpoint (ADR-101). Stored in `system_config.llm_api_key`."
 );
 
-secret_newtype!(
-    McpEnvSecret,
-    "Secret value from an MCP server's `env` config (ADR-050). MCPs typically need API keys here (e.g. `GOOGLE_API_KEY`)."
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,12 +124,5 @@ mod tests {
         let key = LlmApiKey::new("sk-proj-actualsecretkey".into());
         let dbg = format!("{:?}", key);
         assert!(!dbg.contains("actualsecretkey"), "Debug leaked: {}", dbg);
-    }
-
-    #[test]
-    fn mcp_env_secret_redacts() {
-        let env = McpEnvSecret::new("GOOGLE_API_KEY=actualkey".into());
-        let dbg = format!("{:?}", env);
-        assert!(!dbg.contains("actualkey"), "Debug leaked: {}", dbg);
     }
 }

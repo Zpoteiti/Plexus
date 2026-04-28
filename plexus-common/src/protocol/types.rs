@@ -1,6 +1,7 @@
 //! Frame inner types — the data shapes carried by frames in `frames.rs`.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Filesystem policy controlling both the file-tool jail and the subprocess
 /// jail (ADR-073).
@@ -15,7 +16,7 @@ pub enum FsPolicy {
 }
 
 /// Device configuration sent in `hello_ack` and `config_update` (ADR-050).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceConfig {
     /// Absolute workspace root path on the device.
     pub workspace_path: String,
@@ -30,13 +31,13 @@ pub struct DeviceConfig {
     #[serde(default)]
     pub ssrf_whitelist: Vec<String>,
 
-    /// MCP server configurations as a JSON object keyed by server name.
-    /// Each value matches `McpServerConfig`.
-    pub mcp_servers: serde_json::Value,
+    /// MCP server configurations keyed by server name.
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 /// Per-MCP-server configuration (ADR-050, ADR-100).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Argv to spawn the subprocess (e.g. `["npx", "@plexus/mcp-google"]`).
     pub command: Vec<String>,
@@ -59,7 +60,7 @@ fn empty_object() -> serde_json::Value {
 }
 
 /// All capabilities advertised by one MCP server (ADR-047, ADR-048).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpSchemas {
     pub server_name: String,
 
@@ -74,7 +75,7 @@ pub struct McpSchemas {
 }
 
 /// One tool advertised by an MCP server (raw shape from `list_tools`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDef {
     pub name: String,
 
@@ -89,7 +90,7 @@ pub struct ToolDef {
 /// `uri` may be a static URI or a URI template with `{var}` placeholders
 /// (ADR-099). The wrap step (Plan 3) converts the template into schema
 /// properties.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceDef {
     pub name: String,
 
@@ -103,7 +104,7 @@ pub struct ResourceDef {
 }
 
 /// One prompt advertised by an MCP server (raw shape from `list_prompts`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptDef {
     pub name: String,
 
@@ -115,7 +116,7 @@ pub struct PromptDef {
 }
 
 /// One argument of an MCP prompt.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptArgument {
     pub name: String,
 
@@ -138,14 +139,11 @@ mod tests {
             fs_policy: FsPolicy::Sandbox,
             shell_timeout_max: 300,
             ssrf_whitelist: vec!["10.180.20.30:8080".into()],
-            mcp_servers: serde_json::json!({}),
+            mcp_servers: HashMap::new(),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: DeviceConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(cfg.workspace_path, back.workspace_path);
-        assert_eq!(cfg.fs_policy, back.fs_policy);
-        assert_eq!(cfg.shell_timeout_max, back.shell_timeout_max);
-        assert_eq!(cfg.ssrf_whitelist, back.ssrf_whitelist);
+        assert_eq!(cfg, back);
     }
 
     #[test]
@@ -170,9 +168,32 @@ mod tests {
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(cfg.command, back.command);
-        assert_eq!(cfg.description, back.description);
-        assert_eq!(cfg.enabled, back.enabled);
+        assert_eq!(cfg, back);
+    }
+
+    #[test]
+    fn device_config_with_mcp_servers_roundtrip() {
+        let mut servers = HashMap::new();
+        servers.insert(
+            "google".to_string(),
+            McpServerConfig {
+                command: vec!["npx".into(), "@plexus/mcp-google".into()],
+                env: serde_json::json!({"GOOGLE_API_KEY": "x"}),
+                description: None,
+                enabled: None,
+            },
+        );
+        let cfg = DeviceConfig {
+            workspace_path: "/ws".into(),
+            fs_policy: FsPolicy::Sandbox,
+            shell_timeout_max: 300,
+            ssrf_whitelist: vec![],
+            mcp_servers: servers,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: DeviceConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(cfg, back);
+        assert!(back.mcp_servers.contains_key("google"));
     }
 
     #[test]
@@ -202,10 +223,7 @@ mod tests {
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: McpSchemas = serde_json::from_str(&json).unwrap();
-        assert_eq!(s.server_name, back.server_name);
-        assert_eq!(s.tools.len(), back.tools.len());
-        assert_eq!(s.resources.len(), back.resources.len());
-        assert_eq!(s.prompts.len(), back.prompts.len());
+        assert_eq!(s, back);
     }
 
     #[test]
