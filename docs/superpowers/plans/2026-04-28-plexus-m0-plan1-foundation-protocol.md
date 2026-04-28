@@ -2647,3 +2647,78 @@ Before declaring Plan 1 done, confirm:
 - [ ] No `unsafe` code.
 
 When all boxes checked, Plan 1 is done. Proceed to Plan 2 (Tools) via `superpowers:writing-plans` again with that scope.
+
+---
+
+## Post-Plan Adjustments
+
+The plan is historical: code blocks above describe what tasks attempted, not what the final code looks like. Where the implementation diverged from this plan, this section records the deltas, the rationale, and the commit SHA.
+
+### Workspace dep version bumps (commit `9e95b00`)
+
+After Task 1 landed, the code-quality reviewer flagged three stale dep pins inherited from this plan as written. All three were bumped before any consumer existed:
+
+- `thiserror = "1"` → `"2"`
+- `secrecy = "0.8"` → `"0.10"` (breaking API change in `SecretString` — see secrets.rs delta below)
+- `jsonschema = "0.18"` → `"0.30"` (breaking `Validator` API; affects Plan 2)
+
+Why now: with zero consumers, bumping was free. After Task 6 added six `#[derive(Error)]` sites, thiserror migration would have been a 6-file diff. After Plan 2's tool-arg validation, jsonschema migration would have been a Validator-API rewrite.
+
+### Task 5 — `secrets.rs` serde adapter (commit `b02499f`)
+
+The plan specified `#[derive(Serialize, Deserialize)] #[serde(transparent)]` over `SecretString`. **This does not compile under `secrecy = "0.10"`.** `SecretString` is `SecretBox<str>` — `secrecy` 0.10 removed the blanket `Serialize`/`Deserialize` impls for unsized types.
+
+The implementation hand-rolls `Serialize`/`Deserialize` impls inside the `secret_newtype!` macro, going through the plain `String` representation:
+
+```rust
+impl Serialize for $name {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.expose_secret().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for $name {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d).map(Self::new)
+    }
+}
+```
+
+Wire format is identical to `#[serde(transparent)]` over a string. Redaction property (Debug/Display) is unaffected.
+
+### M0-freeze polish (commit `2d64543`)
+
+After the final Plan 1 code review, six adjustments landed in a single "API surface polish before M0 freeze" commit. Each is at the plan/spec design level — no ADR drift:
+
+1. **`ToolResultFrame.code: Option<String>` → `Option<ErrorCode>`** and **`ErrorFrame.code: String` → `ErrorCode`** (Task 15). Wire format unchanged (snake_case strings via `#[serde(rename_all)]`), but compile-time typo protection at every M1/M2 callsite. The plan defined `ErrorCode` in Task 6 specifically as the wire-stable code type, then didn't use it in the frame definitions — pure plan-level oversight.
+2. **`DeviceConfig.mcp_servers: serde_json::Value` → `HashMap<String, McpServerConfig>`** (Task 13). Same JSONB wire format, eliminates `from_value::<HashMap<...>>` boilerplate at every consumer.
+3. **`PartialEq` derives on all `protocol/types.rs` and `protocol/frames.rs` structs** (`Eq` where no `serde_json::Value` member). ADR-105's worker queue needs `cfg != prev_cfg` to detect changes.
+4. **`#[non_exhaustive]` on `WsFrame` and `ErrorCode`** (Task 6 + Task 15). PROTOCOL.md §6 commits to additive evolution; this enforces it at the type level.
+5. **Re-export inner frame structs and transfer helpers at `protocol::*`** (Task 16 → `protocol/mod.rs`). M1/M2 will write `WsFrame::Hello(HelloFrame { … })` constructors hundreds of times; saves the import friction.
+6. **Two new malformed-frame regression tests** (Task 15 → `frames.rs::tests::missing_required_field_fails`, `extra_unknown_fields_are_tolerated`). Locks in PROTOCOL.md §6's forward-compat guarantee.
+7. **Delete `McpEnvSecret` newtype + lib.rs re-export** (Task 5). Per the user's `feedback_speculative_scaffolding.md` rule — no consumer in M0; re-add when MCP env wiring lands in Plan 3.
+
+Final test count after polish: 63 passing (61 + 2 new malformed tests + 1 new HashMap test - 1 deleted McpEnvSecret test).
+
+### SHA table
+
+| Commit | What |
+|---|---|
+| `be57860` | Task 1 — workspace skeleton |
+| `9e95b00` | Workspace dep bumps (thiserror, secrecy, jsonschema) |
+| `6989bf7` | Task 2 — CI workflow |
+| `c34fe4b` | Task 3 — consts.rs |
+| `1e9f8ac` | Task 4 — version.rs |
+| `b02499f` | Task 5 — secrets.rs (with secrecy 0.10 serde adapter) |
+| `2791bb0` | Task 6 — errors/mod.rs + 6 stubs |
+| `157b814` | Task 7 — WorkspaceError |
+| `fd953a3` | Task 8 — ToolError |
+| `2250ebb` | Task 9 — AuthError |
+| `eceffe2` | Task 10 — ProtocolError |
+| `316fa62` | Task 11 — McpError |
+| `7bfd277` | Task 12 — NetworkError |
+| `4816eb9` | Task 13 — protocol/types.rs |
+| `0cad90d` | Task 14 — protocol/transfer.rs |
+| `3527599` | Task 15 — protocol/frames.rs |
+| `52ad7ec` | Task 16 — finalize lib.rs re-exports |
+| `2d64543` | M0-freeze polish (this footer's deltas applied) |
