@@ -18,9 +18,17 @@ zeroize = { workspace = true }
 tokio = { workspace = true }
 jsonschema = { workspace = true }
 async-trait = "0.1"
+globset = { workspace = true }
+rmcp = { workspace = true, features = ["server", "transport-io"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[[bin]]
+name = "fake-mcp"
+path = "tests/fixtures/fake-mcp/main.rs"
+test = false
+doc = false
