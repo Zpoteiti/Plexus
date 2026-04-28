@@ -11,7 +11,12 @@
 //! - [`errors`] — typed error enums + `ErrorCode` + `Code` trait.
 //! - [`protocol`] — WS frame types + binary transfer header.
 //!
-//! Plans 2 (`tools`) and 3 (`mcp`) extend the public surface.
+//! # Plan 2 surface (Tools)
+//!
+//! - [`tools`] — Tool trait + path validation + result wrap + format helpers
+//!   + 14 hardcoded tool schemas + JSON Schema arg validation.
+//!
+//! Plan 3 (`mcp`) extends the public surface.
 
 pub mod consts;
 pub mod errors;
@@ -25,8 +30,12 @@ pub use errors::{
     AuthError, Code, ErrorCode, McpError, NetworkError, ProtocolError, ToolError, WorkspaceError,
 };
 pub use protocol::{
-    DeviceConfig, FsPolicy, McpSchemas, McpServerConfig, PromptArgument, PromptDef, ResourceDef,
-    ToolDef, WsFrame,
+    ConfigUpdateFrame, DeviceConfig, ErrorFrame, FsPolicy, HEADER_SIZE, HelloAckFrame, HelloCaps,
+    HelloFrame, McpSchemas, McpServerConfig, PingFrame, PongFrame, PromptArgument, PromptDef,
+    RegisterMcpFrame, ResourceDef, SpawnFailure, ToolCallFrame, ToolDef, ToolResultFrame,
+    TransferBeginFrame, TransferDirection, TransferEndFrame, TransferProgressFrame, WsFrame,
+    pack_chunk, parse_chunk,
 };
 pub use secrets::{DeviceToken, JwtSecret, LlmApiKey};
+pub use tools::Tool;
 pub use version::{PROTOCOL_VERSION, crate_version};

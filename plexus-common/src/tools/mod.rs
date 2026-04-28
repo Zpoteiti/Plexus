@@ -2,7 +2,7 @@
 //!
 //! - [`result`] — wrap_result() for the [untrusted tool result]: prefix.
 //! - [`path`] — resolve_in_workspace() for the file-tool jail.
-//! - [`format`] — line-numbered output and head-only truncation helpers.
+//! - [`mod@format`] — line-numbered output and head-only truncation helpers.
 //! - [`schemas`] — hardcoded JSON schemas for the 14 first-class tools.
 //! - [`validate`] — JSON Schema validation for tool_call args.
 

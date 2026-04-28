@@ -13,11 +13,7 @@ const TOKEN_LITERAL: &str = "plexus_dev_actualsecrettoken12345";
 fn device_token_debug_does_not_leak() {
     let t = DeviceToken::new(TOKEN_LITERAL.into());
     let dbg = format!("{:?}", t);
-    assert!(
-        !dbg.contains("actualsecrettoken"),
-        "Debug leaked: {}",
-        dbg
-    );
+    assert!(!dbg.contains("actualsecrettoken"), "Debug leaked: {}", dbg);
 }
 
 #[test]
@@ -48,6 +44,7 @@ fn llm_api_key_does_not_leak_through_debug() {
 #[test]
 fn secret_inside_struct_is_redacted() {
     #[derive(Debug)]
+    #[allow(dead_code)] // fields are read via Debug derive; clippy ignores that
     struct DeviceConfig {
         name: String,
         token: DeviceToken,
@@ -62,7 +59,10 @@ fn secret_inside_struct_is_redacted() {
         "Debug leaked through containing struct: {}",
         dbg
     );
-    assert!(dbg.contains("mac-mini"), "non-secret field should still print");
+    assert!(
+        dbg.contains("mac-mini"),
+        "non-secret field should still print"
+    );
 }
 
 #[test]
