@@ -25,7 +25,7 @@ This is a *design* document. Use it during implementation as the source of truth
 - **Every tool implements the `Tool` trait** (ADR-077): `name`, `schema`, `max_output_chars` (default 16k via the trait), `execute`.
 - **Default result cap is 16,000 characters** (ADR-076). Tools that need more override `max_output_chars`. Truncation is head-only with `\n... (truncated)` marker.
 - **Timeouts are per-tool** (ADR-075). No central dispatcher wrapper. Some tools expose `timeout` in their schema (agent-tunable); others enforce internal-only timeouts.
-- **Path policy** (ADR-043): relative paths are accepted and resolve to the **personal workspace on the target device**. On server, that's `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`; on a client, it's the device's `workspace_path`. Absolute paths are also accepted. **Shared workspaces always require absolute paths** (`/production_department/sprint.md`) — they have no implicit relative base.
+- **Path policy** (ADR-043, ADR-108): relative paths are accepted and resolve to the **personal workspace on the target device**. On server, that's `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`; on a client, it's the device's `workspace_path`. Absolute paths are also accepted. **Shared workspaces always require absolute paths in the `name@suffix` form** (e.g. `/production-department@a4f7e2d1/sprint.md`) — they have no implicit relative base, and strict-mode resolution requires both name and suffix to match the workspace row exactly. Names are validated per ADR-109.
 - **Workspace writes funnel through `workspace_fs`** server-side (ADR-045). It owns quota check, SKILL.md validation, skills-cache invalidation, and symlink-escape protection.
 - **All file tools enforce a workspace boundary in code** (ADR-073, file-tool jail). Every shared file tool (`read_file`, `write_file`, `edit_file`, `delete_file`, `delete_folder`, `list_dir`, `glob`, `grep`, `notebook_edit`) calls `resolve_in_workspace()` in `plexus-common/src/tools/path.rs` before any disk op — canonicalize → check `starts_with(workspace_root)` → reject with `WorkspaceError::PathOutsideWorkspace` otherwise. This is OS-agnostic Rust and active when `fs_policy="sandbox"` (default). It is **the only thing keeping file tools in their lane on macOS and Windows**, where the bwrap subprocess jail doesn't exist. Lifted only when the device is `fs_policy="unrestricted"` (typed-name confirmation per ADR-051).
 - **Every tool result is wrapped** (ADR-095): the content string returned to the LLM is prefixed with `[untrusted tool result]: ` at construction time. Uniform across all tools — web_fetch body, exec stdout, read_file output, MCP response, everything. The wrap is the signal; no system-prompt rule.
@@ -62,7 +62,7 @@ Schemas below are the **source** schemas (what gets written in code). The agent 
 
 All shared tools accept a `plexus_device` argument (injected at merge time per ADR-071) selecting which workspace tree the operation targets:
 
-- `plexus_device="server"` → routes to `workspace_fs` on the server. Path's first segment names the workspace (personal or shared).
+- `plexus_device="server"` → routes to `workspace_fs` on the server. The leading path segment is either the user's `{user_id}` UUID (personal) or the `name@suffix` form (shared, ADR-108). Relative paths default to personal.
 - `plexus_device="<client_name>"` → dispatched over WebSocket to the named device, where the client-side implementation runs against the local filesystem inside `fs_policy` bounds.
 
 ### `read_file`
@@ -107,7 +107,7 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 ```
 
 **Mechanism (nanobot-aligned):**
-- Path resolution follows ADR-043: relative paths resolve to the target device's personal workspace root; absolute paths are used as-is. Server-side, absolute is required for shared workspaces.
+- Path resolution follows ADR-043 and ADR-108: relative paths resolve to the target device's personal workspace root; absolute paths are used as-is. Server-side, absolute paths in the `name@suffix` form are required for shared workspaces.
 - **Default text response:** `limit=2000` lines, output prefixed `LINE_NUM| <line>`. Tail includes `(Showing lines X-Y of Z. Use offset=X+1 to continue.)` — self-documenting pagination.
 - **128k char hard cap** applied on top of line-based limit; safety net for pathological line lengths.
 - **Blocked device paths** (nanobot pattern): `/dev/zero`, `/dev/random`, `/dev/urandom`, `/dev/full`, `/dev/stdin/out/err`, `/dev/tty`, `/proc/<pid>/fd/[012]` — refused to avoid hangs.

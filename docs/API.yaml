@@ -491,6 +491,12 @@ paths:
     post:
       tags: [Workspaces]
       summary: Create a shared workspace (caller auto-added to allow-list)
+      description: |
+        Creates a shared workspace with a fresh UUID and the supplied display
+        name. Names are NOT globally unique — two unrelated teams may use the
+        same name. The server returns the workspace's id and computed
+        addressing form (`name@suffix`, see ADR-108) which is used in
+        subsequent URLs and in the agent's tool paths.
       requestBody:
         required: true
         content:
@@ -501,26 +507,41 @@ paths:
               properties:
                 name:
                   type: string
-                  description: Globally unique name. Used as the first path segment in workspace file paths.
+                  description: |
+                    Display name. Validated per ADR-109 — denylist of `/`, `\`, `\0`,
+                    `@`, `:`, `<>"|?*`, control chars; NFC-normalized; trim + collapse
+                    internal whitespace; max 64 chars after normalization.
                 quota_bytes:
                   type: integer
                   format: int64
-                  description: Requested quota. Server caps at the admin-set shared-workspace ceiling.
+                  description: Requested quota. Server caps at `system_config.shared_workspace_quota_bytes` (default 25 GB).
       responses:
         '201':
           description: Created.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Workspace' }
+        '400':
+          description: Name failed validation (per ADR-109).
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         '409':
-          description: Name already in use.
+          description: |
+            Caller is already a member of a workspace whose `name@suffix` form
+            collides with the new one (suffix auto-extension exhausted, or the
+            caller already has a same-named workspace and would not be able to
+            disambiguate). Caller picks a different name.
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
-  /api/workspaces/{name}:
+  /api/workspaces/{workspace_ref}:
     parameters:
-      - name: name
+      - name: workspace_ref
         in: path
         required: true
+        description: |
+          The `name@suffix` addressing form (ADR-108). `suffix` is the first 8
+          hex chars of the workspace's UUID id (auto-extended on collision).
+          Example: `Xmas%20gift@a4f7e2d1`. Spaces in the name URL-encode normally;
+          `@` itself does not require encoding (RFC 3986 `pchar`).
         schema: { type: string }
     get:
       tags: [Workspaces]
@@ -536,9 +557,15 @@ paths:
       summary: Update a shared workspace (rename, change quota)
       description: |
         Any member of the allow-list can rename or change the quota cap
-        (ADR-flat-permissions). Renaming changes the workspace's path
-        segment — existing tool calls and stored references to the old
-        path will break. Use with care.
+        (ADR-flat-permissions). Rename only mutates `workspaces.name` —
+        the on-disk path and `workspaces.id` are unchanged, so no file
+        moves happen. The `suffix` portion of the addressing form is
+        also unchanged (it is derived from `id`). However, since strict
+        mode (ADR-108) requires both `name` and `suffix` to match in
+        tool paths, any stored references using the old name return
+        404 until the agent re-reads the system prompt.
+
+        Name validation per ADR-109 applies on rename.
       requestBody:
         content:
           application/json:
@@ -551,13 +578,17 @@ paths:
         '200':
           description: OK
           content: { application/json: { schema: { $ref: '#/components/schemas/Workspace' } } }
+        '400':
+          description: Name failed validation (per ADR-109) or quota exceeds the admin ceiling.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         '403': { $ref: '#/components/responses/Forbidden' }
 
-  /api/workspaces/{name}/members:
+  /api/workspaces/{workspace_ref}/members:
     parameters:
-      - name: name
+      - name: workspace_ref
         in: path
         required: true
+        description: The `name@suffix` form (ADR-108).
         schema: { type: string }
     get:
       tags: [Workspaces]
@@ -573,7 +604,13 @@ paths:
     post:
       tags: [Workspaces]
       summary: Add a user to the allow-list
-      description: Any existing member can add new members. Caller looks up by email or user_id.
+      description: |
+        Any existing member can add new members. Caller looks up by email or
+        user_id. If adding the prospective user would put them into two
+        workspaces whose computed `name@suffix` form would collide (rare —
+        defended by suffix auto-extension at workspace-create time per
+        ADR-108, but still possible on edge cases), the server returns 409
+        and the workspace's owner can rename to disambiguate.
       requestBody:
         required: true
         content:
@@ -587,12 +624,16 @@ paths:
         '201':
           description: Member added.
           content: { application/json: { schema: { $ref: '#/components/schemas/WorkspaceMember' } } }
+        '409':
+          description: Adding this user would create an unresolvable `name@suffix` collision in their accessible set.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
-  /api/workspaces/{name}/members/{user_id}:
+  /api/workspaces/{workspace_ref}/members/{user_id}:
     parameters:
-      - name: name
+      - name: workspace_ref
         in: path
         required: true
+        description: The `name@suffix` form (ADR-108).
         schema: { type: string }
       - name: user_id
         in: path
@@ -632,7 +673,13 @@ paths:
       - name: path
         in: path
         required: true
-        description: Absolute workspace path. First segment names the workspace (personal user_id or shared workspace name). Must be accessible to the authenticated user.
+        description: |
+          Absolute workspace path. The leading segment names the workspace:
+          the user's `{user_id}` UUID for explicit personal access, or the
+          `name@suffix` form (ADR-108) for shared workspaces. The
+          authenticated user must be a member. Strict mode (ADR-043) — both
+          name and suffix must match the workspace row exactly; renames
+          surface as 404 until the agent re-reads the system prompt.
         schema: { type: string }
     get:
       tags: [Workspace Files]
@@ -848,8 +895,14 @@ paths:
               properties:
                 name:
                   type: string
-                  description: Friendly label (e.g. "laptop"). Unique within the user's devices.
-                workspace_path: { type: string }
+                  description: Friendly label (e.g. "laptop"). Unique within the user's devices. Validated per ADR-109.
+                workspace_path:
+                  type: string
+                  description: |
+                    Optional. Defaults to the literal string `~/plexus/workspace`
+                    for every OS (Linux/macOS/Windows) per ADR-111 if omitted.
+                    The client expands `~` against its own home directory at
+                    startup; the server stores and returns the unexpanded form.
                 fs_policy:
                   type: string
                   enum: [sandbox, unrestricted]
@@ -1386,15 +1439,45 @@ components:
 
     Workspace:
       type: object
-      required: [name, type, quota_bytes, bytes_used]
+      required: [id, name, type, quota_bytes, bytes_used]
       properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            UUID. For personal workspaces, equals the owner's `users.id`.
+            For shared workspaces, the `workspaces.id` row PK (ADR-108).
+            Drives the on-disk path `{PLEXUS_WORKSPACE_ROOT}/{id}/`.
         name:
           type: string
-          description: Personal workspace's name is the user_id; shared workspace's name is globally unique.
+          description: |
+            Display name. For personal workspaces, the owner's `users.name`.
+            For shared workspaces, the row's `workspaces.name` — NOT
+            globally unique; ADR-109 validation rules apply.
+        suffix:
+          type: string
+          description: |
+            Present for shared workspaces. First 8 hex chars of `id` (auto-extended
+            on collision per ADR-108). The agent and the REST API both address the
+            workspace via the `name@suffix` form derived from these two fields.
+        ref:
+          type: string
+          description: |
+            Present for shared workspaces. The fully-composed `name@suffix`
+            addressing form, ready to drop into a tool path or URL.
+            Example: `Xmas gift@a4f7e2d1`. The frontend uses this verbatim
+            for `/api/workspaces/{workspace_ref}` URLs.
         type: { type: string, enum: [personal, shared] }
         quota_bytes: { type: integer, format: int64 }
         bytes_used: { type: integer, format: int64 }
         locked: { type: boolean, description: bytes_used > quota_bytes. }
+        created_by:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            Present for shared workspaces. NULL if the creator's account was
+            deleted but the workspace still has other members (ADR-108
+            exception to ADR-058's cascade rule).
         members:
           type: array
           description: Present for shared workspaces.
@@ -1418,18 +1501,39 @@ components:
 
     Device:
       type: object
-      required: [name, user_id, fs_policy, workspace_path, created_at]
+      required: [name, user_id, fs_policy, workspace_path, state, created_at]
       properties:
-        name: { type: string, description: Unique per-user friendly label. }
+        name: { type: string, description: Unique per-user friendly label. ADR-109 validation. }
         user_id: { type: string }
-        workspace_path: { type: string }
+        workspace_path:
+          type: string
+          description: |
+            May contain a leading `~`; the client expands at startup.
+            Default `~/plexus/workspace` (ADR-111) on every OS when not
+            supplied at create time.
         fs_policy: { type: string, enum: [sandbox, unrestricted] }
         shell_timeout_max: { type: integer, description: Seconds. }
         ssrf_whitelist:
           type: array
           items: { type: string }
         mcp_servers: { type: object, additionalProperties: true }
-        online: { type: boolean }
+        state:
+          type: string
+          enum: [online, offline]
+          description: |
+            Device state per ADR-110. `online` (state 1) means a live WS
+            connection. `offline` (state 2) means the row exists and the
+            token is still valid but no WS is connected. The frontend
+            renders state-2 devices as greyed-out. The third state
+            (deleted, ADR-110) is a complete wipe — row gone, in-memory
+            entry gone, live WS force-closed, tool registry invalidated —
+            and never appears in any API response. Triggered only by
+            `DELETE /api/devices/{name}` or `DELETE /api/me`. Token
+            regeneration is NOT a state-3 trigger.
+        online:
+          type: boolean
+          deprecated: true
+          description: Equals `state == "online"`. Kept for v1 compatibility; prefer `state`.
         last_seen_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
 
@@ -1441,6 +1545,20 @@ components:
         bot_token:
           type: string
           description: Write-only. Get responses show a masked form (e.g. `****abc1`); never the full token.
+        allow_list:
+          type: array
+          items: { type: string }
+          description: |
+            Heterogeneous list of Discord-snowflake-shaped strings. An entry can
+            be a User ID (the user is allowed to DM/@-mention), a Channel ID
+            (every member of that channel can @-mention the bot in that channel),
+            or a Guild ID (every member of that guild can @-mention the bot
+            anywhere in the guild). The adapter classifies each entry by Discord
+            API lookup at receive time. Inbound is allowed if sender_id matches
+            a User entry OR the message-context (channel/guild) matches a
+            Channel/Guild entry. Allowed messages still get the
+            `[untrusted message from <name>]:` wrap (ADR-007); only the partner
+            is unwrapped.
 
     TelegramConfig:
       type: object
@@ -1450,6 +1568,15 @@ components:
         bot_token:
           type: string
           description: Write-only. Get responses show a masked form.
+        allow_list:
+          type: array
+          items: { type: string }
+          description: |
+            Heterogeneous list of Telegram identifiers. An entry can be a User ID
+            (DM allowed), a group Chat ID (every group member can @-mention the
+            bot in the group), or a broadcast Channel ID (per Telegram's
+            bot-in-channel API rules). Match logic identical to Discord's
+            `allow_list`; allowed messages still get the untrusted wrap.
 
     CronJob:
       type: object

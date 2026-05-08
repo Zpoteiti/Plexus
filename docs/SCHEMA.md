@@ -2,7 +2,7 @@
 
 The PostgreSQL schema for `plexus-server`. Lives at `plexus-server/src/db/schema.sql`, applied at startup via `sqlx::raw_sql(include_str!("schema.sql"))` with `IF NOT EXISTS` semantics (ADR-057).
 
-**Eight tables.** Account deletion is a single `DELETE FROM users WHERE id = $1`; every user-referencing FK has `ON DELETE CASCADE` defined inline (ADR-058).
+**Ten tables.** Account deletion is a single `DELETE FROM users WHERE id = $1`; every user-referencing FK has `ON DELETE CASCADE` defined inline (ADR-058) — with one explicit exception in `workspaces.created_by` (`ON DELETE SET NULL`, see ADR-108) so a workspace persists for its remaining members when the creator's account is removed.
 
 This doc is the canonical reference for the schema's *shape*. The SQL file is the canonical reference for the schema's *bytes* — when they disagree, the SQL wins, this doc is then updated.
 
@@ -28,7 +28,7 @@ Known keys (admin-editable via `PATCH /api/admin/config`):
 | `llm_model` | string | ADR-101 | Model name passed in request body. |
 | `llm_max_context_tokens` | int | ADR-101 | LLM context window in tokens (e.g. `128000` for gpt-4o). Counted with tiktoken-rs (ADR-025). |
 | `llm_compaction_threshold_tokens` | int | ADR-028, ADR-101 | Headroom that triggers compaction. Default `16000`. Summary `max_output_tokens` = `threshold − 4000`. |
-| `shared_workspace_quota_bytes` | int | (TBD) | Quota ceiling for any single shared workspace. |
+| `shared_workspace_quota_bytes` | int | ADR-108 | Quota ceiling that any single shared workspace may request at create or rename time. Default 25 GB. |
 
 Deployments may carry additional opaque keys; Plexus reads only the ones it knows about.
 
@@ -70,7 +70,11 @@ CREATE TABLE IF NOT EXISTS discord_configs (
 - `user_id` is both PK and FK — at most one Discord config per user.
 - `bot_token` is the Discord bot's secret. API never returns it; `GET /api/me/discord` masks it (ADR derives — never logged plain either).
 - `partner_chat_id` is the partner human's Discord user ID. Messages from this ID are *not* wrapped (`[untrusted message from <name>]:`); messages from anyone else are (ADR-007).
-- `allow_list` — JSONB array of additional Discord user IDs (or guild/channel IDs, TBD format) the partner has authorized to also reach the bot. Their messages get the untrusted wrap; agent treats them as non-partner allowed users (see ADR-074 trust model).
+- `allow_list` — JSONB array of heterogeneous Discord identifiers the partner has authorized to also reach the bot. Each entry is one of:
+    - **User ID** (e.g. `"123456789012345678"`) — the named user is allowed to DM the bot or @-mention it in any channel.
+    - **Channel ID** — every member of that channel can @-mention the bot in that channel.
+    - **Guild ID** — every member of that guild can @-mention the bot in any of its channels.
+  Inbound message is allowed if its sender_id matches a User ID entry **OR** its message-context (channel, guild) matches a Channel/Guild ID entry. Allowed messages still get the `[untrusted message from <name>]:` wrap (ADR-007); only the partner is unwrapped. Agent treats allow-list senders as non-partner allowed users (see ADR-074 trust model). Format is positional — entries are stored verbatim as Discord-snowflake-shaped strings; the adapter classifies (user/channel/guild) by API lookup at receive time, not by string form.
 
 ---
 
@@ -86,7 +90,14 @@ CREATE TABLE IF NOT EXISTS telegram_configs (
 );
 ```
 
-Symmetric to `discord_configs`. Adding a future channel = adding a `<channel>_configs` table; no `users` migration (ADR-090).
+Symmetric to `discord_configs`. `allow_list` follows the same heterogeneous-identifier rule (Telegram terminology):
+- **User ID** — the named user can DM the bot.
+- **Chat ID** of a group — every member of that group can @-mention the bot in the group.
+- **Channel ID** — broadcast-channel admins can post; allowed bot interactions follow Telegram's bot-in-channel API rules.
+
+Match logic identical to Discord — sender_id ∪ chat-context-id checked against the list; allowed messages get the untrusted wrap.
+
+Adding a future channel = adding a `<channel>_configs` table; no `users` migration (ADR-090).
 
 ---
 
@@ -161,11 +172,52 @@ CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
 - `name` is the user-facing friendly label. UNIQUE per user, so the URL `PATCH /api/devices/laptop/config` resolves to `(user_id, "laptop")` without ever touching the token.
 - `ssrf_whitelist` — JSONB array of `host` or `host:port` strings, exceptions to the client-site `web_fetch` block-list (ADR-052). Capability declaration only — does not stop `exec curl` (ADR-073).
 - `mcp_servers` — JSONB map of `<server_name>: McpServerConfig` (see API.yaml). Pushed to the live device via `config_update` frame on change (ADR-050, PROTOCOL.md §3.6).
-- **Online state is in-memory only** — no `online` / `last_seen_at` columns; the connected-WS map (`DashMap<token, ConnHandle>`) is the source of truth. The `Device` API response computes them on demand.
+- **Online state is in-memory only** — no `online` / `last_seen_at` columns; the connected-WS map (`DashMap<token, ConnHandle>`) is the source of truth. The `Device` API response computes them on demand. Three device states per ADR-110: state-1 (online, in-map), state-2 (offline-but-paired, row exists, not in map — listed in `plexus_device` enum so the agent can still attempt and fail loudly), state-3 (deleted — row gone, in-memory entry gone, live WS force-closed, tool registry invalidated; complete wipe with no soft-delete tombstone).
+- **No inbound FKs reference `devices`** from other tables. State-3 transition is a single-row DELETE; cascades from `users.id` are the only path that takes multiple device rows out at once (account deletion).
+- `workspace_path` default is the literal string `~/plexus/workspace` on every OS (ADR-111) when omitted from `POST /api/devices`. The client expands `~` against its own home dir at startup; the server stores and returns the unexpanded form.
 
 ---
 
-## 8. `cron_jobs` — scheduled agent invocations
+## 8. `workspaces` — shared workspace registry (ADR-108)
+
+```sql
+CREATE TABLE IF NOT EXISTS workspaces (
+    id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    name         TEXT         NOT NULL,
+    quota_bytes  BIGINT       NOT NULL,
+    created_by   UUID         REFERENCES users(id) ON DELETE SET NULL,
+    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+```
+
+- `id` — UUID primary key. Drives the on-disk path `{PLEXUS_WORKSPACE_ROOT}/{id}/` and the public-facing `name@suffix` addressing form (ADR-108) where `suffix` is the first 8 hex chars of `id` (auto-extended on collision per ADR-108).
+- `name` — display label. **Not unique.** Two unrelated teams may both create a workspace called "Xmas gift". The validator in ADR-109 enforces character rules (no `/`, `\`, `@`, `:`, control chars, etc.), NFC-normalizes, and length-caps at 64 chars.
+- `quota_bytes` — capped at `system_config.shared_workspace_quota_bytes` at create and rename time.
+- `created_by` — author. **Exception to ADR-058**: uses `ON DELETE SET NULL`, not `CASCADE`. Removing the creator's user account does not delete a workspace that still has other members; `created_by` becomes NULL and the membership rows survive.
+- Last-member-leaves auto-deletion (per `DELETE FROM workspace_members WHERE workspace_id = $1`) is enforced in application code (`workspace_fs`), not SQL — when no `workspace_members` rows remain for a `workspaces.id`, the row is deleted and the on-disk directory is removed.
+
+---
+
+## 9. `workspace_members` — shared workspace allow-list (ADR-108)
+
+```sql
+CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id  UUID         NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id       UUID         NOT NULL REFERENCES users(id)      ON DELETE CASCADE,
+    joined_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (workspace_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id);
+```
+
+- Composite PK is the natural identity (a user is in a workspace at most once).
+- Two cascades: deleting a workspace removes all its members; deleting a user removes them from every workspace they joined.
+- `idx_workspace_members_user` powers the per-user "list my workspaces" query that runs at every `build_context` to render the system prompt's Workspaces section.
+
+---
+
+## 10. `cron_jobs` — scheduled agent invocations
 
 ```sql
 CREATE TABLE IF NOT EXISTS cron_jobs (
@@ -199,7 +251,7 @@ CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_fire  ON cron_jobs(next_fire_at)
 
 ## Constraints summary
 
-- Every user-referencing FK has `ON DELETE CASCADE` (ADR-058) → account deletion is one statement.
+- Every user-referencing FK has `ON DELETE CASCADE` (ADR-058) → account deletion is one statement. **Sole exception:** `workspaces.created_by` uses `ON DELETE SET NULL` per ADR-108 so a workspace persists for its remaining members when its creator's account is removed.
 - No surrogate "is_active" / "deleted_at" columns — deletes are hard, undo lives in admin's backup strategy.
 - No migration framework in v1 (ADR-069). Schema changes during rebuild require dev-DB reset (`scripts/reset-db.sh`). Real-user deployments add `sqlx::migrate!` later.
 
@@ -215,6 +267,8 @@ CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_fire  ON cron_jobs(next_fire_at)
 | `idx_messages_session_created` | messages (`session_id, created_at`) | History replay + cursor scan. |
 | `idx_devices_user_id` | devices | List user's devices. |
 | `devices_user_id_name_key` | devices (UNIQUE on `(user_id, name)`) | URL resolution `/api/devices/{name}`. |
+| `workspace_members_pkey` | workspace_members (PK on `(workspace_id, user_id)`) | Membership lookup at workspace-fs entry. |
+| `idx_workspace_members_user` | workspace_members | Per-user "list my workspaces" for system-prompt rebuild. |
 | `idx_cron_jobs_user_id` | cron_jobs | List user's cron jobs. |
 | `idx_cron_jobs_next_fire` | cron_jobs (`next_fire_at`) | Scheduler poll. |
 

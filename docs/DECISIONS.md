@@ -419,19 +419,20 @@ Dispatch:
 **Decision:** Matcher levels: (1) exact substring, (2) line-trimmed sliding window (handles indentation drift), (3) smart-quote normalization. Multi-match requires `replace_all=true`. Create-file shortcut: `old_text=""` + file doesn't exist → create with `new_text`.
 **Consequences:** Same matcher on server and client (lives in `plexus-common`). Tool args: `path`, `old_text`, `new_text`, `replace_all`.
 
-### ADR-043 · Tool path policy — relative paths resolve to the target's personal workspace; absolute required for shared workspaces
+### ADR-043 · Tool path policy — relative paths resolve to personal workspace; shared workspaces use `name@suffix` absolute form
 
-**Status:** accepted (revised — nanobot alignment pass)
-**Context:** Original decision required absolute paths in all tool args for unambiguity. Matching nanobot's tool surface (its schemas don't distinguish relative/absolute at the schema level) and removing friction for the common case (reading `MEMORY.md`) motivated relaxing this.
+**Status:** accepted (revised — shared-workspace addressing pass per ADR-108)
+**Context:** Original decision required absolute paths in all tool args for unambiguity. Matching nanobot's tool surface (its schemas don't distinguish relative/absolute at the schema level) and removing friction for the common case (reading `MEMORY.md`) motivated relaxing this. A second revision (ADR-108) replaces the bare-name form for shared workspaces with `name@suffix` to support same-named workspaces and rename without breaking identifiers.
 **Decision:**
 
 - **`plexus_device="server"` + relative path** → resolved against the caller's personal workspace root, i.e. `{PLEXUS_WORKSPACE_ROOT}/{user_id}/`. Example: `read_file(plexus_device="server", path="MEMORY.md")` reads `/{user_id}/MEMORY.md`.
-- **`plexus_device="server"` + absolute path** (leading `/`) → used as given. Required for accessing shared workspaces, because shared workspaces have no implicit relative base from the user's point of view. Example: `read_file(plexus_device="server", path="/production_department/sprint.md")`.
+- **`plexus_device="server"` + absolute path with the user's own UUID as leading segment** → explicit personal access. Example: `read_file(plexus_device="server", path="/{user_id}/skills/foo/SKILL.md")`. Rare; relative form is preferred.
+- **`plexus_device="server"` + absolute path with `<name>@<suffix>` leading segment** → shared workspace access (ADR-108). Example: `read_file(plexus_device="server", path="/production-department@a4f7e2d1/sprint.md")`. Both `name` and `suffix` must match the workspace row exactly (strict mode); the server does not silently rebind on rename.
 - **`plexus_device="<client>"` + any path** → resolved against the device's `workspace_path` when relative; absolute paths are accepted and, under `fs_policy=sandbox`, must still resolve inside `workspace_path`. Clients are single-workspace, so the distinction is cosmetic.
 
-**Frontend REST endpoints** continue to accept workspace-rooted paths (first segment names the workspace); JWT supplies the user_id scope. No ambiguity because the leading segment is always explicit at the REST surface.
+**Frontend REST endpoints** continue to accept workspace-rooted paths (first segment names the workspace using the same forms above); JWT supplies the user_id scope. No ambiguity because the leading segment is always explicit at the REST surface.
 
-**Consequences:** Agent can reach for `MEMORY.md`, `SOUL.md`, `skills/...` without knowing its own user_id. Shared-workspace access is a minor ceremony (one leading slash + workspace name) that makes cross-workspace calls visually distinct. No "which workspace did they mean?" ambiguity — relative always means personal.
+**Consequences:** Agent can reach for `MEMORY.md`, `SOUL.md`, `skills/...` without knowing its own user_id. Shared-workspace access uses one stable identifier (`name@suffix`) that the agent learns from the system prompt — same form for tool paths, REST URLs, and frontend display. Strict matching means a rename invalidates stored paths immediately and surfaces as a 404, which the agent recovers from on the next turn by re-reading the system prompt. Relative paths always mean personal — no "which workspace did they mean?" ambiguity.
 
 ### ADR-044 · Workspace is the canonical file store; no parallel file cache
 
@@ -1601,6 +1602,221 @@ This means a stale-but-not-too-stale client (e.g. binary `v0.3.0` speaking proto
 - Protocol version stays stable across most binary releases — most stale-client situations are silent feature-skip, not hard breakage.
 - The 1.0 cutover is the natural "we're stable now" milestone; happens organically when the API has settled and we don't expect more breaking changes.
 - README documents both versions: "plexus-client v0.3.1 (protocol v1)" so users know which to compare against the server.
+
+### ADR-108 · Shared workspaces: id-based storage, `name@suffix` addressing
+
+**Status:** accepted
+**Context:** Earlier drafts (and the original API.yaml shape) treated shared-workspace `name` as globally unique and used the bare name as the addressing key in tool paths, REST URLs, and disk layout. Two real failure modes broke that model:
+
+1. **Same-name collisions.** Realistic case: Alice creates "Xmas gift" with Bob in 2025; in 2026 Charlie creates a new "Xmas gift" workspace and adds Alice. Alice is now in two same-named workspaces; bare-name addressing has no way to disambiguate. A globally-unique-name policy forces user-level coordination across orgs that shouldn't have to coordinate.
+2. **Renames are destructive.** With name as the path segment, every rename breaks stored paths in agent history, skill references, and bookmarked URLs. ADR-067 / API.yaml already flagged this as a footgun.
+
+**Decision:** Three-layer addressing scheme that's symmetric with the personal-workspace pattern (which already uses `user_id` UUID for path).
+
+#### Database
+
+Two new tables. Eight-table schema (SCHEMA.md) becomes ten-table.
+
+```sql
+CREATE TABLE IF NOT EXISTS workspaces (
+    id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT         NOT NULL,                  -- not unique
+    quota_bytes BIGINT       NOT NULL,
+    created_by  UUID         REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id  UUID         NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id       UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    joined_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (workspace_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id);
+```
+
+`workspaces.created_by` uses `ON DELETE SET NULL` (not `CASCADE`) — deleting the creator should not delete the workspace if other members exist. Explicit exception to ADR-058's "every user-referencing FK has CASCADE" rule. Last-member-leaves auto-deletion is application logic in the workspace_fs layer (triggered by the DELETE on `workspace_members`), not a SQL cascade.
+
+#### Disk layout
+
+`{PLEXUS_WORKSPACE_ROOT}/{workspace_id}/` for shared workspaces. Same flat namespace as personal `{PLEXUS_WORKSPACE_ROOT}/{user_id}/` — UUIDs don't collide with each other across the user/workspace tables.
+
+Rename is a single `UPDATE workspaces SET name = $1 WHERE id = $2` — zero file moves, zero downtime.
+
+#### Addressing form (REST URLs and agent tool paths)
+
+Always `<name>@<suffix>` where `suffix` is the first 8 hex characters of `workspaces.id` (first byte-pair of the UUID). Identical form for both audiences:
+
+- **REST URL:** `/api/workspaces/Xmas%20gift@a4f7e2d1`, `/api/workspaces/Xmas%20gift@a4f7e2d1/members`, etc.
+- **Agent tool path:** `read_file(plexus_device="server", path="/Xmas gift@a4f7e2d1/list.md")`.
+- **System prompt listing:** `### Shared: Xmas gift [@a4f7e2d1]` with the path form shown explicitly.
+
+**Why uniform.** One mental model, one resolver function on the server, smaller code footprint, smaller cognitive footprint. The conditional version ("name only when unambiguous, name@suffix only when ambiguous") forces the server to switch behavior mid-session whenever a user joins a same-named workspace, which is exactly the point at which simplicity matters most.
+
+#### Suffix length and collision handling
+
+- **Default 8 hex chars** (32 bits). Collision probability inside a single user's accessible workspaces is ~1e-8 even with hundreds of memberships.
+- **Auto-extend on collision** at workspace-create or member-add time: if the new suffix would collide with an existing workspace already accessible to any prospective member, extend the suffix length by one hex char (then two, etc.) until unique. Same convention as `git`'s short-hash extension. Once assigned, a workspace's suffix length is stable for its lifetime — never re-shortened.
+- The `@` separator is a reserved character in workspace names (rejected by the validator in ADR-109) so name+suffix parsing is unambiguous.
+
+#### Resolution (strict mode)
+
+Both `name` and `suffix` MUST match the workspace row. The server does not silently rebind on rename. A stale path in agent history surfaces as `404 NotFound`, the agent re-reads the system prompt on the next turn, and re-attempts with the current name. Lenient mode (suffix-only matching) was rejected because LLM typos in the name would silently route writes to the wrong workspace — much worse blast radius than a loud 404.
+
+The single resolver runs across REST + agent-tool-path entry points:
+
+```rust
+fn resolve_workspace_segment(user_id: Uuid, segment: &str) -> Result<Uuid, WorkspaceError> {
+    let (name, suffix_hex) = segment.rsplit_once('@')
+        .ok_or(WorkspaceError::MalformedSegment)?;
+    // workspace where: id::text LIKE '<suffix>%'
+    //                  AND name = <name>
+    //                  AND user is in workspace_members
+    // unique → return id; zero matches → 404; >1 → bug (suffix collision detection failed at create)
+}
+```
+
+#### What this changes in existing docs
+
+- ADR-043 (already revised in this pass) — example switches to `name@suffix` form.
+- API.yaml — every `/api/workspaces/{name}` path becomes `/api/workspaces/{workspace_ref}` (the `name@suffix` form). Workspace schema gains explicit `id` (UUID), `name` (display, not unique), `suffix` (8+ hex chars), `created_by` fields. Description "globally unique" wording is removed.
+- SCHEMA.md — eight-table → ten-table, two new sections, indexes summary updated.
+- TOOLS.md, SYSTEM_PROMPT.md — every shared-workspace example switches to `name@suffix`.
+
+#### Consequences
+
+- Same-named workspaces across orgs/users coexist freely. No global naming dictatorship.
+- Renames are zero-cost (label-only). Stored paths break loudly, agent self-recovers via system prompt re-read.
+- Agent has one addressing pattern to learn (matches what it sees in the system prompt verbatim). REST and agent surfaces share the resolver — fewer code paths.
+- `created_by` deviation from ADR-058 cascade rule is the single explicit exception, documented inline.
+
+### ADR-109 · Identifier name validation: workspace + device + skill folder
+
+**Status:** accepted
+**Context:** Workspace names, device names, and skill folder names all become path segments at some point — workspace names land in URL paths and disk paths via `name@suffix` (ADR-108); device names appear in REST URLs (`PATCH /api/devices/{name}/config` per ADR-091); skill folders are filesystem directories under `skills/{name}/`. None of these had explicit char-level validation rules in earlier ADRs. Without uniform rules: path injection, Windows-incompatible characters, lookalike-name griefing via Unicode normalization differences, and accidental separator collisions (e.g., the new `@` in workspace addressing).
+**Decision:** Single validator in `plexus-common`, used by every identifier ingress point.
+
+#### Forbidden characters (denylist)
+
+| Category | Chars | Reason |
+|---|---|---|
+| Path injection | `/`, `\`, `\0` | Cross-segment routing in any OS |
+| Plexus separators | `@`, `:` | Reserved for `name@suffix` (ADR-108) and session keys (ADR-006) |
+| Windows-illegal | `<`, `>`, `"`, `\|`, `?`, `*` | `file_transfer` writes to Windows clients |
+| Control chars | `\x00`-`\x1F`, `\x7F` | Filesystem behavior + log-injection hygiene |
+
+Allowed: every Unicode letter (any script — Latin, CJK, Cyrillic, Arabic, Hebrew, Greek, Devanagari, Thai, Korean, etc.), digits, Unicode marks, and common punctuation that isn't on the denylist (`-`, `_`, `+`, `=`, `(`, `)`, `~`, `&`, internal spaces, etc.).
+
+#### Other rules
+
+- **NFC Unicode normalization** at insert time. Prevents the `Café` (composed) vs. `Café` (decomposed) lookalike where the two strings render identical but compare unequal.
+- **Length cap: 64 characters** (NFC-normalized). Generous for display, bounded for path lengths and Postgres index keys.
+- **Trim leading/trailing whitespace.** Then **collapse internal whitespace runs to a single space** so `" Xmas  gift "` becomes `"Xmas gift"` deterministically.
+- **Reject empty string** after trim.
+- **Reject the reserved names `.` and `..`** after normalization (any case variant).
+
+#### Implementation
+
+```rust
+pub fn validate_identifier_name(raw: &str, kind: IdentifierKind) -> Result<String, WorkspaceError> {
+    let normalized = raw.nfc().collect::<String>();
+    let trimmed = collapse_whitespace(normalized.trim());
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return Err(WorkspaceError::InvalidName(kind, "reserved or empty"));
+    }
+    if trimmed.chars().count() > 64 {
+        return Err(WorkspaceError::InvalidName(kind, "too long (>64 chars)"));
+    }
+    if let Some(bad) = trimmed.chars().find(|c| {
+        matches!(c, '/' | '\\' | '\0' | '@' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+            || (*c as u32) < 0x20 || *c == '\x7F'
+    }) {
+        return Err(WorkspaceError::InvalidName(kind, format!("contains '{bad}'")));
+    }
+    Ok(trimmed)
+}
+```
+
+`IdentifierKind` discriminates between `Workspace`, `Device`, and `Skill` for error messages and possible per-kind rule extensions later. v1 uses identical rules across kinds.
+
+#### Where it runs
+
+- `POST /api/workspaces` body `name`, `PATCH /api/workspaces/{...}` body `name`.
+- `POST /api/devices` body `name`, `PATCH /api/devices/{name}/config` body `name` (rename).
+- `workspace_fs::write` when destination matches `skills/*/SKILL.md` — the YAML-frontmatter `name` field gets the same validation pass on top of the existing ADR-082 folder-match check.
+
+#### Consequences
+
+- One bug-fix location for the rules. Adding/removing a forbidden char or tightening length is a single-file change.
+- Workspace names in any human-spoken script are accepted — Korean, Arabic, Vietnamese, etc. Plexus is self-hosted globally.
+- The `@` exclusion makes ADR-108's `name@suffix` parsing unambiguous without additional escape syntax.
+- NFC normalization eliminates an entire class of homograph confusion at the cost of one Unicode pass per insert (microseconds).
+
+### ADR-110 · Device states: online, offline-but-paired, deleted (complete wipe)
+
+**Status:** accepted
+**Context:** ADR-091 established `devices.token` as PK and the in-memory `DashMap<token, ConnHandle>` as the source of truth for online state. Three states were implicit but never enumerated. The tool registry's `plexus_device` enum (ADR-071) needs an explicit policy for which states appear, and "revocation" needs an unambiguous wipe semantic so the user trusts that deleting a device leaves no lingering state.
+**Decision:** Three named states.
+
+| State | DB row | In-memory map | Tool registry | Frontend |
+|---|---|---|---|---|
+| **1. Online** | exists | entry present | listed in `plexus_device` enum | normal |
+| **2. Offline-but-paired** | exists | entry absent | listed in `plexus_device` enum | greyed-out, "last seen at ..." |
+| **3. Deleted** | row gone | entry gone | NOT listed | not present |
+
+**State 3 is a complete wipe.** When a device transitions to state 3, every server-side artifact tied to it goes away in one atomic step:
+
+- `devices` row is deleted (no `deleted_at` tombstone — see ADR-058's no-soft-delete principle).
+- In-memory `DashMap<token, ConnHandle>` entry is removed (idempotent if the device wasn't connected).
+- If a WS connection was live, it is force-closed (close code 4401 — token invalid).
+- Tool registry cache invalidates so the next agent turn no longer sees the device in the `plexus_device` enum.
+- No inbound FKs reference `devices` from other tables (verify in SCHEMA.md §7), so no cascade work beyond the row delete.
+- `mcp_servers` JSONB on the row vanishes with the row — no orphaned MCP-config records.
+
+**Out of scope of the wipe** (deliberate, documented):
+- The client process running on the user's hardware. It will fail at its next WS handshake (4401 close) and exit per ADR-104. Plexus does not reach into the client to delete its workspace directory or config.
+- Past log lines that mention the device name. Logs are textual history, not live state.
+
+**Tool registry inclusion rule:** state 1 and state 2 BOTH appear in the `plexus_device` enum. The agent calls a tool on a state-2 device → server discovers the device is unreachable → synthesizes `tool_result(is_error=true, code=device_unreachable)` (ADR-031, ADR-096) → agent observes the failure and adapts on the next iteration. State 3 devices never appear because the row is gone — there is nothing for the agent to attempt.
+
+**State transitions:**
+
+- **1 → 2** (heartbeat timeout, WS close, network drop): row stays; in-memory map removes the entry; SSE `device_offline` event fires on `/api/me/events` (ADR-106).
+- **2 → 1** (WS reconnect with valid token): in-memory map adds the entry; SSE `device_online` event fires; tool registry cache invalidates (a fresh `register_mcp` may bring new MCP tools).
+- **{1, 2} → 3** is one-way and triggered explicitly:
+  - `DELETE /api/devices/{name}` (user action via REST) — direct delete.
+  - `DELETE /api/me` (account deletion) — cascade via ADR-058 deletes every device the user owned.
+  - There is no implicit transition. Crashes, network blips, or token-rotation operations do NOT trigger state 3.
+- **`POST /api/devices/{name}/regenerate-token` is NOT a state-3 trigger.** It updates `devices.token` in place (ADR-091); the row stays, the device's tool registry presence stays. The currently-live WS (if any) is closed (the old credential no longer authenticates), the device drops to state 2 for the brief window before the user updates the client, then back to state 1 on reconnect.
+
+**Why state 2 stays in the enum.** Refusing to surface offline devices was rejected because: (a) the agent loses awareness of the user's configured topology between turns, and (b) a device coming back online mid-session would silently change tool availability — confusing UX. The ADR-031 "fail fast" pattern surfaces unreachable devices loudly so the agent can adapt.
+
+**Consequences:**
+- One in-memory data structure (`DashMap<token, ConnHandle>`) is the SSOT for state-1 vs state-2 discrimination. No DB columns.
+- Cache invalidation hooks fire on three transitions: 1→2, 2→1, {1,2}→3. Each is a single observation point in the WS gateway.
+- `Device` API response computes `online` and `last_seen_at` on demand from the map, never from a DB column.
+- "Revocation" means the same thing in user docs as in the codebase: row deleted, no lingering state, no recovery path. If the user wants the device back, they create a new one (`POST /api/devices`) and get a fresh token — same shape as a first-time pairing.
+
+### ADR-111 · Default `devices.workspace_path` is `~/plexus/workspace` on every OS
+
+**Status:** accepted
+**Context:** `POST /api/devices` accepts an optional `workspace_path` per ADR-097. `devices.workspace_path` is `NOT NULL`, so the server must produce a default when the field is omitted from the request body. Per-OS conditionals on the server are awkward: the server doesn't know the device's host OS at create time (the device hasn't connected yet). The client also needs a sensible default if a user just runs `./plexus-client` without any prior browser-side device-creation flow.
+**Decision:** Default is the literal string `~/plexus/workspace` for **all OSes** — Linux, macOS, Windows. Stored verbatim with the tilde in `devices.workspace_path`. The client resolves `~` against its own home directory at startup (`$HOME` on Linux/macOS, `%USERPROFILE%` on Windows) when bootstrapping the directory.
+
+The server never resolves `~`. It only:
+- Stores the literal string on `POST /api/devices`.
+- Returns it verbatim in `hello_ack.workspace_path` on WS handshake.
+
+The client expansion happens once, at startup, in plexus-client (ADR-104's "workspace directory bootstrap" rule). Singular `workspace` (not `workspaces`) since each client device has exactly one workspace tree.
+
+**Why a uniform default across OSes.** `~` is universally recognized in shell/CLI conventions, including Windows PowerShell (which expands it to `$HOME` in modern versions) and the Rust `dirs` / `home` crates that the client uses. Conditional defaults like `%USERPROFILE%\Plexus\workspace` would force the server-side `Device` row to encode OS knowledge it doesn't have, and would create three default-path strings to keep aligned. One default string, one expansion site (the client), no per-OS branches in the server.
+
+**Consequences:**
+- `POST /api/devices` body `workspace_path` is genuinely optional — server fills the default if absent.
+- Existing client-side `~` expansion code is reused (no new work).
+- A user who wants a different path (e.g. `D:\projects` on Windows, `/srv/agent` on a Linux server) supplies it explicitly at device-creation time; the server accepts any string that passes the path-validation rules.
+- Documenting once in ADR-097 / API.yaml — no per-OS doc surface.
 
 ---
 
