@@ -28,6 +28,7 @@ Known keys (admin-editable via `PATCH /api/admin/config`):
 | `llm_model` | string | ADR-101 | Model name passed in request body. |
 | `llm_max_context_tokens` | int | ADR-101 | LLM context window in tokens (e.g. `128000` for gpt-4o). Counted with tiktoken-rs (ADR-025). |
 | `llm_compaction_threshold_tokens` | int | ADR-028, ADR-101 | Headroom that triggers compaction. Default `16000`. Summary `max_output_tokens` = `threshold − 4000`. |
+| `llm_max_concurrent_requests` | int or null | ADR-101 | Optional in-process semaphore for outbound LLM calls. `null` / absent means unlimited. |
 | `shared_workspace_quota_bytes` | int | ADR-108 | Quota ceiling that any single shared workspace may request at create or rename time. Default 25 GB. |
 
 Deployments may carry additional opaque keys; Plexus reads only the ones it knows about.
@@ -223,7 +224,9 @@ CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_
 CREATE TABLE IF NOT EXISTS cron_jobs (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name            TEXT         NOT NULL,
     schedule        TEXT         NOT NULL,
+    tz              TEXT,
     one_shot        BOOLEAN      NOT NULL DEFAULT FALSE,
     description     TEXT         NOT NULL,
     channel         TEXT         NOT NULL,
@@ -240,11 +243,14 @@ CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_fire  ON cron_jobs(next_fire_at)
 ```
 
 - `schedule` — normalized cron expression (server parses agent-supplied `every_seconds` / `cron_expr` / `at` into a single canonical form at insert time).
+- `name` — short user-facing label. The cron tool defaults it from the first 30 characters of the message; REST callers may provide it explicitly.
+- `tz` — optional IANA timezone used when parsing cron expressions or naive one-shot timestamps.
 - `one_shot` — true when the agent created the job from a `cron(action="add", at=...)` call (one-time future trigger). Once fired and delivered, the row is deleted.
-- `description` — the agent-facing instruction the scheduler will inject into the heartbeat session when the job fires.
+- `description` — the agent-facing instruction the scheduler will inject into the cron session when the job fires.
 - `channel` + `chat_id` — inherited from the creating session per ADR-053. The reply lands where the user originally set up the cron.
 - `deliver` — when false, the agent runs but the result doesn't post back to the channel (silent maintenance jobs).
 - `next_fire_at` — denormalized for the scheduler index. Recomputed each time the job fires.
+- Cron writes must validate the schedule before insert/update: exactly one timing form, positive intervals, known timezone, valid cron expression, and a future `next_fire_at`. Past one-shots and unrunnable schedules are rejected rather than stored.
 - **No `kind` column** — heartbeat is a tick loop, not a cron row, and Dream is deferred (ADR-055, ADR-092).
 
 ---

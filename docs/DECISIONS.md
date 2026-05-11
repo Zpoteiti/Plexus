@@ -21,7 +21,7 @@ These supersede the historical ADR set in the previous Plexus codebase — most 
 ### ADR-001 · Three-crate workspace
 
 **Status:** accepted
-**Context:** The previous Plexus had four crates (`plexus-common`, `plexus-server`, `plexus-client`, `plexus-gateway`). Gateway existed for DMZ + horizontal-scale + edge-cached-frontend scenarios. None of these apply to Plexus's actual deployment profile (solo hosted, up to ~hundreds of users, single server process).
+**Context:** The previous Plexus had four crates (`plexus-common`, `plexus-server`, `plexus-client`, `plexus-gateway`). Gateway existed for DMZ + horizontal-scale + edge-cached-frontend scenarios. None of these apply to Plexus's actual deployment profile: self-hosted, single server process, with capacity determined by admin-provisioned hardware and LLM provider limits rather than a separate gateway crate.
 **Decision:** Three crates: `plexus-common`, `plexus-server`, `plexus-client`. No `plexus-gateway`.
 **Consequences:** `plexus-server` serves everything: REST API, SSE streams, device WebSocket, frontend static files, JWT issuance. One binary, one port, one deployment artifact. Public deployment puts nginx/Caddy in front for TLS (infrastructure concern, not a Plexus responsibility).
 
@@ -805,7 +805,7 @@ Worker (single tokio task, processes one item at a time):
    └─ config_update → reconcile MCP set → maybe send register_mcp
 ```
 
-This eliminates transition races (Alive↔Dead during dispatch, spawn-vs-remove, rapid config edits) without generation counters or per-MCP locks. Trade-off: one device's tool calls don't run concurrently across sessions — chat's 30-second `exec` blocks heartbeat's `read_file` for 30s. Acceptable at Plexus scale (ADR-061 — hundreds of users, 1–2 active sessions per user typical). Heartbeat (`ping`/`pong`) and binary frames bypass the queue so `exec` doesn't trip the 70s heartbeat timeout (PROTOCOL.md §1.4).
+This eliminates transition races (Alive↔Dead during dispatch, spawn-vs-remove, rapid config edits) without generation counters or per-MCP locks. Trade-off: one device's tool calls don't run concurrently across sessions — chat's 30-second `exec` blocks heartbeat's `read_file` for 30s. Acceptable because the queue is per device, not a global server bottleneck. Heartbeat (`ping`/`pong`) and binary frames bypass the queue so `exec` doesn't trip the 70s heartbeat timeout (PROTOCOL.md §1.4).
 
 #### Initial spawn (A1, eager at handshake)
 
@@ -979,7 +979,7 @@ All three live in `plexus-client/src/mcp/`. The worker stitches them together fo
 **Decision:**
 - **Phase 1**: a standalone LLM call (not through the bus) with a small decision tool. Inputs: `HEARTBEAT.md` + current time. Output: `action: "skip" | "run"` + `tasks` summary.
 - **Phase 2** (only if action=run): synthesize InboundMessage with `session_key_override = "heartbeat:{user_id}"`, inject into bus. Normal agent loop runs in the heartbeat session.
-**Consequences:** No `PromptMode::Heartbeat` branch — Phase 2 sees the standard system prompt. Heartbeat has its own session per user, so it doesn't pollute chat history.
+**Consequences:** No `PromptMode::Heartbeat` branch — Phase 2 sees the standard system prompt. Heartbeat has its own read-only session per user, so it doesn't pollute chat history and the user cannot directly write into the autonomous heartbeat stream.
 
 ### ADR-055 · Dream deferred for v1
 
@@ -988,11 +988,38 @@ All three live in `plexus-client/src/mcp/`. The worker stitches them together fo
 **Decision:** Not in M0–M3. MEMORY.md is maintained inline by the main agent via `edit_file` during conversations. When Dream eventually lands, it will be a separate sidecar module (not on the bus) with its own restricted tool registry, matching the nanobot pattern. Nothing in the rebuild architecture blocks its future addition.
 **Consequences:** No `last_dream_at` column, no `dream_phase1_prompt`/`dream_phase2_prompt` system_config keys, no `ToolAllowlist::Only(...)` enum, no `kind` column on `cron_jobs` (system cron kind was only used for dream + heartbeat; heartbeat is a tick loop, not a cron row).
 
+### ADR-112 · Cron ticker mechanics
+
+**Status:** accepted
+**Context:** Nanobot stores cron jobs in a single-user JSON store and re-arms an asyncio timer after each write. Plexus is multi-user and DB-backed, but the mental model stays the same: cron is a durable trigger that injects a message when a validated future time arrives.
+**Decision:**
+- There is one in-process cron ticker per Plexus server process, not one ticker per user. It scans the shared `cron_jobs` table by `next_fire_at`.
+- The only supported write entrances are the agent `cron` tool and the REST cron API. Both must call the same scheduler write helper.
+- The shared write helper validates schedules and computes a future `next_fire_at` before insert/update. It rejects missing/ambiguous timing forms, non-positive intervals, invalid cron expressions, unknown timezones, past one-shots, and schedules that cannot produce a future fire time.
+- The same helper notifies the ticker after create/update/delete. The notify is a process-local wake signal, not persisted state.
+- The ticker sleeps until the earliest known `next_fire_at`, capped at 60 seconds. `Notify` gives low-latency wakeups on normal writes; the 60-second cap is the fallback global re-scan if a notify is missed, a future write path forgets it, rows are changed by admin tooling, or the clock shifts.
+- Missed recurring fires are silently skipped, matching nanobot. On restart the scheduler advances recurring jobs to the next future occurrence rather than catching up. Expired one-shots are dropped rather than delivered late.
+
+**Consequences:** Cron remains simple and globally coordinated within the single-process deployment model. The DB work is one indexed scheduler check per minute at worst when idle. Write-time validation keeps bad schedules out of the table instead of relying on drift handling later.
+
+### ADR-113 · Heartbeat fanout and read-only session
+
+**Status:** accepted
+**Context:** Nanobot heartbeat is a single-user, stateless pulse over `HEARTBEAT.md`. Plexus keeps that property but must handle thousands of users. Adding heartbeat rows or per-user cursors would violate ADR-092.
+**Decision:**
+- Heartbeat is a stateless per-process pulse. Every 30 minutes, the server enumerates users, reads `{ROOT}/{user_id}/HEARTBEAT.md`, and skips users whose file is missing or empty without making an LLM call.
+- Eligible users fan out concurrently. Plexus does not add a heartbeat-specific semaphore in v1. If 2,000 users have non-empty `HEARTBEAT.md`, the pulse may put 2,000 Phase 1 LLM requests in flight.
+- Provider capacity is an admin responsibility. Deployments with weaker providers can configure the shared LLM-provider concurrency cap in `system_config.llm_max_concurrent_requests` or place a gateway such as LiteLLM in front of Plexus.
+- Phase 2 output is persisted to `heartbeat:{user_id}`. The Web UI may display this as a dedicated Heartbeat session, but users cannot post directly into it. Users change heartbeat behavior by editing `HEARTBEAT.md` through normal sessions and file tools.
+- Heartbeat does not automatically deliver to Discord, Telegram, or the latest active channel in v1. If the agent needs to contact the user externally, it must deliberately use the normal `message` tool.
+
+**Consequences:** Users can inspect heartbeat history from the Web UI without autonomous output appearing unexpectedly in external chats. Large deployments can run high-concurrency heartbeat pulses when their LLM provider supports it, while smaller deployments can cap concurrency at the shared provider layer.
+
 ### ADR-056 · No rate limiting in v1
 
 **Status:** accepted
-**Decision:** Self-hosted Plexus targets modest scale (hundreds of users on adequate hardware). The only protective behavior: on LLM provider 429, retry twice with exponential backoff, then surface an error to the user. No rate-limit buckets, no counters, no per-user quotas in the bus.
-**Consequences:** Simpler ingress. Admin's responsibility to size their LLM provisioning. Future rate limit can be bolted on at the bus layer when a deployment actually needs it.
+**Decision:** Plexus does not implement per-user rate-limit buckets, request counters, or quota enforcement in the bus for v1. LLM provider 429s retry twice with exponential backoff, then surface an error to the user. The shared provider layer may optionally enforce `system_config.llm_max_concurrent_requests` as an in-process semaphore, but this is a backend-protection knob, not a product rate-limit system.
+**Consequences:** Simpler ingress. Admin's responsibility to size their LLM provisioning for the deployment's user and concurrency targets. Future user-facing rate limits can be bolted on at the bus layer when a deployment actually needs them.
 
 ---
 
@@ -1342,7 +1369,7 @@ One client process talks to exactly one Plexus server. `PLEXUS_DEVICE_TOKEN` is 
 **Context:** Plexus needs an LLM. The choices: (a) ship a per-provider client trait (Anthropic Messages API, OpenAI Chat Completions, Bedrock, Gemini, etc. — each with its own request/response/tool-call shape), (b) speak one wire format and let the admin put a translation gateway in front for everything else. Option (a) has been the prior-Plexus pattern and produced provider-switching bugs, vision-strip drift, and tool-call-format edge cases.
 **Decision:** **OpenAI chat completions API ONLY.** Plexus speaks one request shape, one response shape, one tool-call format. If an admin wants Anthropic / Bedrock / Gemini / a local model, they put a gateway in front (LiteLLM, an OpenAI-compatible proxy, or the provider's own OpenAI-compat endpoint) and configure Plexus to talk to it. Format translation lives in the gateway, not in Plexus.
 
-The admin configures the LLM via the admin REST API — **not env vars**. Five keys persist in `system_config`:
+The admin configures the LLM via the admin REST API — **not env vars**. Six keys persist in `system_config`:
 
 | Key | Type | Purpose |
 |---|---|---|
@@ -1351,10 +1378,11 @@ The admin configures the LLM via the admin REST API — **not env vars**. Five k
 | `llm_model` | string | Model name passed in the request body (e.g. `gpt-4o`, `gpt-5-codex`, `anthropic/claude-opus-4-7` if the gateway routes it). |
 | `llm_max_context_tokens` | integer | The LLM's hard context-window size in tokens (e.g. `128000` for gpt-4o, `200000` for gpt-5-class). Counted with `tiktoken-rs` (ADR-025) against the full chat-completions prompt — system + tools + history + new turn. |
 | `llm_compaction_threshold_tokens` | integer | Headroom that triggers compaction (default `16000`, ADR-028). When `llm_max_context_tokens − tiktoken_count(prompt) < llm_compaction_threshold_tokens`, the bus fires stage-1 compaction. The summary's `max_output_tokens` is `threshold − 4000` (= `12000` at the default), reserving 4k headroom for the next user turn. |
+| `llm_max_concurrent_requests` | integer or null | Optional in-process semaphore applied in the shared OpenAI-compatible provider layer. `null` / absent means unlimited. When set, all LLM calls share the same cap: normal chat, cron, heartbeat, compaction, and future autonomous flows. |
 
 Set via `PATCH /api/admin/config`. Read via `GET /api/admin/config`. No `LLM_*` env vars; the only env vars relevant to LLM behavior are `DATABASE_URL` (so the server can read these keys at startup) and the JWT/auth secrets.
 
-**Consequences:** No provider abstraction trait, no per-provider modules, no vision-format adapters per provider — vision retry (ADR-026) targets a single request shape. Switching the model is a `PATCH` away. Switching the *provider* is "stand up LiteLLM, change `llm_endpoint` and `llm_api_key`" — handled outside Plexus. Admin operating overhead (one extra container if they want non-OpenAI) is the trade we're willing to make for codebase simplicity.
+**Consequences:** No provider abstraction trait, no per-provider modules, no vision-format adapters per provider — vision retry (ADR-026) targets a single request shape. Switching the model is a `PATCH` away. Switching the *provider* is "stand up LiteLLM, change `llm_endpoint` and `llm_api_key`" — handled outside Plexus. Admin operating overhead (one extra container if they want non-OpenAI) is the trade we're willing to make for codebase simplicity. The optional concurrency cap is deliberately provider-wide rather than heartbeat-specific, so weaker deployments can protect their LLM backend without changing individual subsystems.
 
 ---
 
@@ -1858,4 +1886,3 @@ For contributors migrating from the old codebase, here's what changed and why:
 | Shell schema in `plexus-server/server_tools/` | Client owns; handshake-advertised | ADR-039 |
 | File tool schemas in `plexus-server/server_tools/` | `plexus-common/tool_schemas/` | ADR-038 |
 | MCP client code duplicated in server + client | Shared in `plexus-common/mcp/` | ADR-047 |
-

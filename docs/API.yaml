@@ -1093,36 +1093,58 @@ paths:
       tags: [Cron]
       summary: Create a cron job (mirrors `cron` tool, ADR-053)
       description: |
-        The job inherits the caller's current channel + chat_id at
-        creation time. Each firing synthesizes an `InboundMessage`
-        into a dedicated cron session.
+        REST-created jobs provide their delivery channel + chat_id
+        explicitly. Agent-created jobs use the same shared write helper
+        but inherit channel + chat_id from ToolContext. Each firing
+        synthesizes an `InboundMessage` into a dedicated cron session.
+
+        The shared helper validates the schedule before storing it:
+        exactly one of `every_seconds`, `cron_expr`, or `at`; positive
+        intervals; valid cron expressions; known IANA timezone when `tz`
+        is present; and a future `next_fire_at`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [schedule, description]
+              required: [description, channel, chat_id]
               properties:
-                schedule:
+                name:
                   type: string
-                  description: Cron expression ("0 9 * * *") or natural language ("every Monday at 10am").
+                  description: Optional short human-readable label. Defaults to the first 30 characters of description.
                 description:
                   type: string
                   description: Becomes the synthesized user message at firing time.
-                one_shot:
+                every_seconds:
+                  type: integer
+                  minimum: 1
+                  description: Interval in seconds for recurring jobs. Mutually exclusive with cron_expr and at.
+                cron_expr:
+                  type: string
+                  description: Cron expression like "0 9 * * *". Mutually exclusive with every_seconds and at.
+                tz:
+                  type: string
+                  description: Optional IANA timezone for cron_expr and naive at timestamps.
+                at:
+                  type: string
+                  format: date-time
+                  description: One-shot future execution time. Mutually exclusive with every_seconds and cron_expr.
+                deliver:
                   type: boolean
-                  default: false
+                  default: true
+                  description: Whether to deliver the final response to the stored channel/chat_id.
                 channel:
                   type: string
-                  description: Optional override; defaults to the caller's current session channel.
+                  description: Delivery channel for the final response, e.g. "web", "discord", or "telegram".
                 chat_id:
                   type: string
-                  description: Optional override; defaults to the caller's current session chat_id.
+                  description: Delivery target within the channel.
       responses:
         '201':
           description: Created.
           content: { application/json: { schema: { $ref: '#/components/schemas/CronJob' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   /api/cron/{id}:
     parameters:
@@ -1139,19 +1161,41 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/CronJob' } } }
     patch:
       tags: [Cron]
-      summary: Update schedule or description
+      summary: Update schedule, delivery, or description
+      description: |
+        Uses the same shared cron write helper as create/delete, so schedule
+        updates are validated and the cron ticker is notified after the row
+        changes.
       requestBody:
         content:
           application/json:
             schema:
               type: object
               properties:
-                schedule: { type: string }
+                name: { type: string }
                 description: { type: string }
+                every_seconds:
+                  type: integer
+                  minimum: 1
+                  description: Replaces the schedule with an interval schedule. Mutually exclusive with cron_expr and at.
+                cron_expr:
+                  type: string
+                  description: Replaces the schedule with a cron expression. Mutually exclusive with every_seconds and at.
+                tz:
+                  type: string
+                  description: Optional IANA timezone for cron_expr and naive at timestamps.
+                at:
+                  type: string
+                  format: date-time
+                  description: Replaces the schedule with a one-shot future execution time. Mutually exclusive with every_seconds and cron_expr.
+                deliver: { type: boolean }
+                channel: { type: string }
+                chat_id: { type: string }
       responses:
         '200':
           description: OK
           content: { application/json: { schema: { $ref: '#/components/schemas/CronJob' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
     delete:
       tags: [Cron]
       summary: Delete a cron job
@@ -1183,6 +1227,10 @@ paths:
             `llm_max_context_tokens − tiktoken_count(prompt) <
             llm_compaction_threshold_tokens`. Summary `max_output_tokens`
             = `threshold − 4000`. ADR-028, ADR-101.
+          - `llm_max_concurrent_requests` (int or null) — optional
+            in-process semaphore in the shared LLM provider layer. `null`
+            or absent means unlimited. Applies to normal chat, cron,
+            heartbeat, compaction, and future LLM calls. ADR-101.
 
         `additionalProperties: true` because deployments may carry
         deployment-local keys; everything not listed above is treated
@@ -1580,18 +1628,28 @@ components:
 
     CronJob:
       type: object
-      required: [id, user_id, schedule, description, channel, chat_id, created_at]
+      required: [id, user_id, name, schedule, description, channel, chat_id, deliver, next_fire_at, created_at]
       properties:
         id: { type: string }
         user_id: { type: string }
+        name:
+          type: string
+          description: Short user-facing label.
         schedule:
           type: string
-          description: Cron expression after server-side parsing.
+          description: Canonical schedule string after server-side parsing.
+        tz:
+          type: [string, "null"]
+          description: IANA timezone used for cron expressions or naive one-shot timestamps.
         description: { type: string }
         channel: { type: string }
         chat_id: { type: string }
+        deliver:
+          type: boolean
+          description: Whether the final response is delivered to channel/chat_id.
         one_shot: { type: boolean }
         last_fired_at: { type: [string, "null"], format: date-time }
+        next_fire_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
 
     TransferRequest:

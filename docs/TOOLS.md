@@ -810,16 +810,17 @@ These three tools have no client-side counterpart. Their implementations live en
 ```
 
 **Mechanism:**
-- **`action="add"`** — requires `message` plus exactly one of `every_seconds`, `cron_expr`, or `at`. Inserts a row in `cron_jobs` with `user_id`, `channel`, `chat_id` (from the calling session per ADR-053), the schedule parameters, `message`, `name`, `deliver`, `tz`. Returns the created row's `job_id` and a human-readable confirmation.
+- **`action="add"`** — requires `message` plus exactly one of `every_seconds`, `cron_expr`, or `at`. Calls the shared cron write helper, which validates the schedule, computes a future `next_fire_at`, inserts a row in `cron_jobs` with `user_id`, `channel`, `chat_id` (from the calling session per ADR-053), the schedule parameters, `message`, `name`, `deliver`, `tz`, and wakes the cron ticker. Returns the created row's `job_id` and a human-readable confirmation.
 - **`action="list"`** — returns a summary of the user's cron jobs: `job_id`, `name`, schedule (as stored), next-fire estimate, `last_fired_at`.
-- **`action="remove"`** — requires `job_id`. Deletes the row (and cancels pending fires).
-- A server-side ticker scans `cron_jobs` periodically, fires due jobs by synthesizing an `InboundMessage` with `session_key_override = "cron:<job_id>"` (ADR-010, ADR-012). The synthesized message's `content` is the job's `message` field. If the job has `at` (one-shot), the row is deleted after firing; otherwise `last_fired_at` updates.
+- **`action="remove"`** — requires `job_id`. Calls the shared cron write helper to delete the row, cancel pending fires, and wake the cron ticker.
+- A single server-side ticker scans `cron_jobs` across all users, fires due jobs by synthesizing an `InboundMessage` with `session_key_override = "cron:<job_id>"` (ADR-010, ADR-012). The synthesized message's `content` is the job's `message` field. If the job has `at` (one-shot), the row is deleted after firing; otherwise `last_fired_at` updates and `next_fire_at` advances to the next future occurrence.
+- The ticker sleeps until the earliest `next_fire_at`, capped at 60s, and also wakes immediately when the shared write helper sends its process-local notify signal. Missed recurring fires are silently skipped on restart; expired one-shots are dropped rather than delivered late.
 - Each firing creates / continues a dedicated cron session; the reply routes to the channel + chat_id stored on the row. If `deliver=false`, the result is logged to the cron session but not delivered to the user-facing channel.
 
 **Timeout:** 10s — DB write ops, fast.
 **Result cap:** 16,000 characters.
 **Errors:** `ToolError::InvalidSchedule`, `ToolError::MissingRequiredField`, `ToolError::DBError`, `ToolError::CronJobNotFound`.
-**Related ADRs:** 010 (autonomous flows), 012 (synthesizers), 053 (cron channel/chat inheritance), 095 (result wrap).
+**Related ADRs:** 010 (autonomous flows), 012 (synthesizers), 053 (cron channel/chat inheritance), 095 (result wrap), 112 (cron ticker mechanics).
 
 ---
 
