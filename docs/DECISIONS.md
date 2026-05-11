@@ -430,7 +430,7 @@ Dispatch:
 - **`plexus_device="server"` + absolute path with `<name>@<suffix>` leading segment** → shared workspace access (ADR-108). Example: `read_file(plexus_device="server", path="/production-department@a4f7e2d1/sprint.md")`. Both `name` and `suffix` must match the workspace row exactly (strict mode); the server does not silently rebind on rename.
 - **`plexus_device="<client>"` + any path** → resolved against the device's `workspace_path` when relative; absolute paths are accepted and, under `fs_policy=sandbox`, must still resolve inside `workspace_path`. Clients are single-workspace, so the distinction is cosmetic.
 
-**Frontend REST endpoints** continue to accept workspace-rooted paths (first segment names the workspace using the same forms above); JWT supplies the user_id scope. No ambiguity because the leading segment is always explicit at the REST surface.
+**Frontend REST endpoints** mirror the shared file tools with a `plexus_device` query parameter that defaults to `server`. With `plexus_device="server"`, path resolution follows the same personal/shared workspace rules above. With `plexus_device="<client>"`, the server routes over the device WebSocket and the client applies its `workspace_path` and `fs_policy`; offline devices fail with `device_unreachable`. JWT supplies the user_id scope.
 
 **Consequences:** Agent can reach for `MEMORY.md`, `SOUL.md`, `skills/...` without knowing its own user_id. Shared-workspace access uses one stable identifier (`name@suffix`) that the agent learns from the system prompt — same form for tool paths, REST URLs, and frontend display. Strict matching means a rename invalidates stored paths immediately and surfaces as a 404, which the agent recovers from on the next turn by re-reading the system prompt. Relative paths always mean personal — no "which workspace did they mean?" ambiguity.
 
@@ -545,27 +545,27 @@ pub trait Tool: Send + Sync {
 
 **Consequences:** Each tool is a testable unit. Default-methods pattern means tools only override what's different from defaults (most tools just need name/schema/execute). Cross-cutting concerns (truncation, timeout, permission pre-check) can be added via default methods later without breaking implementers.
 
-### ADR-078 · Quota: one global value + per-user usage counter
+### ADR-078 · Quota: one global value + workspace_fs-owned usage
 
 **Status:** accepted
 **Context:** Plexus hosts user workspaces on disk. Without bounds, an agent or user can fill the volume and break the service for everyone. Prior Plexus had no quota at all. Nanobot runs single-user and didn't need one.
 **Decision:**
 - **One global quota value.** Stored in `system_config` under key `quota_bytes`. Admin-editable via admin UI; takes effect immediately for all users. No per-user override. Default: 5 GB.
-- **Per-user tracking.** `users.bytes_used` column maintained by `workspace_fs` on every write/delete.
+- **Usage authority.** `workspace_fs` is the only authority for server-side workspace usage. The schema does not require a `users.bytes_used` column. Implementations may compute usage on demand by walking `{workspace_root}/{user_id}/`, or maintain an internal cache/counter hidden behind `workspace_fs`; either way, API callers see the same result.
 - **Two-layer check before every write (enforced at the single workspace_fs choke point per ADR-045):**
-  1. **Lock rule:** if `bytes_used > quota_bytes`, all writes/edits/adds are rejected with `WorkspaceError::SoftLocked`. Only `delete_file` and `delete_folder` are allowed. Lock auto-lifts as soon as a delete pulls usage back under quota — no explicit unlock step.
+  1. **Lock rule:** if current usage is greater than `quota_bytes`, all writes/edits/adds are rejected with `WorkspaceError::SoftLocked`. Only `delete_file` and `delete_folder` are allowed. Lock auto-lifts as soon as a delete pulls usage back under quota — no explicit unlock step.
   2. **Single-op cap:** any single operation bigger than 80% of `quota_bytes` is rejected with `WorkspaceError::UploadTooLarge`. Applies to `write_file` content size, positive `edit_file` delta, and per-file or total folder bytes in `file_transfer` writes whose destination is the server.
 - **What counts.** Every byte inside `{workspace_root}/{user_id}/` — SOUL.md, MEMORY.md, `skills/**`, `.attachments/**`, arbitrary user files. No exemptions.
 - **Read API.** `GET /api/workspace/quota` → `{ quota_bytes, bytes_used, locked }`. Admin sets global via `PATCH /api/admin/config`.
 
 **Consequences:** One admin knob for all users; simple mental model. One enforcement choke point. Predictable degradation — "workspace full, delete files to continue" — surfaced uniformly to agent (as a tool error per ADR-031) and UI (as a lock flag + error variant).
 
-### ADR-079 · Nightly `du`-based quota reconciliation
+### ADR-079 · No schema-level quota counter in v1
 
 **Status:** accepted
-**Context:** `users.bytes_used` is maintained by workspace_fs on every write. Drift can occur if a write succeeds but the DB update fails (crash between the two), or if a bug adds a write path that bypasses workspace_fs.
-**Decision:** A tokio background task runs daily at 03:00 server local time. For each user, runs `du -sb {workspace_root}/{user_id}` and overwrites `users.bytes_used` with the result. Drift above 1 MB from the prior value is logged as a `WARN` — signal that a write path missed workspace_fs.
-**Consequences:** At 1K users, sequential walk completes in a small fraction of a minute (bounded by disk I/O). Drift warnings surface bypass bugs without blocking the fix. No real-time accuracy cost: the counter is eventually correct.
+**Context:** Earlier drafts stored quota usage in `users.bytes_used`, which required reconciliation when disk writes and DB updates drifted. The schema now deliberately omits that column (SCHEMA.md §2).
+**Decision:** v1 exposes `bytes_used` through the workspace/quota APIs, but storage is an implementation detail of `workspace_fs`. The simplest correct implementation is on-demand disk usage calculation. If performance later requires it, `workspace_fs` may add an internal counter/cache plus reconciliation without changing the public API or `users` schema.
+**Consequences:** No background reconciliation task is required for M1. There is no DB drift between filesystem mtimes and a public `users.bytes_used` column because that column does not exist. Quota reads remain user-visible through `GET /api/workspace/quota`.
 
 ### ADR-080 · Chat-drop attachments degrade gracefully under quota lock
 
@@ -642,7 +642,7 @@ Rejected: a dedicated `install_skill` server tool. Would require URL allowlistin
 **Decision:** New shared tool `delete_folder(device, path)`. Always recursive — deletes the folder and every file/subfolder inside. No flag; a non-recursive variant (`rmdir` on empty dirs only) is too niche for v1.
 - **Schema in `plexus-common/src/tools/`** alongside the other shared tools (ADR-038). `device` enum is injected at merge time (ADR-071).
 - **Implementations in both `plexus-server` and `plexus-client`.**
-- **Server implementation** routes through workspace_fs: sums bytes to be deleted recursively, calls `tokio::fs::remove_dir_all`, applies one `bytes_used -= total` DB update, invalidates the skills cache if any path was under `skills/`. Lock auto-lifts if this brings usage back under quota.
+- **Server implementation** routes through workspace_fs: sums bytes to be deleted recursively, calls `tokio::fs::remove_dir_all`, updates workspace_fs usage accounting, and invalidates the skills cache if any path was under `skills/`. Lock auto-lifts if this brings usage back under quota.
 - **Client implementation** is bounded by the client's `fs_policy`. In `sandbox` mode, removal is restricted to inside `workspace_path`. In `unrestricted` mode, it follows whatever path the agent provides.
 - **Rejects** if `path` is a file (error directs to `delete_file`) or does not exist.
 
@@ -720,14 +720,14 @@ Merge-time injection (ADR-071) is uniform across all three: `plexus_device` is a
 2. **Cross-install-site schema drift.** Same wrapped name (e.g. `mcp_minimax_web_search`) MUST have an identical source schema across every install site. If any schema differs from an existing install of the same `<server>` name, the new registration is rejected.
 3. **Spawn failure on the client side** (ADR-105). The MCP subprocess failed to start, exited during `list_tools/resources/prompts`, or hit the 30-second startup timeout. Same rejection treatment as collisions.
 
-**The server is the orchestrator** — when any of the three fires:
+**For device MCPs, the server is the orchestrator** — when any of the three fires:
 
 a. Server detects the rejection condition during `register_mcp` processing (cases 1, 2) or via the `spawn_failures` field on `register_mcp` (case 3, see PROTOCOL.md §3.5).
-b. Server **removes** the offending entry from the device's `mcp_servers` JSONB on `devices` (case 3) or from `system_config.server_mcp` (cases 1, 2 at admin scope).
+b. Server **removes** the offending entry from the device's `mcp_servers` JSONB on `devices`.
 c. Server pushes a corrective `config_update` over WS to the client, which then tears down the rejected MCP's subprocess locally per the worker queue in ADR-105.
 d. Server emits a `mcp_rejected` event on the per-user SSE channel (ADR-106) so the frontend shows the user a clean error: *"GOOGLE was removed from mac-mini. Reason: schema_collision (Google Search input_schema differs from admin-installed GOOGLE)."*
 
-For the admin-side path (`PUT /api/admin/server-mcp`), case 1/2 still fires as `409 Conflict` synchronously on the HTTP request — admin sees the diff in the response body and chooses how to resolve. Device-side rejection is asynchronous (because the spawn happens after `PATCH /api/devices/{name}/config` returns), which is why we need the SSE channel.
+For the admin shared-service path (`PUT /api/admin/server-mcp`), validation is synchronous on the HTTP request. Within-server dup and cross-install schema drift return `409 Conflict`; spawn or initial introspection failure returns `400 Bad Request`; either way the new list is not applied. Device-side rejection is asynchronous (because the spawn happens after `PATCH /api/devices/{name}/config` returns), which is why we need the SSE channel.
 
 **Coarse-grained removal:** if any tool/resource/prompt within an MCP server triggers rejection, the **whole MCP server** is removed from config — not just the offending capability. Simpler implementation, simpler mental model. User re-adds with a tighter `enabled` filter (ADR-100) or a renamed server if they want partial coexistence.
 
@@ -766,6 +766,18 @@ Examples:
 - `enabled: ["mcp_*_resource_*"]` → every resource from every MCP, no tools or prompts.
 
 **Consequences:** Single mental model — one config field, one filter, three surfaces. Plexus divergence from nanobot, justified by symmetry. Users who want nanobot's tools-only behavior write `enabled: ["mcp_<server>_*"]` excluding the resource/prompt infixes — slightly more verbose but explicit.
+
+### ADR-114 · M1 MCP tenancy: admin shared-service + device only
+
+**Status:** accepted
+**Context:** MCP sessions can carry credentials and state. A single admin-installed server-side MCP client shared by every user is acceptable for deliberately shared service-account tools (stateless search, internal KB lookup), but unsafe for personal OAuth, browser state, IDE/LSP state, shell/REPL state, or any integration whose state belongs to one user.
+**Decision:** M1 supports exactly two MCP tenancy scopes:
+- **Admin shared-service MCP.** Configured only by admins under `system_config.server_mcp` via `/api/admin/server-mcp`. Uses admin-provided shared credentials, appears in tool schemas as install site `plexus_device="server"`, and is intended only for stateless or low-state service tools. Plexus runs one runtime per configured MCP server and protects each with a bounded per-MCP call queue; if the queue is saturated, calls fail fast as tool errors. Admins are responsible for choosing MCPs that are safe to share across all users.
+- **Device MCP.** Configured by a user on a device row (`devices.mcp_servers`). The MCP subprocess runs on that user's device, registers through `register_mcp`, and appears as `plexus_device="<device-name>"`. User-specific credentials, browser/IDE state, and resource-heavy tools belong here.
+
+User-scoped server MCP and session-scoped MCP are out of scope for M1. They require per-user secret storage, runtime isolation, idle teardown, resource limits, and clear UX around "this runs on the server"; until that design exists, users who need personal MCP integrations install them on a device.
+
+**Consequences:** The server avoids N users × M MCP long-lived subprocess growth and avoids accidentally granting every user access to an admin's personal credentials. Admin server MCP remains useful for shared services, while personal/stateful MCPs stay naturally isolated by device ownership and OS process boundaries.
 
 ### ADR-105 · MCP subprocess lifecycle on plexus-client
 
@@ -1029,7 +1041,7 @@ All three live in `plexus-client/src/mcp/`. The worker stitches them together fo
 
 **Status:** accepted
 **Decision:** One SQL file at `plexus-server/src/db/schema.sql` contains every `CREATE TABLE` + index + constraint. Server startup runs the whole thing once (`sqlx::raw_sql(include_str!("schema.sql"))`). `IF NOT EXISTS` makes re-runs idempotent.
-**Consequences:** No migration framework until first real user. Schema changes during rebuild require dev DB reset (`scripts/reset-db.sh`). When real users land, add `sqlx::migrate!` + proper versioned migrations.
+**Consequences:** An empty database is initialized automatically on startup. No migration framework until first real user. Schema changes during rebuild require dev DB reset (`scripts/reset-db.sh`). When real users land, add `sqlx::migrate!` + proper versioned migrations.
 
 ### ADR-058 · Every user-referencing FK has `ON DELETE CASCADE` inline
 
@@ -1303,7 +1315,7 @@ The client process stores its device token at `~/.config/plexus/client.yaml` (or
 **Decision:**
 | Principal | Trusted by | To do |
 |---|---|---|
-| **Admin** (platform operator) | Plexus itself, all users on this deployment | Install server-side MCPs, configure LLM provider, set rate policies (ADR-056 — none in v1), delete users |
+| **Admin** (platform operator) | Plexus itself, all users on this deployment | Install shared-service server-side MCPs, configure LLM provider, set rate policies (ADR-056 — none in v1), delete users |
 | **User** (Plexus account partner) | Their own resources (workspace, devices, channels) | Manage their devices, their skills, their memory, their integrations, their conversation history |
 | **Agent** | The user for their own conversation | Read + write within the user's workspace; execute on the user's sandboxed devices; message through the user's connected channels |
 | **Partner** (the human on the other end of a channel conversation) | The agent, for responsiveness | Treated as the user by default when the channel config matches; otherwise treated as untrusted (ADR-007) |
@@ -1381,6 +1393,8 @@ The admin configures the LLM via the admin REST API — **not env vars**. Six ke
 | `llm_max_concurrent_requests` | integer or null | Optional in-process semaphore applied in the shared OpenAI-compatible provider layer. `null` / absent means unlimited. When set, all LLM calls share the same cap: normal chat, cron, heartbeat, compaction, and future autonomous flows. |
 
 Set via `PATCH /api/admin/config`. Read via `GET /api/admin/config`. No `LLM_*` env vars; the only env vars relevant to LLM behavior are `DATABASE_URL` (so the server can read these keys at startup) and the JWT/auth secrets.
+
+When an admin changes `llm_endpoint`, `llm_api_key`, or `llm_model`, the server validates before writing to `system_config`: `GET {llm_endpoint}/models` must be reachable with the configured bearer credential, return a well-formed OpenAI-compatible models response, and include the configured `llm_model`. Failure rejects the admin request and leaves the existing DB config unchanged. Automated tests use a fake OpenAI-compatible HTTP server; real provider credentials are only needed for live smoke testing.
 
 **Consequences:** No provider abstraction trait, no per-provider modules, no vision-format adapters per provider — vision retry (ADR-026) targets a single request shape. Switching the model is a `PATCH` away. Switching the *provider* is "stand up LiteLLM, change `llm_endpoint` and `llm_api_key`" — handled outside Plexus. Admin operating overhead (one extra container if they want non-OpenAI) is the trade we're willing to make for codebase simplicity. The optional concurrency cap is deliberately provider-wide rather than heartbeat-specific, so weaker deployments can protect their LLM backend without changing individual subsystems.
 
@@ -1743,6 +1757,7 @@ Allowed: every Unicode letter (any script — Latin, CJK, Cyrillic, Arabic, Hebr
 - **Trim leading/trailing whitespace.** Then **collapse internal whitespace runs to a single space** so `" Xmas  gift "` becomes `"Xmas gift"` deterministically.
 - **Reject empty string** after trim.
 - **Reject the reserved names `.` and `..`** after normalization (any case variant).
+- **Reject the reserved device name `server`** after normalization (any case variant). `server` is the built-in install-site name for Plexus's server workspace and admin shared-service MCPs, so user-created device names must not collide with it.
 
 #### Implementation
 
@@ -1766,7 +1781,7 @@ pub fn validate_identifier_name(raw: &str, kind: IdentifierKind) -> Result<Strin
 }
 ```
 
-`IdentifierKind` discriminates between `Workspace`, `Device`, and `Skill` for error messages and possible per-kind rule extensions later. v1 uses identical rules across kinds.
+`IdentifierKind` discriminates between `Workspace`, `Device`, and `Skill` for error messages and per-kind rule extensions. v1 uses the same character, normalization, whitespace, and length rules across kinds; `Device` additionally reserves the name `server`.
 
 #### Where it runs
 

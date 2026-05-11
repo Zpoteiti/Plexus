@@ -223,15 +223,20 @@ Three rejection cases, all server-orchestrated:
 | Cross-install schema drift | Same wrapped name with different schema across install sites | `mcp_schema_collision` |
 | Spawn failed on client | Subprocess exited / 30s startup timeout | `mcp_spawn_failed` (carried in `spawn_failures` field, not as a separate `error` frame) |
 
-When the server detects any of these on processing `register_mcp`:
+When the server detects any of these on processing a device's `register_mcp`:
 
 1. Server emits `error{code: <one of the above>, message: <detail>}` over WS for collision cases (logged client-side; informational since the client already pushed its state).
-2. Server **removes** the offending MCP entry from `devices.mcp_servers` JSONB (or `system_config.server_mcp` for admin scope).
+2. Server **removes** the offending MCP entry from `devices.mcp_servers` JSONB.
 3. Server pushes a corrective `config_update` (§3.6) with the new device config sans the rejected MCP.
 4. Client's worker queue (ADR-105) processes the `config_update`, tearing down the MCP's subprocess locally if it was running.
 5. Server emits an `mcp_rejected` event on the per-user SSE channel `GET /api/me/events` (ADR-106) so the frontend shows a clean message.
 
 Coarse-grained: if any one capability within an MCP server triggers rejection, the **whole** MCP server is removed. Simpler than partial removal. User re-adds with a tighter `enabled` filter (ADR-100) or a renamed server.
+
+Admin shared-service MCPs are not registered over device WebSocket. Their
+collision/spawn validation happens synchronously on `PUT
+/api/admin/server-mcp`, and accepted config is stored in
+`system_config.server_mcp` (ADR-114).
 
 On success: the server caches the wrapped schemas, invalidates the user's tool-registry cache, and the next agent turn sees the new entries merged in alongside any server-side or other-device MCPs.
 

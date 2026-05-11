@@ -16,14 +16,14 @@ info:
 
     | Agent tool | REST equivalent | Notes |
     |---|---|---|
-    | `read_file` | `GET /api/workspace/files/{path}` | Workspace path (relative = personal; absolute = any) |
-    | `write_file` | `PUT /api/workspace/files/{path}` | Implicit mkdir -p |
-    | `edit_file` | `PATCH /api/workspace/files/{path}` | Body: old_text/new_text/replace_all |
-    | `delete_file` | `DELETE /api/workspace/files/{path}` | Always allowed (quota release) |
-    | `delete_folder` | `DELETE /api/workspace/folders/{path}` | Recursive, no flag |
-    | `list_dir` | `GET /api/workspace/list/{path}` | Query: recursive, max_entries |
-    | `glob` | `GET /api/workspace/glob` | Query: pattern, path, head_limit, offset, entry_type |
-    | `grep` | `GET /api/workspace/grep` | Query: pattern, path, mode, context_before/after, etc. |
+    | `read_file` | `GET /api/workspace/files/{path}` | Query: `plexus_device` (default `server`) |
+    | `write_file` | `PUT /api/workspace/files/{path}` | Query: `plexus_device`; implicit mkdir -p |
+    | `edit_file` | `PATCH /api/workspace/files/{path}` | Query: `plexus_device`; body: old_text/new_text/replace_all |
+    | `delete_file` | `DELETE /api/workspace/files/{path}` | Query: `plexus_device`; always allowed for quota release |
+    | `delete_folder` | `DELETE /api/workspace/folders/{path}` | Query: `plexus_device`; recursive, no flag |
+    | `list_dir` | `GET /api/workspace/list/{path}` | Query: `plexus_device`, recursive, max_entries |
+    | `glob` | `GET /api/workspace/glob` | Query: `plexus_device`, pattern, path, head_limit, offset, entry_type |
+    | `grep` | `GET /api/workspace/grep` | Query: `plexus_device`, pattern, path, mode, context_before/after, etc. |
     | `notebook_edit` | `PATCH /api/workspace/notebook/{path}` | Body: cell_index, new_source, cell_type, edit_mode |
     | `file_transfer` | `POST /api/workspace/transfer` | Body matches tool args |
     | `cron` | `POST /api/cron` + CRUD | REST uses verbs (POST/GET/DELETE); tool uses single action-enum (nanobot-aligned) |
@@ -79,7 +79,7 @@ tags:
   - name: Workspaces
     description: Personal + shared workspace management
   - name: Workspace Files
-    description: File operations — mirror the agent's shared file tools
+    description: File operations — mirror the agent's shared file tools, including `plexus_device` routing
   - name: Devices
     description: Registering and configuring client devices
   - name: Channels
@@ -674,13 +674,15 @@ paths:
         in: path
         required: true
         description: |
-          Absolute workspace path. The leading segment names the workspace:
-          the user's `{user_id}` UUID for explicit personal access, or the
-          `name@suffix` form (ADR-108) for shared workspaces. The
-          authenticated user must be a member. Strict mode (ADR-043) — both
-          name and suffix must match the workspace row exactly; renames
-          surface as 404 until the agent re-reads the system prompt.
+          Path on the target `plexus_device`. With `plexus_device=server`,
+          relative paths resolve to the caller's personal workspace and
+          absolute paths may name the user's UUID workspace or a shared
+          `name@suffix` workspace (ADR-043, ADR-108). With
+          `plexus_device=<device-name>`, paths are resolved by that client
+          against its configured `workspace_path` and `fs_policy`, exactly
+          like shared file tool calls.
         schema: { type: string }
+      - $ref: '#/components/parameters/PlexusDevice'
     get:
       tags: [Workspace Files]
       summary: Read file contents (mirrors `read_file` tool)
@@ -695,6 +697,9 @@ paths:
               schema: { type: string, format: binary }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Target device is offline or unreachable.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     put:
       tags: [Workspace Files]
       summary: Write file contents (mirrors `write_file` tool); creates parents
@@ -718,7 +723,7 @@ paths:
         '204': { description: Written. }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Quota lock (SoftLocked) or operation exceeds 80% single-op cap (UploadTooLarge).
+          description: Quota lock (SoftLocked), operation exceeds 80% single-op cap (UploadTooLarge), or target device is offline/unreachable.
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         '422':
           description: Invalid SKILL.md format.
@@ -747,7 +752,7 @@ paths:
                 properties:
                   replacements: { type: integer }
         '409':
-          description: Ambiguous (multiple matches + replace_all=false) or quota.
+          description: Ambiguous (multiple matches + replace_all=false), quota, or target device is offline/unreachable.
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         '422':
           description: No match, or invalid SKILL.md after edit.
@@ -760,14 +765,16 @@ paths:
         '204': { description: Deleted. }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: Path is a directory — use `DELETE /api/workspace/folders/{path}`.
+          description: Path is a directory — use `DELETE /api/workspace/folders/{path}` — or target device is offline/unreachable.
 
   /api/workspace/folders/{path}:
     parameters:
       - name: path
         in: path
         required: true
+        description: Path on the target `plexus_device`, with the same resolution rules as `/api/workspace/files/{path}`.
         schema: { type: string }
+      - $ref: '#/components/parameters/PlexusDevice'
     delete:
       tags: [Workspace Files]
       summary: Recursively delete a folder (mirrors `delete_folder`, ADR-086)
@@ -775,14 +782,16 @@ paths:
         '204': { description: Deleted. }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: Path is a file — use `DELETE /api/workspace/files/{path}`.
+          description: Path is a file — use `DELETE /api/workspace/files/{path}` — or target device is offline/unreachable.
 
   /api/workspace/list/{path}:
     parameters:
       - name: path
         in: path
         required: true
+        description: Directory path on the target `plexus_device`, with the same resolution rules as `/api/workspace/files/{path}`.
         schema: { type: string }
+      - $ref: '#/components/parameters/PlexusDevice'
     get:
       tags: [Workspace Files]
       summary: List directory contents (mirrors `list_dir`)
@@ -802,14 +811,18 @@ paths:
                     items: { $ref: '#/components/schemas/ListDirEntry' }
                   truncated: { type: boolean }
                   total: { type: integer }
+        '409':
+          description: Target device is offline or unreachable.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /api/workspace/glob:
     get:
       tags: [Workspace Files]
       summary: Find files by glob pattern (mirrors `glob`)
       parameters:
+        - $ref: '#/components/parameters/PlexusDevice'
         - { name: pattern, in: query, required: true, schema: { type: string } }
-        - { name: path,    in: query, required: true, schema: { type: string }, description: Absolute base directory. }
+        - { name: path,    in: query, required: true, schema: { type: string }, description: Base directory on the target `plexus_device`. }
       responses:
         '200':
           description: OK
@@ -818,14 +831,18 @@ paths:
               schema:
                 type: array
                 items: { type: string }
+        '409':
+          description: Target device is offline or unreachable.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /api/workspace/grep:
     get:
       tags: [Workspace Files]
       summary: Content search (mirrors `grep`)
       parameters:
+        - $ref: '#/components/parameters/PlexusDevice'
         - { name: pattern, in: query, required: true, schema: { type: string } }
-        - { name: path,    in: query, required: true, schema: { type: string } }
+        - { name: path,    in: query, required: true, schema: { type: string }, description: Base path on the target `plexus_device`. }
         - name: output_mode
           in: query
           schema:
@@ -841,6 +858,9 @@ paths:
           content:
             application/json:
               schema: { type: object, additionalProperties: true }
+        '409':
+          description: Target device is offline or unreachable.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /api/workspace/transfer:
     post:
@@ -865,7 +885,7 @@ paths:
                     items: { type: string }
                     description: Non-fatal issues (e.g. cross-device move's delete-after-copy failed).
         '409':
-          description: Destination exists, quota lock, or operation exceeds single-op cap.
+          description: Destination exists, quota lock, operation exceeds single-op cap, or target device is offline/unreachable.
 
   #
   # --- Devices ---
@@ -895,7 +915,11 @@ paths:
               properties:
                 name:
                   type: string
-                  description: Friendly label (e.g. "laptop"). Unique within the user's devices. Validated per ADR-109.
+                  description: |
+                    Friendly label (e.g. "laptop"). Unique within the
+                    user's devices. Validated per ADR-109. The literal
+                    name `server` is reserved for Plexus's built-in server
+                    install site and is rejected for user-created devices.
                 workspace_path:
                   type: string
                   description: |
@@ -957,13 +981,17 @@ paths:
         `fs_policy` to `unrestricted` requires typed-device-name
         confirmation in the UI (ADR-051); this endpoint accepts the
         flip but the UI is expected to enforce confirmation before
-        calling it.
+        calling it. If `name` is provided, it renames the device after
+        ADR-109 validation; `server` remains reserved and is rejected.
       requestBody:
         content:
           application/json:
             schema:
               type: object
               properties:
+                name:
+                  type: string
+                  description: Optional friendly-label rename. Must be unique within the user's devices and must not be `server`.
                 fs_policy: { type: string, enum: [sandbox, unrestricted] }
                 shell_timeout_max: { type: integer }
                 ssrf_whitelist:
@@ -1231,6 +1259,9 @@ paths:
             in-process semaphore in the shared LLM provider layer. `null`
             or absent means unlimited. Applies to normal chat, cron,
             heartbeat, compaction, and future LLM calls. ADR-101.
+          - `server_mcp` (array of `McpServerConfig`) — admin-configured
+            shared-service MCPs, exposed as install site `server`.
+            ADR-114.
 
         `additionalProperties: true` because deployments may carry
         deployment-local keys; everything not listed above is treated
@@ -1250,6 +1281,14 @@ paths:
     patch:
       tags: [Admin]
       summary: Update system-wide config keys
+      description: |
+        Partial update — keys present are updated, keys absent are untouched.
+        When any of `llm_endpoint`, `llm_api_key`, or `llm_model` changes,
+        the server validates the provider before writing: `GET
+        {llm_endpoint}/models` must be reachable with the configured bearer
+        credential, return a well-formed OpenAI-compatible models response,
+        and include the configured `llm_model`. Validation failure returns
+        `400 Bad Request` and leaves the existing DB config unchanged.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1265,6 +1304,7 @@ paths:
         '200':
           description: OK
           content: { application/json: { schema: { type: object, additionalProperties: true } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   /api/admin/users:
     get:
@@ -1314,6 +1354,11 @@ paths:
     get:
       tags: [Admin]
       summary: List server-side (admin-configured) MCPs
+      description: |
+        Lists admin shared-service MCPs only. These use admin-provided
+        shared credentials, are intended for stateless or low-state service
+        tools such as search and internal KB lookup, and appear to agents
+        as install site `plexus_device="server"`.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1329,6 +1374,13 @@ paths:
       tags: [Admin]
       summary: Replace the server-side MCP list (admin only)
       description: |
+        Replaces admin shared-service MCPs stored in
+        `system_config.server_mcp`. M1 supports one runtime per configured
+        MCP server with a bounded per-MCP call queue. User-scoped server
+        MCPs and session-scoped MCPs are out of scope; users who need
+        personal OAuth/session/browser/IDE state should configure MCPs on
+        their own devices.
+
         Collision detection per ADR-049, two cases:
           - **Within-server dup** — an MCP server advertises two
             capabilities that wrap to the same name (intra-surface only;
@@ -1338,6 +1390,10 @@ paths:
             matches an existing install with a different `input_schema`
             across any surface (tool / resource / prompt). Returns
             `409 Conflict` with a structured diff and does not apply.
+
+        Spawn or initial `list_tools/resources/prompts` failure returns
+        `400 Bad Request` and does not apply. The server validates the new
+        list before replacing `system_config.server_mcp`.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1351,6 +1407,7 @@ paths:
       responses:
         '200':
           description: Applied.
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409':
           description: Schema collision with an existing MCP install.
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
@@ -1377,6 +1434,16 @@ components:
       name: offset
       in: query
       schema: { type: integer, default: 0, minimum: 0 }
+    PlexusDevice:
+      name: plexus_device
+      in: query
+      description: |
+        Install site for file operations. Defaults to `server`, Plexus's
+        built-in server workspace. A user device name routes the operation
+        over `/ws/device`; the client applies its `workspace_path` and
+        `fs_policy`. Offline devices return an error with code
+        `device_unreachable`.
+      schema: { type: string, default: server }
 
   responses:
     BadRequest:
@@ -1551,7 +1618,9 @@ components:
       type: object
       required: [name, user_id, fs_policy, workspace_path, state, created_at]
       properties:
-        name: { type: string, description: Unique per-user friendly label. ADR-109 validation. }
+        name:
+          type: string
+          description: Unique per-user friendly label. ADR-109 validation; `server` is reserved.
         user_id: { type: string }
         workspace_path:
           type: string
@@ -1677,6 +1746,11 @@ components:
     McpServerConfig:
       type: object
       required: [name, command]
+      description: |
+        MCP server configuration. In `system_config.server_mcp`, entries are
+        admin shared-service MCPs using shared credentials and the `server`
+        install site. In `devices.mcp_servers`, entries run on that device
+        and use the device name as the install site.
       properties:
         name:
           type: string

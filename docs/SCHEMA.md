@@ -1,6 +1,6 @@
 # Plexus — Database Schema
 
-The PostgreSQL schema for `plexus-server`. Lives at `plexus-server/src/db/schema.sql`, applied at startup via `sqlx::raw_sql(include_str!("schema.sql"))` with `IF NOT EXISTS` semantics (ADR-057).
+The PostgreSQL schema for `plexus-server`. Lives at `plexus-server/src/db/schema.sql`, applied at startup via `sqlx::raw_sql(include_str!("schema.sql"))` with `IF NOT EXISTS` semantics (ADR-057). If the connected database is empty, server startup creates the tables automatically. v1 has no migration framework; rebuild-era schema changes require resetting the dev database (ADR-069).
 
 **Ten tables.** Account deletion is a single `DELETE FROM users WHERE id = $1`; every user-referencing FK has `ON DELETE CASCADE` defined inline (ADR-058) — with one explicit exception in `workspaces.created_by` (`ON DELETE SET NULL`, see ADR-108) so a workspace persists for its remaining members when the creator's account is removed.
 
@@ -30,6 +30,7 @@ Known keys (admin-editable via `PATCH /api/admin/config`):
 | `llm_compaction_threshold_tokens` | int | ADR-028, ADR-101 | Headroom that triggers compaction. Default `16000`. Summary `max_output_tokens` = `threshold − 4000`. |
 | `llm_max_concurrent_requests` | int or null | ADR-101 | Optional in-process semaphore for outbound LLM calls. `null` / absent means unlimited. |
 | `shared_workspace_quota_bytes` | int | ADR-108 | Quota ceiling that any single shared workspace may request at create or rename time. Default 25 GB. |
+| `server_mcp` | array of `McpServerConfig` | ADR-114 | Admin-configured shared-service MCPs exposed as install site `server`; shared credentials, one runtime per MCP, bounded queue. |
 
 Deployments may carry additional opaque keys; Plexus reads only the ones it knows about.
 
@@ -155,7 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_created
 CREATE TABLE IF NOT EXISTS devices (
     token              TEXT         PRIMARY KEY,
     user_id            UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name               TEXT         NOT NULL,
+    name               TEXT         NOT NULL CHECK (lower(name) <> 'server'),
     workspace_path     TEXT         NOT NULL,
     fs_policy          TEXT         NOT NULL CHECK (fs_policy IN ('sandbox', 'unrestricted'))
                                     DEFAULT 'sandbox',
@@ -170,7 +171,7 @@ CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
 ```
 
 - `token` is the PK *and* the credential (ADR-091). Stored plaintext — it IS the credential. WS handshake `Authorization: Bearer <token>` is matched directly against this column.
-- `name` is the user-facing friendly label. UNIQUE per user, so the URL `PATCH /api/devices/laptop/config` resolves to `(user_id, "laptop")` without ever touching the token.
+- `name` is the user-facing friendly label. UNIQUE per user, so the URL `PATCH /api/devices/laptop/config` resolves to `(user_id, "laptop")` without ever touching the token. The literal name `server` is reserved for Plexus's built-in server install site and is rejected for user devices.
 - `ssrf_whitelist` — JSONB array of `host` or `host:port` strings, exceptions to the client-site `web_fetch` block-list (ADR-052). Capability declaration only — does not stop `exec curl` (ADR-073).
 - `mcp_servers` — JSONB map of `<server_name>: McpServerConfig` (see API.yaml). Pushed to the live device via `config_update` frame on change (ADR-050, PROTOCOL.md §3.6).
 - **Online state is in-memory only** — no `online` / `last_seen_at` columns; the connected-WS map (`DashMap<token, ConnHandle>`) is the source of truth. The `Device` API response computes them on demand. Three device states per ADR-110: state-1 (online, in-map), state-2 (offline-but-paired, row exists, not in map — listed in `plexus_device` enum so the agent can still attempt and fail loudly), state-3 (deleted — row gone, in-memory entry gone, live WS force-closed, tool registry invalidated; complete wipe with no soft-delete tombstone).

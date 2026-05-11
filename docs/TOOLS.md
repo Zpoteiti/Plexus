@@ -12,6 +12,7 @@ This is a *design* document. Use it during implementation as the source of truth
   - **Routing-only device** — for shared tools (`read_file`, `write_file`, etc.), `shell`, and MCP-wrapped tools, the source schema has **no device field at all**. At session tool-schema-build time, `tools_registry::build_tool_schemas` injects a `plexus_device` property (ADR-071) with an enum populated from connected install sites, and appends `plexus_device` to `required`.
   - **Intrinsic device** — for tools that natively operate across devices (`file_transfer`, `message`), the device field IS part of the source schema. `file_transfer` uses `plexus_src_device` + `plexus_dst_device`; `message` uses `plexus_device`. Each source stub has `enum: ["server"]`. At merge time, each such enum is **extended** with connected device names.
 - **Reserved `plexus_` prefix.** The routing field name MUST use the `plexus_` prefix and MUST NOT be just `device` / `src_device` / `dst_device`. Why: the merger would otherwise clobber an MCP tool's native `device` arg (e.g., a tool selecting a GPU). The reserved prefix makes collision impossible.
+- **Reserved install-site name.** `server` is the built-in install site for the Plexus server workspace and admin shared-service MCPs. User-created devices may not be named `server` (case-insensitive after ADR-109 normalization).
 - **Marker, not heuristic.** Every intrinsic-device field in a source schema carries `"x-plexus-device": true` (a JSON Schema extension). The merger detects device-routing fields by this marker, never by enum-shape guessing. The typed helper `plexus_device_field()` in `plexus-common/src/tools/device_field.rs` produces the canonical fragment — source-schema authors use it instead of hand-writing.
 - **Tools_registry merge invariants:** the merge performs exactly one of two mutations per source schema:
   - **Inject:** add a brand-new `plexus_device` property (string, `enum` of install sites, marker `x-plexus-device: true`) and append `plexus_device` to `required`. Applies to routing-only tools.
@@ -64,6 +65,14 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 
 - `plexus_device="server"` → routes to `workspace_fs` on the server. The leading path segment is either the user's `{user_id}` UUID (personal) or the `name@suffix` form (shared, ADR-108). Relative paths default to personal.
 - `plexus_device="<client_name>"` → dispatched over WebSocket to the named device, where the client-side implementation runs against the local filesystem inside `fs_policy` bounds.
+
+The Workspace Files REST API mirrors this routing with a `plexus_device`
+query parameter that defaults to `server`. When a REST caller targets a
+client device, the server routes the operation over the device WebSocket and
+the client applies the same `workspace_path` and `fs_policy` checks used for
+agent tool calls. Offline devices fail with `device_unreachable`. The
+`file_transfer` REST endpoint keeps its intrinsic fields
+`plexus_src_device` and `plexus_dst_device`, matching the tool schema.
 
 ### `read_file`
 
@@ -157,7 +166,7 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 
 **Mechanism:**
 - **Implicit `mkdir -p`** on the path's parent (ADR-088). `tokio::fs::create_dir_all(path.parent())` runs before the write.
-- **Server side:** routes through `workspace_fs::write` which performs (in order): workspace authorization, lock check (`SoftLocked` if `bytes_used > quota`), single-op cap (`UploadTooLarge` if `content.size > quota * 0.8`), the actual write, then `bytes_used` update.
+- **Server side:** routes through `workspace_fs::write` which performs (in order): workspace authorization, lock check (`SoftLocked` if current usage is greater than quota), single-op cap (`UploadTooLarge` if `content.size > quota * 0.8`), the actual write, then workspace_fs usage accounting.
 - **SKILL.md validation:** if `path` matches `skills/*/SKILL.md` (exactly one level deep, exact filename), run the YAML-frontmatter validator before the write commits. Reject malformed input with `WorkspaceError::InvalidSkillFormat`. Folder name must match frontmatter `name` (ADR-082).
 - **Skills cache invalidation:** any successful write under `skills/` invalidates the user's skills cache entry (ADR-085).
 - **Client side:** subject to `fs_policy`; sandbox confines all writes to the device's `workspace_path`.
@@ -240,10 +249,10 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 ```
 
 **Mechanism:**
-- **Server side:** routes through `workspace_fs::delete`. Reads file size, deletes via `tokio::fs::remove_file`, decrements `bytes_used`. If the path is a directory, return `ToolError::IsDirectory` (directs to `delete_folder`).
+- **Server side:** routes through `workspace_fs::delete`. Reads file size, deletes via `tokio::fs::remove_file`, and updates workspace_fs usage accounting. If the path is a directory, return `ToolError::IsDirectory` (directs to `delete_folder`).
 - **Symlink handling:** delete the link itself, never follow.
 - **Skills cache invalidation:** if the deleted path is under `skills/`, invalidate the cache.
-- **Lock interaction:** delete is allowed even when `bytes_used > quota_bytes` (ADR-078). Once usage drops back under, lock auto-lifts on next non-delete attempt.
+- **Lock interaction:** delete is allowed even when current usage is greater than `quota_bytes` (ADR-078). Once usage drops back under, lock auto-lifts on next non-delete attempt.
 
 **Timeout:** 10s internal.
 **Result cap:** 16,000 characters.
@@ -279,7 +288,7 @@ All shared tools accept a `plexus_device` argument (injected at merge time per A
 
 **Mechanism:**
 - **Always recursive, no flag** (ADR-086). The tool's only purpose is recursive deletion; a non-recursive variant is `rmdir` and too niche for v1.
-- **Server side:** sums all file bytes inside the tree (single walk), removes via `tokio::fs::remove_dir_all`, applies one `bytes_used -= total` DB update. Lock auto-lifts if this brings usage under quota.
+- **Server side:** sums all file bytes inside the tree (single walk), removes via `tokio::fs::remove_dir_all`, and updates workspace_fs usage accounting. Lock auto-lifts if this brings usage under quota.
 - **Client side:** subject to `fs_policy` like other writes. In sandbox mode, can only remove inside `workspace_path`.
 - **Rejects** if `path` is a file (suggests `delete_file`) or doesn't exist.
 - **Symlinks inside** the tree are unlinked, never followed outside.
@@ -891,11 +900,17 @@ MCP servers advertise three capability surfaces — **tools**, **resources**, **
 
 The typed infixes (`_resource_` / `_prompt_`) make cross-surface name collisions impossible by construction. Tools stay unprefixed for back-compat with the original ADR-048 convention.
 
+M1 supports two MCP tenancy scopes (ADR-114):
+- **Admin shared-service MCPs** live in `system_config.server_mcp`, are configured only by admins, use shared credentials, and appear as install site `plexus_device="server"`. They are intended for stateless or low-state shared services such as search and internal KB lookup. Plexus runs one runtime per configured MCP server with a bounded per-MCP call queue.
+- **Device MCPs** live in `devices.mcp_servers`, run on the user's device, register over the device WebSocket, and appear as `plexus_device="<device-name>"`.
+
+User-scoped server MCP and session-scoped MCP are out of scope for M1. Personal OAuth, browser/IDE state, and resource-heavy MCPs should be installed on a user device.
+
 ### Wrapping — tools
 
 - **Source schema:** the MCP-provided `input_schema` is taken **as-is** — wrap is purely a name rewrite.
 - **Merge-time injection:** at session tool-schema-build time, `plexus_device` is added as a brand-new top-level property (with `x-plexus-device: true`), enum listing every install site of this MCP, appended to `required` (same mechanism as the routing-only-device pattern for shared tools, ADR-071). The reserved `plexus_` prefix ensures no collision with any MCP tool's native args — even if an MCP advertises a field named `device`, the merger's injected field never overwrites it.
-- **Lives in:** `plexus-common/src/mcp/` provides the wrapping. Server-side admin-installed MCPs are managed in `plexus-server/src/mcp/`; client-side per-device MCPs in `plexus-client/src/mcp/`.
+- **Lives in:** `plexus-common/src/mcp/` provides the wrapping. Admin shared-service MCPs are managed in `plexus-server/src/mcp/`; client-side per-device MCPs in `plexus-client/src/mcp/`.
 
 **Worked example.** A tool `web_search` from MCP server `minimax` whose source schema is:
 
