@@ -1255,10 +1255,11 @@ paths:
             `llm_max_context_tokens − tiktoken_count(prompt) <
             llm_compaction_threshold_tokens`. Summary `max_output_tokens`
             = `threshold − 4000`. ADR-028, ADR-101.
-          - `llm_max_concurrent_requests` (int or null) — optional
-            in-process semaphore in the shared LLM provider layer. `null`
-            or absent means unlimited. Applies to normal chat, cron,
-            heartbeat, compaction, and future LLM calls. ADR-101.
+          - `llm_max_concurrent_requests` (int) — optional
+            in-process semaphore in the shared LLM provider layer. Default
+            `0` means unlimited and creates no semaphore. A positive integer
+            caps concurrent in-flight LLM calls. Applies to normal chat,
+            cron, heartbeat, compaction, and future LLM calls. ADR-101.
           - `server_mcp` (array of `McpServerConfig`) — admin-configured
             shared-service MCPs, exposed as install site `server`.
             ADR-114.
@@ -1302,7 +1303,9 @@ paths:
         accepted M1a PATCH keys are `quota_bytes`,
         `shared_workspace_quota_bytes`, `llm_max_context_tokens`,
         `llm_compaction_threshold_tokens`, and
-        `llm_max_concurrent_requests`.
+        `llm_max_concurrent_requests`. M1b treats
+        `llm_max_concurrent_requests=0` as unlimited and positive integers as
+        an in-process cap.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]

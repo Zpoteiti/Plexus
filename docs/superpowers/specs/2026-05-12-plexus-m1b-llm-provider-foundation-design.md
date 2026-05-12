@@ -159,6 +159,11 @@ Error messages and logs must not include the submitted API key.
 M1b exposes an internal Rust function for non-streaming chat completions. It is
 not a public REST endpoint.
 
+This is the internal equivalent of calling the OpenAI-compatible
+`/chat/completions` API with `stream=false`. M1b should send `stream: false`
+explicitly so the contract is obvious even when providers default to
+non-streaming responses.
+
 The minimal M1b request surface is:
 
 - configured model;
@@ -179,17 +184,20 @@ heartbeat, compaction, and the agent loop.
 
 ## 6. Concurrency
 
-`llm_max_concurrent_requests` remains an integer or `null`.
+`llm_max_concurrent_requests` is an integer. M1b should seed the default value
+as `0`.
 
-- `null` or absent means unlimited.
-- A positive integer creates an in-process semaphore.
+- `0` means unlimited and creates no semaphore.
+- A positive integer creates an in-process semaphore with that many permits.
+- Negative values are invalid.
 - Runtime chat-completion calls acquire a permit before making the external
   `POST /chat/completions` request and release it when the request completes.
 
 The cap is provider-wide, not per-user and not per-session. It is a backend
 protection knob for weaker providers or deployments without an external
-gateway. It is not a product rate-limit system and does not coordinate across
-multiple Plexus server processes.
+gateway. Plexus admins are responsible for choosing the value for their
+deployment. It is not a product rate-limit system and does not coordinate
+across multiple Plexus server processes.
 
 Tests must prove the semaphore limits concurrent chat-completion calls.
 

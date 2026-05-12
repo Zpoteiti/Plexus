@@ -1390,7 +1390,7 @@ The admin configures the LLM via the admin REST API — **not env vars**. Six ke
 | `llm_model` | string | Model name passed in the request body (e.g. `gpt-4o`, `gpt-5-codex`, `anthropic/claude-opus-4-7` if the gateway routes it). |
 | `llm_max_context_tokens` | integer | The LLM's hard context-window size in tokens (e.g. `128000` for gpt-4o, `200000` for gpt-5-class). Counted with `tiktoken-rs` (ADR-025) against the full chat-completions prompt — system + tools + history + new turn. |
 | `llm_compaction_threshold_tokens` | integer | Headroom that triggers compaction (default `16000`, ADR-028). When `llm_max_context_tokens − tiktoken_count(prompt) < llm_compaction_threshold_tokens`, the bus fires stage-1 compaction. The summary's `max_output_tokens` is `threshold − 4000` (= `12000` at the default), reserving 4k headroom for the next user turn. |
-| `llm_max_concurrent_requests` | integer or null | Optional in-process semaphore applied in the shared OpenAI-compatible provider layer. `null` / absent means unlimited. When set, all LLM calls share the same cap: normal chat, cron, heartbeat, compaction, and future autonomous flows. |
+| `llm_max_concurrent_requests` | integer | Optional in-process semaphore applied in the shared OpenAI-compatible provider layer. Default `0` means unlimited and creates no semaphore. A positive integer caps concurrent in-flight LLM calls. When set, all LLM calls share the same cap: normal chat, cron, heartbeat, compaction, and future autonomous flows. |
 
 Set via `PATCH /api/admin/config`. Read via `GET /api/admin/config`. No `LLM_*` env vars; the only env vars relevant to LLM behavior are `DATABASE_URL` (so the server can read these keys at startup) and the JWT/auth secrets.
 

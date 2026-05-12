@@ -28,7 +28,7 @@ Known keys (admin-editable via `PATCH /api/admin/config`):
 | `llm_model` | string | ADR-101 | Model name passed in request body. |
 | `llm_max_context_tokens` | int | ADR-101 | LLM context window in tokens (e.g. `128000` for gpt-4o). Counted with tiktoken-rs (ADR-025). |
 | `llm_compaction_threshold_tokens` | int | ADR-028, ADR-101 | Headroom that triggers compaction. Default `16000`. Summary `max_output_tokens` = `threshold − 4000`. |
-| `llm_max_concurrent_requests` | int or null | ADR-101 | Optional in-process semaphore for outbound LLM calls. `null` / absent means unlimited. |
+| `llm_max_concurrent_requests` | int | ADR-101 | Optional in-process semaphore for outbound LLM calls. Default `0` means unlimited and creates no semaphore. A positive integer caps concurrent in-flight LLM calls. |
 | `shared_workspace_quota_bytes` | int | ADR-108 | Quota ceiling that any single shared workspace may request at create or rename time. Default 25 GB. |
 | `server_mcp` | array of `McpServerConfig` | ADR-114 | Admin-configured shared-service MCPs exposed as install site `server`; shared credentials, one runtime per MCP, bounded queue. |
 
