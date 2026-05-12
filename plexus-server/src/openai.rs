@@ -98,7 +98,7 @@ impl OpenAiClient {
                     last_error = Some(provider_http_error(format!(
                         "LLM chat request failed: {err}"
                     )));
-                    if attempt < 2 {
+                    if attempt < 2 && is_transient_request_error(&err) {
                         tokio::time::sleep(retry_delay(attempt)).await;
                         continue;
                     }
@@ -233,6 +233,10 @@ fn is_transient_status(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::REQUEST_TIMEOUT
         || status == reqwest::StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
+}
+
+fn is_transient_request_error(err: &reqwest::Error) -> bool {
+    err.is_timeout() || err.is_connect()
 }
 
 fn retry_delay(attempt: usize) -> Duration {

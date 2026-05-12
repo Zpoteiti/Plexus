@@ -16,6 +16,10 @@ use std::{
 use tokio::{net::TcpListener, task::JoinHandle};
 
 #[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 struct FakeState {
     model: String,
     api_key: String,
@@ -26,18 +30,30 @@ struct FakeState {
 }
 
 #[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 enum FakeMode {
     Valid,
     MissingModel,
     MalformedModels,
 }
 
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 pub struct FakeOpenAi {
     pub base_url: String,
     handle: JoinHandle<()>,
     max_in_flight: Arc<AtomicUsize>,
 }
 
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 impl FakeOpenAi {
     pub async fn valid() -> Self {
         Self::spawn(FakeMode::Valid, Duration::ZERO).await
@@ -104,6 +120,10 @@ impl Drop for FakeOpenAi {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 struct InFlightGuard {
     counter: Arc<AtomicUsize>,
 }
@@ -114,6 +134,10 @@ impl Drop for InFlightGuard {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 async fn models(State(state): State<FakeState>, headers: HeaderMap) -> (StatusCode, Json<Value>) {
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(error("invalid_api_key")));
@@ -138,6 +162,10 @@ async fn models(State(state): State<FakeState>, headers: HeaderMap) -> (StatusCo
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 async fn chat(
     State(state): State<FakeState>,
     headers: HeaderMap,
@@ -196,6 +224,10 @@ async fn chat(
     )
 }
 
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 fn authorized(state: &FakeState, headers: &HeaderMap) -> bool {
     let expected = format!("Bearer {}", state.api_key);
     headers
@@ -204,10 +236,18 @@ fn authorized(state: &FakeState, headers: &HeaderMap) -> bool {
         == Some(expected.as_str())
 }
 
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 fn error(code: &str) -> Value {
     json!({"error": {"message": code, "type": "invalid_request_error", "code": code}})
 }
 
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
 fn update_max(max: &AtomicUsize, current: usize) {
     let mut observed = max.load(Ordering::SeqCst);
     while current > observed {

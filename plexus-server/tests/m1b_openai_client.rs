@@ -1,11 +1,12 @@
-mod support;
+#[path = "support/fake_openai.rs"]
+mod fake_openai;
 
+use fake_openai::FakeOpenAi;
 use plexus_common::LlmApiKey;
 use plexus_server::openai::{
     ChatCompletionRequest, ChatMessage, ChatRole, OpenAiClient, OpenAiConfig, OpenAiRuntime,
 };
 use std::time::{Duration, Instant};
-use support::fake_openai::FakeOpenAi;
 
 fn config(fake: &FakeOpenAi) -> OpenAiConfig {
     OpenAiConfig {
@@ -76,6 +77,58 @@ async fn chat_completion_sends_non_streaming_request_and_returns_content() {
 
     assert_eq!(response.content, "hi");
     assert_eq!(response.finish_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn chat_completion_does_not_retry_non_transient_request_errors() {
+    let cfg = OpenAiConfig {
+        endpoint: "ftp://example.com/v1".parse().unwrap(),
+        api_key: LlmApiKey::new("test-key".to_string()),
+        model: "test-model".to_string(),
+    };
+
+    let err = tokio::time::timeout(
+        Duration::from_millis(50),
+        OpenAiClient::new().chat_completion(
+            &cfg,
+            ChatCompletionRequest {
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+                max_tokens: None,
+                temperature: None,
+            },
+        ),
+    )
+    .await
+    .expect("non-transient request error should not wait for retry")
+    .expect_err("invalid URL scheme should fail");
+
+    assert_eq!(err.status, axum::http::StatusCode::BAD_GATEWAY);
+}
+
+#[tokio::test]
+async fn chat_completion_accepts_endpoint_with_trailing_slash() {
+    let fake = FakeOpenAi::valid().await;
+    let mut cfg = config(&fake);
+    cfg.endpoint = format!("{}/", fake.base_url).parse().unwrap();
+    let response = OpenAiClient::new()
+        .chat_completion(
+            &cfg,
+            ChatCompletionRequest {
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: "hello".to_string(),
+                }],
+                max_tokens: None,
+                temperature: None,
+            },
+        )
+        .await
+        .expect("chat response");
+
+    assert_eq!(response.content, "hi");
 }
 
 #[tokio::test]
