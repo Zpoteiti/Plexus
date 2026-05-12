@@ -32,8 +32,8 @@ before moving on.
 
 | Field | Value |
 |---|---|
-| Overall M1 state | M1a verified; M1b design written for review |
-| Current focus | Review the `M1b` LLM provider foundation sub-spec |
+| Overall M1 state | M1a verified; M1b design approved |
+| Current focus | Write the `M1b` LLM provider foundation implementation plan |
 | Next implementation slice | `M1b` LLM provider foundation |
 | Frontend scope | Out of M1; frontend remains M3 |
 | Client scope | Standalone client remains M2, but M1 includes server-side device WebSocket support |
@@ -185,7 +185,7 @@ because the chat path needs a provider contract.
 | ID | Status | Scope | Depends on | Exit criteria |
 |---|---|---|---|---|
 | `M1a` | Verified | Server crate, startup, DB bootstrap, canonical schema application, real auth, basic REST/admin persistence, test harness | M0 | Verified by `cargo test -p plexus-server`, `cargo test --workspace`, `cargo fmt --all -- --check`, and `cargo check --workspace` |
-| `M1b` | Designing | OpenAI-compatible LLM foundation, admin config validation, external FastAPI mock service, hermetic fake-provider test strategy, concurrency semaphore | `M1a` | Invalid provider config is rejected before DB write; valid fake provider can complete chat calls |
+| `M1b` | Approved | OpenAI-compatible LLM foundation, admin config validation, external FastAPI mock service, hermetic fake-provider test strategy, concurrency semaphore | `M1a` | Invalid provider config is rejected before DB write; valid fake provider can complete chat calls |
 | `M1c` | Planned | Browser chat path: REST message ingress, session storage, SSE history replay/live stream, fake LLM-backed response loop | `M1a`, `M1b` | API test sends a message and receives agent response through SSE |
 | `M1d` | Planned | Server workspace/file REST APIs, server-side workspace FS, quota reporting, server-side shared file tools | `M1a` | REST and tool tests create/read/edit/list server workspace files and report quota |
 | `M1e` | Planned | Device token lifecycle, device naming rules, device WebSocket handshake/control frames | `M1a` | Device can be registered, connect over WS, and appear reachable |

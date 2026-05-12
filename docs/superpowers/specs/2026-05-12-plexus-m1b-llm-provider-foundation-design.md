@@ -1,6 +1,6 @@
 # Plexus M1b OpenAI-Compatible LLM Foundation Sub-Spec
 
-**Status:** written for user review
+**Status:** approved for implementation planning
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1-M1b`
 **Base:** `rebuild-m1`
@@ -43,6 +43,9 @@ M1b does not include:
 - streaming chat completions;
 - tool calls or tool-call repair;
 - context compaction;
+- compaction decision-making inside `openai.rs`;
+- database reads or writes inside `openai.rs`;
+- image upload handling or full vision-retry tests;
 - real provider credentials in automated tests;
 - native Anthropic, Gemini, or other provider protocols;
 - a provider abstraction trait;
@@ -77,6 +80,7 @@ avoids.
 - `GET /models` validation;
 - `POST /chat/completions` calls;
 - request timeout behavior;
+- transient provider retry/backoff;
 - OpenAI-compatible request and response parsing;
 - provider error mapping;
 - chat-completion concurrency permit acquisition.
@@ -84,6 +88,17 @@ avoids.
 OpenAI request/response structs should remain private to `openai.rs` unless
 later milestones prove they need to be shared. Shared base types, shared secret
 wrappers, and shared error enums remain in `plexus-common`.
+
+`openai.rs` is an external-call boundary, not an orchestration layer. It must
+not load messages from the database or write LLM responses back to the
+database. Later session/agent code owns DB reads, `context::build_context`,
+compaction decisions, and persistence of assistant/tool rows.
+
+ADR-026 vision retry also belongs at this boundary when image content enters
+the implemented chat path: if an OpenAI-compatible provider rejects
+`image_url` blocks, `openai.rs` strips only the image blocks in memory and
+retries once. The database keeps full-fidelity messages; no
+`vision_stripped` session state is persisted.
 
 ---
 
@@ -179,6 +194,10 @@ stable server errors.
 M1b does not expose temporary dev REST routes for chat completion. Later
 milestones call this internal function from the browser chat path, cron,
 heartbeat, compaction, and the agent loop.
+
+Compaction uses this same internal function as an LLM call, but the compaction
+trigger, summary range selection, and summary-row persistence stay in the
+orchestrator/context layer, not in `openai.rs`.
 
 ---
 
