@@ -11,6 +11,9 @@ pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
 }
 
 pub async fn bootstrap(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let _ = pool;
+    sqlx::raw_sql(include_str!("schema.sql"))
+        .execute(pool)
+        .await?;
+    system_config::seed_defaults(pool).await?;
     Ok(())
 }
