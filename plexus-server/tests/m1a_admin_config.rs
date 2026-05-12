@@ -153,3 +153,25 @@ async fn unsupported_or_deferred_keys_reject_atomically() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn responses_do_not_leak_known_secrets() {
+    let app = TestApp::spawn().await;
+    let admin_token = register(app.router.clone(), "admin@example.com", true).await;
+
+    let (status, body) = json_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/admin/config",
+        Value::Null,
+        Some(&admin_token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let text = body.to_string();
+    assert!(!text.contains("test-admin-token"));
+    assert!(!text.contains("test-jwt-secret-with-enough-entropy"));
+    assert!(!text.contains("password_hash"));
+    assert!(!text.contains("llm_api_key"));
+}

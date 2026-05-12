@@ -259,3 +259,21 @@ async fn wrong_password_returns_unauthorized() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn auth_error_shape_uses_common_code_and_message() {
+    let app = TestApp::spawn().await;
+
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/me",
+        Value::Null,
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["code"], "unauthorized");
+    assert!(body["message"].as_str().unwrap().contains("authentication"));
+}
