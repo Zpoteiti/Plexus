@@ -1,5 +1,5 @@
 [workspace]
-members = ["plexus-common"]
+members = ["plexus-common", "plexus-server"]
 resolver = "2"
 
 [workspace.package]
@@ -37,9 +37,22 @@ globset = "0.4"
 # MCP client — pinned to exact version per spec §9 risk registry
 rmcp = { version = "=1.5.0", features = ["client", "transport-child-process"] }
 
+# Server HTTP and persistence — introduced in M1a
+axum = "0.8"
+cookie = "0.18"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "time", "json", "macros"] }
+argon2 = "0.5"
+jsonwebtoken = "9"
+rand_core = { version = "0.6", features = ["getrandom"] }
+time = { version = "0.3", features = ["serde"] }
+
 # Test-only
 proptest = "1"
 pretty_assertions = "1"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+url = "2"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

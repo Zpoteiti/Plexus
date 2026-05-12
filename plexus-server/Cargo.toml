@@ -1,0 +1,30 @@
+[package]
+name = "plexus-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+plexus-common = { path = "../plexus-common" }
+axum.workspace = true
+cookie.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+secrecy.workspace = true
+sqlx.workspace = true
+argon2.workspace = true
+jsonwebtoken.workspace = true
+rand_core.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true
+url.workspace = true
+tempfile.workspace = true
