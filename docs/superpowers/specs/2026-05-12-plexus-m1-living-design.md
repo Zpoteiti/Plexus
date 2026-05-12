@@ -33,7 +33,7 @@ before moving on.
 | Field | Value |
 |---|---|
 | Overall M1 state | Planned; implementation not started |
-| Current focus | Write and approve this living design, then write the `M1a` sub-spec |
+| Current focus | Review the `M1a` server foundation sub-spec |
 | Next implementation slice | `M1a` server foundation and persistence |
 | Frontend scope | Out of M1; frontend remains M3 |
 | Client scope | Standalone client remains M2, but M1 includes server-side device WebSocket support |
@@ -184,7 +184,7 @@ because the chat path needs a provider contract.
 
 | ID | Status | Scope | Depends on | Exit criteria |
 |---|---|---|---|---|
-| `M1a` | Next | Server crate, startup, DB bootstrap, canonical schema application, basic REST/admin persistence, test harness | M0 | Empty DB starts; tables exist; config/admin REST writes persist and read back |
+| `M1a` | Designing | Server crate, startup, DB bootstrap, canonical schema application, real auth, basic REST/admin persistence, test harness | M0 | Empty DB starts; tables exist; auth works; accepted config/admin REST writes persist and read back |
 | `M1b` | Planned | LLM provider foundation, admin config validation, fake provider test strategy, concurrency semaphore | `M1a` | Invalid provider config is rejected before DB write; valid fake provider can complete chat calls |
 | `M1c` | Planned | Browser chat path: REST message ingress, session storage, SSE history replay/live stream, fake LLM-backed response loop | `M1a`, `M1b` | API test sends a message and receives agent response through SSE |
 | `M1d` | Planned | Server workspace/file REST APIs, server-side workspace FS, quota reporting, server-side shared file tools | `M1a` | REST and tool tests create/read/edit/list server workspace files and report quota |
@@ -240,9 +240,10 @@ After each sub-milestone, update this document with:
 
 ## 8. Current Handoff to M1a
 
-The next document should be the `M1a` sub-spec. It should decide the first
+The current document under review is the `M1a` sub-spec. It decides the first
 server implementation shape: crate layout, web framework, DB bootstrap path,
-test database setup, admin/config API subset, and the first e2e tests.
+test database setup, admin/config API subset, real auth, and the first e2e
+tests.
 
 `M1a` should stay deliberately narrow. Its core proof is that a fresh server can
 connect to PostgreSQL, create its required tables, accept selected REST writes,
