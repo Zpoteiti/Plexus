@@ -31,7 +31,7 @@ info:
     | `list_dir` | `GET /api/workspace/list/{path}` | Query: `plexus_device`, recursive, max_entries |
     | `glob` | `GET /api/workspace/glob` | Query: `plexus_device`, pattern, path, head_limit, offset, entry_type |
     | `grep` | `GET /api/workspace/grep` | Query: `plexus_device`, pattern, path, mode, context_before/after, etc. |
-    | `notebook_edit` | `PATCH /api/workspace/notebook/{path}` | Body: cell_index, new_source, cell_type, edit_mode |
+    | `notebook_edit` | — | Target REST equivalent not yet specified; not implemented in M1b |
     | `file_transfer` | `POST /api/workspace/transfer` | Body matches tool args |
     | `cron` | `POST /api/cron` + CRUD | REST uses verbs (POST/GET/DELETE); tool uses single action-enum (nanobot-aligned) |
     | `web_fetch` | — | No REST parallel (browser fetches directly). Tool is shared (server + client sites) per ADR-052. |
@@ -1312,6 +1312,8 @@ paths:
         as a configured `llm_api_key` are redacted. Known keys:
 
           - `quota_bytes` (int) — per-user workspace quota (ADR-046).
+          - `shared_workspace_quota_bytes` (int) — quota ceiling that any
+            single shared workspace may request. ADR-108.
           - `llm_endpoint` (string) — base URL of the OpenAI-compatible
             chat-completions API (e.g. `https://api.openai.com/v1`,
             `http://litellm:4000/v1`). ADR-101.
@@ -1339,11 +1341,13 @@ paths:
             will use the same layer. ADR-101.
           - `server_mcp` (array of `McpServerConfig`) — admin-configured
             shared-service MCPs, exposed as install site `server`.
-            ADR-114.
+            ADR-114. Reserved for the later MCP slice; not accepted by M1b.
 
-        `additionalProperties: true` because deployments may carry
-        deployment-local keys; everything not listed above is treated
-        as opaque metadata by Plexus.
+        GET response schema uses `additionalProperties: true` because
+        deployments may carry deployment-local keys inserted outside the M1b
+        admin API; everything not listed above is treated as opaque metadata
+        by Plexus. PATCH accepts only the documented M1b-supported keys and
+        rejects unsupported keys.
 
         M1b accepts `llm_endpoint`, `llm_api_key`, and `llm_model` on PATCH
         after validating the merged provider identity with `GET
@@ -1397,8 +1401,17 @@ paths:
           application/json:
             schema:
               type: object
-              additionalProperties: true
+              additionalProperties: false
               description: Partial update — keys present are updated, keys absent are untouched.
+              properties:
+                quota_bytes: { type: integer, format: int64, minimum: 1 }
+                shared_workspace_quota_bytes: { type: integer, format: int64, minimum: 1 }
+                llm_endpoint: { type: string }
+                llm_api_key: { type: string }
+                llm_model: { type: string }
+                llm_max_context_tokens: { type: integer, format: int64, minimum: 1 }
+                llm_compaction_threshold_tokens: { type: integer, format: int64, minimum: 4001 }
+                llm_max_concurrent_requests: { type: integer, format: int64, minimum: 0, maximum: 1000000 }
       responses:
         '200':
           description: OK
