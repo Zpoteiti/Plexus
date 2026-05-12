@@ -45,7 +45,7 @@ M1b does not include:
 - context compaction;
 - compaction decision-making inside `openai.rs`;
 - database reads or writes inside `openai.rs`;
-- image upload handling or full vision-retry tests;
+- image content handling or vision-retry behavior;
 - real provider credentials in automated tests;
 - native Anthropic, Gemini, or other provider protocols;
 - a provider abstraction trait;
@@ -94,11 +94,11 @@ not load messages from the database or write LLM responses back to the
 database. Later session/agent code owns DB reads, `context::build_context`,
 compaction decisions, and persistence of assistant/tool rows.
 
-ADR-026 vision retry also belongs at this boundary when image content enters
-the implemented chat path: if an OpenAI-compatible provider rejects
-`image_url` blocks, `openai.rs` strips only the image blocks in memory and
-retries once. The database keeps full-fidelity messages; no
-`vision_stripped` session state is persisted.
+M1b implements only string chat content through this provider path. Image
+content blocks, `image_url` stripping, and VLM retry behavior are deferred to a
+later chat/VLM slice. When ADR-026 vision retry is implemented, it belongs at
+this external-call boundary so the database can keep full-fidelity messages
+while any provider-specific retry transformation stays in memory.
 
 ---
 

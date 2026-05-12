@@ -85,17 +85,17 @@ tags:
   - name: Sessions
     description: Target chat sessions + messages + SSE stream; not implemented in M1b
   - name: Workspaces
-    description: Personal + shared workspace management
+    description: Target personal + shared workspace management; not implemented in M1b
   - name: Workspace Files
-    description: File operations — mirror the agent's shared file tools, including `plexus_device` routing
+    description: Target file operations mirroring the agent's shared file tools; not implemented in M1b
   - name: Devices
-    description: Registering and configuring client devices
+    description: Target client device registration and configuration; not implemented in M1b
   - name: Channels
-    description: Discord / Telegram bot configurations per user
+    description: Target Discord / Telegram bot configurations per user; not implemented in M1b
   - name: Cron
     description: Target scheduled agent invocations; not implemented in M1b
   - name: Admin
-    description: Admin-only — system config, user management, server-side MCPs
+    description: Admin-only current system config plus target user management and server-side MCPs; target admin users/server MCP routes are not implemented in M1b
 
 security:
   - cookieAuth: []
@@ -282,6 +282,7 @@ paths:
   # --- Sessions ---
   #
   /api/sessions:
+    description: Target M1 chat session route; not implemented in M1b.
     get:
       tags: [Sessions]
       summary: Target route — list the user's chat sessions (not M1b)
@@ -300,6 +301,7 @@ paths:
                 items: { $ref: '#/components/schemas/Session' }
 
   /api/sessions/{id}:
+    description: Target M1 chat session route; not implemented in M1b.
     parameters:
       - name: id
         in: path
@@ -326,6 +328,7 @@ paths:
         '204': { description: Deleted. }
 
   /api/sessions/{id}/messages:
+    description: Target M1 chat message route; not implemented in M1b.
     parameters:
       - name: id
         in: path
@@ -409,6 +412,7 @@ paths:
             session keys may receive POSTed messages (ADR-098).
 
   /api/sessions/{id}/stream:
+    description: Target M1 chat SSE stream route; not implemented in M1b.
     parameters:
       - name: id
         in: path
@@ -477,6 +481,7 @@ paths:
               schema: { type: string }
 
   /api/sessions/{id}/cancel:
+    description: Target M1 chat cancellation route; not implemented in M1b.
     parameters:
       - name: id
         in: path
@@ -501,9 +506,10 @@ paths:
   # --- Workspaces ---
   #
   /api/workspaces:
+    description: Target M1 workspace management route; not implemented in M1b.
     get:
       tags: [Workspaces]
-      summary: List workspaces the user has access to (personal + shared)
+      summary: Target route — list workspaces the user has access to (personal + shared; not M1b)
       responses:
         '200':
           description: OK
@@ -514,8 +520,10 @@ paths:
                 items: { $ref: '#/components/schemas/Workspace' }
     post:
       tags: [Workspaces]
-      summary: Create a shared workspace (caller auto-added to allow-list)
+      summary: Target route — create a shared workspace (caller auto-added to allow-list; not M1b)
       description: |
+        Target M1 workspace route. Not implemented in M1b.
+
         Creates a shared workspace with a fresh UUID and the supplied display
         name. Names are NOT globally unique — two unrelated teams may use the
         same name. The server returns the workspace's id and computed
@@ -557,6 +565,7 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /api/workspaces/{workspace_ref}:
+    description: Target M1 workspace management route; not implemented in M1b.
     parameters:
       - name: workspace_ref
         in: path
@@ -569,7 +578,7 @@ paths:
         schema: { type: string }
     get:
       tags: [Workspaces]
-      summary: Get a workspace's details
+      summary: Target route — get a workspace's details (not M1b)
       responses:
         '200':
           description: OK
@@ -578,8 +587,10 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     patch:
       tags: [Workspaces]
-      summary: Update a shared workspace (rename, change quota)
+      summary: Target route — update a shared workspace (rename, change quota; not M1b)
       description: |
+        Target M1 workspace route. Not implemented in M1b.
+
         Any member of the allow-list can rename or change the quota cap
         (ADR-flat-permissions). Rename only mutates `workspaces.name` —
         the on-disk path and `workspaces.id` are unchanged, so no file
@@ -608,6 +619,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
 
   /api/workspaces/{workspace_ref}/members:
+    description: Target M1 workspace membership route; not implemented in M1b.
     parameters:
       - name: workspace_ref
         in: path
@@ -616,7 +628,7 @@ paths:
         schema: { type: string }
     get:
       tags: [Workspaces]
-      summary: List allow-list for a shared workspace
+      summary: Target route — list allow-list for a shared workspace (not M1b)
       responses:
         '200':
           description: OK
@@ -627,8 +639,10 @@ paths:
                 items: { $ref: '#/components/schemas/WorkspaceMember' }
     post:
       tags: [Workspaces]
-      summary: Add a user to the allow-list
+      summary: Target route — add a user to the allow-list (not M1b)
       description: |
+        Target M1 workspace route. Not implemented in M1b.
+
         Any existing member can add new members. Caller looks up by email or
         user_id. If adding the prospective user would put them into two
         workspaces whose computed `name@suffix` form would collide (rare —
@@ -653,6 +667,7 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /api/workspaces/{workspace_ref}/members/{user_id}:
+    description: Target M1 workspace membership route; not implemented in M1b.
     parameters:
       - name: workspace_ref
         in: path
@@ -665,8 +680,10 @@ paths:
         schema: { type: string }
     delete:
       tags: [Workspaces]
-      summary: Remove a user from the allow-list
+      summary: Target route — remove a user from the allow-list (not M1b)
       description: |
+        Target M1 workspace route. Not implemented in M1b.
+
         Any member can remove anyone (including themselves). Removing
         the last member triggers automatic workspace deletion (files
         purged, quota released).
@@ -674,9 +691,10 @@ paths:
         '204': { description: Removed. }
 
   /api/workspace/quota:
+    description: Target M1 personal workspace quota route; not implemented in M1b.
     get:
       tags: [Workspaces]
-      summary: Authenticated user's personal quota state (ADR-078)
+      summary: Target route — authenticated user's personal quota state (ADR-078; not M1b)
       responses:
         '200':
           description: OK
@@ -693,6 +711,7 @@ paths:
   # Implementation choice — the OpenAPI shape is the same either way.
   #
   /api/workspace/files/{path}:
+    description: Target M1 workspace file route; not implemented in M1b.
     parameters:
       - name: path
         in: path
@@ -709,7 +728,7 @@ paths:
       - $ref: '#/components/parameters/PlexusDevice'
     get:
       tags: [Workspace Files]
-      summary: Read file contents (mirrors `read_file` tool)
+      summary: Target route — read file contents (mirrors `read_file` tool; not M1b)
       parameters:
         - { name: start_line, in: query, schema: { type: integer, minimum: 1 } }
         - { name: end_line,   in: query, schema: { type: integer, minimum: 1 } }
@@ -726,8 +745,10 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     put:
       tags: [Workspace Files]
-      summary: Write file contents (mirrors `write_file` tool); creates parents
+      summary: Target route — write file contents (mirrors `write_file` tool; not M1b)
       description: |
+        Target M1 workspace file route. Not implemented in M1b.
+
         Full-content replace. Accepts `application/octet-stream` for raw
         bytes or `application/json` with `{content: string}` for text.
         Implicit `mkdir -p` on the parent path (ADR-088). Runs through
@@ -754,7 +775,7 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     patch:
       tags: [Workspace Files]
-      summary: Edit file via fuzzy match (mirrors `edit_file` tool)
+      summary: Target route — edit file via fuzzy match (mirrors `edit_file` tool; not M1b)
       requestBody:
         required: true
         content:
@@ -783,8 +804,11 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     delete:
       tags: [Workspace Files]
-      summary: Delete a single file (mirrors `delete_file`)
-      description: Always allowed regardless of quota lock state. Refunds quota.
+      summary: Target route — delete a single file (mirrors `delete_file`; not M1b)
+      description: |
+        Target M1 workspace file route. Not implemented in M1b.
+
+        Always allowed regardless of quota lock state. Refunds quota.
       responses:
         '204': { description: Deleted. }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -792,6 +816,7 @@ paths:
           description: Path is a directory — use `DELETE /api/workspace/folders/{path}` — or target device is offline/unreachable.
 
   /api/workspace/folders/{path}:
+    description: Target M1 workspace folder route; not implemented in M1b.
     parameters:
       - name: path
         in: path
@@ -801,7 +826,7 @@ paths:
       - $ref: '#/components/parameters/PlexusDevice'
     delete:
       tags: [Workspace Files]
-      summary: Recursively delete a folder (mirrors `delete_folder`, ADR-086)
+      summary: Target route — recursively delete a folder (mirrors `delete_folder`, ADR-086; not M1b)
       responses:
         '204': { description: Deleted. }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -809,6 +834,7 @@ paths:
           description: Path is a file — use `DELETE /api/workspace/files/{path}` — or target device is offline/unreachable.
 
   /api/workspace/list/{path}:
+    description: Target M1 workspace directory listing route; not implemented in M1b.
     parameters:
       - name: path
         in: path
@@ -818,7 +844,7 @@ paths:
       - $ref: '#/components/parameters/PlexusDevice'
     get:
       tags: [Workspace Files]
-      summary: List directory contents (mirrors `list_dir`)
+      summary: Target route — list directory contents (mirrors `list_dir`; not M1b)
       parameters:
         - { name: recursive,   in: query, schema: { type: boolean, default: false } }
         - { name: max_entries, in: query, schema: { type: integer, default: 200, minimum: 1 } }
@@ -840,9 +866,10 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /api/workspace/glob:
+    description: Target M1 workspace glob route; not implemented in M1b.
     get:
       tags: [Workspace Files]
-      summary: Find files by glob pattern (mirrors `glob`)
+      summary: Target route — find files by glob pattern (mirrors `glob`; not M1b)
       parameters:
         - $ref: '#/components/parameters/PlexusDevice'
         - { name: pattern, in: query, required: true, schema: { type: string } }
@@ -860,9 +887,10 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /api/workspace/grep:
+    description: Target M1 workspace grep route; not implemented in M1b.
     get:
       tags: [Workspace Files]
-      summary: Content search (mirrors `grep`)
+      summary: Target route — content search (mirrors `grep`; not M1b)
       parameters:
         - $ref: '#/components/parameters/PlexusDevice'
         - { name: pattern, in: query, required: true, schema: { type: string } }
@@ -887,9 +915,10 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
 
   /api/workspace/transfer:
+    description: Target M1 workspace file transfer route; not implemented in M1b.
     post:
       tags: [Workspace Files]
-      summary: Copy or move a file/folder between devices (mirrors `file_transfer`)
+      summary: Target route — copy or move a file/folder between devices (mirrors `file_transfer`; not M1b)
       requestBody:
         required: true
         content:
@@ -915,9 +944,10 @@ paths:
   # --- Devices ---
   #
   /api/devices:
+    description: Target M1 device management route; not implemented in M1b.
     get:
       tags: [Devices]
-      summary: List user's devices
+      summary: Target route — list user's devices (not M1b)
       responses:
         '200':
           description: OK
@@ -928,7 +958,7 @@ paths:
                 items: { $ref: '#/components/schemas/Device' }
     post:
       tags: [Devices]
-      summary: Register a new device (returns the token ONCE — ADR-097)
+      summary: Target route — register a new device (returns the token ONCE; not M1b)
       requestBody:
         required: true
         content:
@@ -984,6 +1014,7 @@ paths:
                         description: Bearer token the device sends at WebSocket handshake. Shown once.
 
   /api/devices/{name}:
+    description: Target M1 device management route; not implemented in M1b.
     parameters:
       - name: name
         in: path
@@ -991,15 +1022,17 @@ paths:
         schema: { type: string }
     get:
       tags: [Devices]
-      summary: Get a device
+      summary: Target route — get a device (not M1b)
       responses:
         '200':
           description: OK
           content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } }
     patch:
       tags: [Devices]
-      summary: Update device config (fs_policy, timeouts, SSRF, MCPs)
+      summary: Target route — update device config (fs_policy, timeouts, SSRF, MCPs; not M1b)
       description: |
+        Target M1 device route. Not implemented in M1b.
+
         Changes are pushed to the connected device (if online) as a
         `ServerToClient::ConfigUpdate` frame (ADR-050). Setting
         `fs_policy` to `unrestricted` requires typed-device-name
@@ -1029,11 +1062,12 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } }
     delete:
       tags: [Devices]
-      summary: Remove a device (revokes its token)
+      summary: Target route — remove a device (revokes its token; not M1b)
       responses:
         '204': { description: Removed. }
 
   /api/devices/{name}/regenerate-token:
+    description: Target M1 device token route; not implemented in M1b.
     parameters:
       - name: name
         in: path
@@ -1041,8 +1075,10 @@ paths:
         schema: { type: string }
     post:
       tags: [Devices]
-      summary: Regenerate the device's auth token
+      summary: Target route — regenerate the device's auth token (not M1b)
       description: |
+        Target M1 device route. Not implemented in M1b.
+
         Invalidates the old token, returns a new one (shown once). The
         connected device will be disconnected on its next handshake
         attempt; user must update client config with the new token.
@@ -1061,9 +1097,10 @@ paths:
   # --- Channels ---
   #
   /api/channels/discord:
+    description: Target M1 Discord channel config route; not implemented in M1b.
     get:
       tags: [Channels]
-      summary: Get the user's Discord config
+      summary: Target route — get the user's Discord config (not M1b)
       responses:
         '200':
           description: OK
@@ -1072,7 +1109,7 @@ paths:
           description: No Discord config set.
     put:
       tags: [Channels]
-      summary: Set or update the user's Discord config
+      summary: Target route — set or update the user's Discord config (not M1b)
       requestBody:
         required: true
         content:
@@ -1089,14 +1126,15 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/DiscordConfig' } } }
     delete:
       tags: [Channels]
-      summary: Remove the user's Discord config
+      summary: Target route — remove the user's Discord config (not M1b)
       responses:
         '204': { description: Removed. }
 
   /api/channels/telegram:
+    description: Target M1 Telegram channel config route; not implemented in M1b.
     get:
       tags: [Channels]
-      summary: Get the user's Telegram config
+      summary: Target route — get the user's Telegram config (not M1b)
       responses:
         '200':
           description: OK
@@ -1105,7 +1143,7 @@ paths:
           description: No Telegram config set.
     put:
       tags: [Channels]
-      summary: Set or update the user's Telegram config
+      summary: Target route — set or update the user's Telegram config (not M1b)
       requestBody:
         required: true
         content:
@@ -1122,7 +1160,7 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/TelegramConfig' } } }
     delete:
       tags: [Channels]
-      summary: Remove the user's Telegram config
+      summary: Target route — remove the user's Telegram config (not M1b)
       responses:
         '204': { description: Removed. }
 
@@ -1130,9 +1168,10 @@ paths:
   # --- Cron ---
   #
   /api/cron:
+    description: Target M1 cron management route; not implemented in M1b.
     get:
       tags: [Cron]
-      summary: List the user's cron jobs
+      summary: Target route — list the user's cron jobs (not M1b)
       responses:
         '200':
           description: OK
@@ -1143,8 +1182,10 @@ paths:
                 items: { $ref: '#/components/schemas/CronJob' }
     post:
       tags: [Cron]
-      summary: Create a cron job (mirrors `cron` tool, ADR-053)
+      summary: Target route — create a cron job (mirrors `cron` tool, ADR-053; not M1b)
       description: |
+        Target M1 cron route. Not implemented in M1b.
+
         REST-created jobs provide their delivery channel + chat_id
         explicitly. Agent-created jobs use the same shared write helper
         but inherit channel + chat_id from ToolContext. Each firing
@@ -1199,6 +1240,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
 
   /api/cron/{id}:
+    description: Target M1 cron management route; not implemented in M1b.
     parameters:
       - name: id
         in: path
@@ -1206,15 +1248,17 @@ paths:
         schema: { type: string }
     get:
       tags: [Cron]
-      summary: Get a cron job
+      summary: Target route — get a cron job (not M1b)
       responses:
         '200':
           description: OK
           content: { application/json: { schema: { $ref: '#/components/schemas/CronJob' } } }
     patch:
       tags: [Cron]
-      summary: Update schedule, delivery, or description
+      summary: Target route — update schedule, delivery, or description (not M1b)
       description: |
+        Target M1 cron route. Not implemented in M1b.
+
         Uses the same shared cron write helper as create/delete, so schedule
         updates are validated and the cron ticker is notified after the row
         changes.
@@ -1250,7 +1294,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
     delete:
       tags: [Cron]
-      summary: Delete a cron job
+      summary: Target route — delete a cron job (not M1b)
       responses:
         '204': { description: Deleted. }
 
@@ -1360,9 +1404,10 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
 
   /api/admin/users:
+    description: Target M1 admin user management route; not implemented in M1b.
     get:
       tags: [Admin]
-      summary: List all users (admin only)
+      summary: Target route — list all users (admin only; not M1b)
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1379,6 +1424,7 @@ paths:
                 items: { $ref: '#/components/schemas/User' }
 
   /api/admin/users/{id}:
+    description: Target M1 admin user management route; not implemented in M1b.
     parameters:
       - name: id
         in: path
@@ -1386,7 +1432,7 @@ paths:
         schema: { type: string }
     get:
       tags: [Admin]
-      summary: Get a user
+      summary: Target route — get a user (admin only; not M1b)
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1396,7 +1442,7 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/User' } } }
     delete:
       tags: [Admin]
-      summary: Delete a user (admin only) — cascades to all their resources (ADR-058)
+      summary: Target route — delete a user (admin only; cascades to all their resources; not M1b)
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1404,10 +1450,13 @@ paths:
         '204': { description: Deleted. }
 
   /api/admin/server-mcp:
+    description: Target M1 admin server MCP management route; not implemented in M1b.
     get:
       tags: [Admin]
-      summary: List server-side (admin-configured) MCPs
+      summary: Target route — list server-side (admin-configured) MCPs (not M1b)
       description: |
+        Target M1 admin server MCP route. Not implemented in M1b.
+
         Lists admin shared-service MCPs only. These use admin-provided
         shared credentials, are intended for stateless or low-state service
         tools such as search and internal KB lookup, and appear to agents
@@ -1425,8 +1474,10 @@ paths:
                 items: { $ref: '#/components/schemas/McpServerConfig' }
     put:
       tags: [Admin]
-      summary: Replace the server-side MCP list (admin only)
+      summary: Target route — replace the server-side MCP list (admin only; not M1b)
       description: |
+        Target M1 admin server MCP route. Not implemented in M1b.
+
         Replaces admin shared-service MCPs stored in
         `system_config.server_mcp`. M1 supports one runtime per configured
         MCP server with a bounded per-MCP call queue. User-scoped server
