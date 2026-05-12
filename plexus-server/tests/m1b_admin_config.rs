@@ -5,9 +5,17 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
+use plexus_common::{AdminToken, JwtSecret, LlmApiKey};
+use plexus_server::{
+    app::{self as server_app, AppState},
+    config::ServerConfig,
+    openai::{ChatCompletionRequest, ChatMessage, ChatRole, OpenAiConfig, OpenAiRuntime},
+};
 use serde_json::{Value, json};
+use std::time::Duration;
 use support::{TestApp, fake_openai::FakeOpenAi};
 use tower::ServiceExt;
+use url::Url;
 
 async fn json_request(
     app: axum::Router,
@@ -56,6 +64,45 @@ async fn register_admin(app: axum::Router) -> String {
     body["jwt"].as_str().unwrap().to_string()
 }
 
+fn llm_config(fake: &FakeOpenAi) -> OpenAiConfig {
+    OpenAiConfig {
+        endpoint: fake.base_url.parse().unwrap(),
+        api_key: LlmApiKey::new(fake.api_key().to_string()),
+        model: fake.model().to_string(),
+    }
+}
+
+fn chat_request() -> ChatCompletionRequest {
+    ChatCompletionRequest {
+        messages: vec![ChatMessage {
+            role: ChatRole::User,
+            content: "ping".to_string(),
+        }],
+        max_tokens: None,
+        temperature: None,
+    }
+}
+
+fn router_with_runtime(app: &TestApp, runtime: OpenAiRuntime) -> axum::Router {
+    let mut database_url = Url::parse(&app.admin_url).expect("valid admin database URL");
+    database_url.set_path(&format!("/{}", app.db_name));
+
+    let cfg = ServerConfig {
+        database_url: database_url.to_string(),
+        workspace_root: app.workspace_root.path().to_path_buf(),
+        bind: "127.0.0.1:0".parse().unwrap(),
+        jwt_secret: JwtSecret::new("test-jwt-secret-with-enough-entropy".to_string()),
+        admin_token: Some(AdminToken::new("test-admin-token".to_string())),
+        cookie_secure: false,
+    };
+
+    server_app::router(AppState::new_with_openai_runtime(
+        app.pool.clone(),
+        cfg,
+        runtime,
+    ))
+}
+
 #[tokio::test]
 async fn admin_can_set_valid_llm_identity_after_models_validation() {
     let app = TestApp::spawn().await;
@@ -90,6 +137,40 @@ async fn admin_can_set_valid_llm_identity_after_models_validation() {
 }
 
 #[tokio::test]
+async fn get_config_redacts_configured_llm_api_key() {
+    let app = TestApp::spawn().await;
+    let token = register_admin(app.router.clone()).await;
+    let fake = FakeOpenAi::valid().await;
+
+    let (status, _) = json_request(
+        app.router.clone(),
+        Method::PATCH,
+        "/api/admin/config",
+        json!({
+            "llm_endpoint": fake.base_url,
+            "llm_api_key": fake.api_key(),
+            "llm_model": fake.model()
+        }),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = json_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/admin/config",
+        Value::Null,
+        Some(&token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["llm_api_key"], "<redacted>");
+    assert!(!body.to_string().contains(fake.api_key()));
+}
+
+#[tokio::test]
 async fn invalid_llm_identity_patch_is_atomic() {
     let app = TestApp::spawn().await;
     let token = register_admin(app.router.clone()).await;
@@ -102,6 +183,35 @@ async fn invalid_llm_identity_patch_is_atomic() {
         json!({
             "quota_bytes": 999,
             "llm_endpoint": fake.base_url,
+            "llm_api_key": fake.api_key(),
+            "llm_model": fake.model()
+        }),
+        Some(&token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let quota: (serde_json::Value,) =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'quota_bytes'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_ne!(quota.0, json!(999));
+}
+
+#[tokio::test]
+async fn invalid_llm_endpoint_is_rejected_before_persistence() {
+    let app = TestApp::spawn().await;
+    let token = register_admin(app.router.clone()).await;
+    let fake = FakeOpenAi::valid().await;
+
+    let (status, _) = json_request(
+        app.router.clone(),
+        Method::PATCH,
+        "/api/admin/config",
+        json!({
+            "quota_bytes": 999,
+            "llm_endpoint": "ftp://example.com/v1",
             "llm_api_key": fake.api_key(),
             "llm_model": fake.model()
         }),
@@ -173,6 +283,56 @@ async fn llm_identity_patch_can_reuse_stored_key() {
 }
 
 #[tokio::test]
+async fn failed_concurrency_persistence_does_not_mutate_runtime_limit() {
+    let app = TestApp::spawn().await;
+    let runtime = OpenAiRuntime::default();
+    let router = router_with_runtime(&app, runtime.clone());
+    let token = register_admin(router.clone()).await;
+
+    sqlx::query(
+        "CREATE FUNCTION fail_system_config_write() RETURNS trigger
+         LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'forced system_config write failure';
+         END;
+         $$",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_system_config_write
+         BEFORE INSERT OR UPDATE ON system_config
+         FOR EACH ROW EXECUTE FUNCTION fail_system_config_write()",
+    )
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let (status, _) = json_request(
+        router,
+        Method::PATCH,
+        "/api/admin/config",
+        json!({"llm_max_concurrent_requests": 1}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let fake = FakeOpenAi::delayed(Duration::from_millis(150)).await;
+    let cfg = llm_config(&fake);
+    let request = chat_request();
+    let (left, right) = tokio::join!(
+        runtime.chat_completion(&cfg, request.clone()),
+        runtime.chat_completion(&cfg, request),
+    );
+
+    left.expect("left response");
+    right.expect("right response");
+    assert_eq!(fake.max_in_flight(), 2);
+}
+
+#[tokio::test]
 async fn redaction_marker_is_rejected_as_new_api_key() {
     let app = TestApp::spawn().await;
     let token = register_admin(app.router.clone()).await;
@@ -192,6 +352,29 @@ async fn redaction_marker_is_rejected_as_new_api_key() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn negative_concurrency_limit_is_rejected_before_persistence() {
+    let app = TestApp::spawn().await;
+    let token = register_admin(app.router.clone()).await;
+
+    let (status, _) = json_request(
+        app.router.clone(),
+        Method::PATCH,
+        "/api/admin/config",
+        json!({"llm_max_concurrent_requests": -1}),
+        Some(&token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let stored: (serde_json::Value,) =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'llm_max_concurrent_requests'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored.0, json!(0));
 }
 
 #[tokio::test]

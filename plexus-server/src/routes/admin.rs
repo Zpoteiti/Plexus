@@ -19,6 +19,9 @@ pub async fn patch_config(
     Json(input): Json<BTreeMap<String, Value>>,
 ) -> Result<Json<BTreeMap<String, Value>>, ApiError> {
     let values = system_config::validate_patch(input)?;
+    let limit = system_config::concurrency_limit(&values);
+    let _guard = state.admin_config_lock().lock().await;
+
     let current = system_config::get_all(state.pool())
         .await
         .map_err(ApiError::from_sqlx)?;
@@ -28,8 +31,8 @@ pub async fn patch_config(
         state.openai().client().validate_config(&cfg).await?;
     }
 
-    if let Some(limit) = system_config::concurrency_limit(&values) {
-        state.openai().set_concurrency_limit(limit).await?;
+    if let Some(limit) = limit {
+        crate::openai::OpenAiRuntime::new(limit)?;
     }
 
     let mut tx = state.pool().begin().await.map_err(ApiError::from_sqlx)?;
@@ -37,6 +40,10 @@ pub async fn patch_config(
         .await
         .map_err(ApiError::from_sqlx)?;
     tx.commit().await.map_err(ApiError::from_sqlx)?;
+
+    if let Some(limit) = limit {
+        state.openai().set_concurrency_limit(limit).await?;
+    }
 
     let current = system_config::get_all(state.pool())
         .await

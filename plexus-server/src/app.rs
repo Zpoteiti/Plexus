@@ -2,6 +2,7 @@ use crate::{config::ServerConfig, openai::OpenAiRuntime, routes};
 use axum::Router;
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -12,6 +13,7 @@ pub struct AppStateInner {
     pub pool: PgPool,
     pub config: ServerConfig,
     pub openai: OpenAiRuntime,
+    pub admin_config_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -29,6 +31,7 @@ impl AppState {
                 pool,
                 config,
                 openai,
+                admin_config_lock: Mutex::new(()),
             }),
         }
     }
@@ -43,6 +46,10 @@ impl AppState {
 
     pub fn openai(&self) -> &OpenAiRuntime {
         &self.inner.openai
+    }
+
+    pub fn admin_config_lock(&self) -> &Mutex<()> {
+        &self.inner.admin_config_lock
     }
 }
 
