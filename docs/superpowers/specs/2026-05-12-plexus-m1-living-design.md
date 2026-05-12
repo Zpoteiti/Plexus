@@ -32,9 +32,9 @@ before moving on.
 
 | Field | Value |
 |---|---|
-| Overall M1 state | Planned; implementation not started |
-| Current focus | Review the `M1a` implementation plan |
-| Next implementation slice | `M1a` server foundation and persistence |
+| Overall M1 state | M1a verified; M1b planning next |
+| Current focus | Write the `M1b` LLM provider foundation sub-spec |
+| Next implementation slice | `M1b` LLM provider foundation |
 | Frontend scope | Out of M1; frontend remains M3 |
 | Client scope | Standalone client remains M2, but M1 includes server-side device WebSocket support |
 | Discord/Telegram | Required for M1; live tokens supplied by the user for smoke testing when ready |
@@ -184,7 +184,7 @@ because the chat path needs a provider contract.
 
 | ID | Status | Scope | Depends on | Exit criteria |
 |---|---|---|---|---|
-| `M1a` | Approved | Server crate, startup, DB bootstrap, canonical schema application, real auth, basic REST/admin persistence, test harness | M0 | Empty DB starts; tables exist; auth works; accepted config/admin REST writes persist and read back |
+| `M1a` | Verified | Server crate, startup, DB bootstrap, canonical schema application, real auth, basic REST/admin persistence, test harness | M0 | Verified by `cargo test -p plexus-server`, `cargo test --workspace`, `cargo fmt --all -- --check`, and `cargo check --workspace` |
 | `M1b` | Planned | LLM provider foundation, admin config validation, fake provider test strategy, concurrency semaphore | `M1a` | Invalid provider config is rejected before DB write; valid fake provider can complete chat calls |
 | `M1c` | Planned | Browser chat path: REST message ingress, session storage, SSE history replay/live stream, fake LLM-backed response loop | `M1a`, `M1b` | API test sends a message and receives agent response through SSE |
 | `M1d` | Planned | Server workspace/file REST APIs, server-side workspace FS, quota reporting, server-side shared file tools | `M1a` | REST and tool tests create/read/edit/list server workspace files and report quota |
@@ -238,13 +238,23 @@ After each sub-milestone, update this document with:
 
 ---
 
-## 8. Current Handoff to M1a
+## 8. Current Handoff to M1b
 
-The current document under review is the `M1a` implementation plan. The
-approved `M1a` sub-spec decides the first server implementation shape: crate
-layout, web framework, DB bootstrap path, test database setup, admin/config API
-subset, real auth, and the first e2e tests.
+`M1a` is verified. The server crate exists, empty PostgreSQL databases bootstrap
+from the canonical schema, real auth works through REST, and the M1a admin
+config subset persists to `system_config`.
 
-`M1a` should stay deliberately narrow. Its core proof is that a fresh server can
-connect to PostgreSQL, create its required tables, accept selected REST writes,
-persist them, and read them back.
+The next document to write is the `M1b` LLM provider foundation sub-spec. Its
+core proof should be that provider identity changes are validated through
+`GET {llm_endpoint}/models` before DB write, valid fake OpenAI-compatible
+providers can serve chat-completion calls, and the optional provider-level
+concurrency semaphore is enforced in the shared provider layer.
+
+M1a verification evidence:
+
+- `cargo test -p plexus-server -- --nocapture`
+- `cargo test --workspace`
+- `cargo fmt --all -- --check`
+- `cargo check --workspace`
+- schema/docs consistency search for canonical tables, indexes, `server_mcp`,
+  `llm_max_concurrent_requests`, and reserved `server` device-name constraint
