@@ -8,7 +8,6 @@ use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
 pub const REDACTED_LLM_API_KEY: &str = "<redacted>";
 const MAX_CONCURRENCY_LIMIT: i64 = 1_000_000;
-#[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
@@ -20,7 +19,6 @@ pub struct OpenAiConfig {
 
 #[derive(Clone)]
 pub struct OpenAiClient {
-    #[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
     http: reqwest::Client,
 }
 
@@ -35,6 +33,111 @@ impl OpenAiClient {
         Self {
             http: reqwest::Client::new(),
         }
+    }
+
+    pub async fn validate_config(&self, cfg: &OpenAiConfig) -> Result<(), ApiError> {
+        let url = endpoint_url(&cfg.endpoint, "models")?;
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(cfg.api_key.expose_secret())
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(|err| invalid_provider_config(format!("LLM models request failed: {err}")))?;
+
+        if !response.status().is_success() {
+            return Err(invalid_provider_config(format!(
+                "LLM models request returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let models = response.json::<ModelsResponse>().await.map_err(|err| {
+            invalid_provider_config(format!("LLM models response was malformed: {err}"))
+        })?;
+
+        if models.data.iter().any(|model| model.id == cfg.model) {
+            Ok(())
+        } else {
+            Err(invalid_provider_config(format!(
+                "LLM model '{}' was not listed by provider",
+                cfg.model
+            )))
+        }
+    }
+
+    pub async fn chat_completion(
+        &self,
+        cfg: &OpenAiConfig,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ApiError> {
+        let url = endpoint_url(&cfg.endpoint, "chat/completions")?;
+        let body = ChatRequestBody {
+            model: &cfg.model,
+            messages: &request.messages,
+            stream: false,
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+        };
+
+        let mut last_error: Option<ApiError> = None;
+        for attempt in 0..3 {
+            let result = self
+                .http
+                .post(url.clone())
+                .bearer_auth(cfg.api_key.expose_secret())
+                .timeout(DEFAULT_REQUEST_TIMEOUT)
+                .json(&body)
+                .send()
+                .await;
+
+            let response = match result {
+                Ok(response) => response,
+                Err(err) => {
+                    last_error = Some(provider_http_error(format!(
+                        "LLM chat request failed: {err}"
+                    )));
+                    if attempt < 2 {
+                        tokio::time::sleep(retry_delay(attempt)).await;
+                        continue;
+                    }
+                    break;
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                last_error = Some(provider_http_error(format!(
+                    "LLM chat request returned HTTP {status}"
+                )));
+                if attempt < 2 && is_transient_status(status) {
+                    tokio::time::sleep(retry_delay(attempt)).await;
+                    continue;
+                }
+                break;
+            }
+
+            let parsed = response.json::<ChatResponseBody>().await.map_err(|err| {
+                provider_http_error(format!("LLM chat response was malformed: {err}"))
+            })?;
+            let choice = parsed
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| provider_http_error("LLM chat response had no choices"))?;
+            let content = choice
+                .message
+                .content
+                .ok_or_else(|| provider_http_error("LLM chat response had no assistant content"))?;
+
+            return Ok(ChatCompletionResponse {
+                content,
+                finish_reason: choice.finish_reason,
+            });
+        }
+
+        Err(last_error.unwrap_or_else(|| provider_http_error("LLM chat request failed")))
     }
 }
 
@@ -72,7 +175,15 @@ impl OpenAiRuntime {
         Ok(())
     }
 
-    #[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
+    pub async fn chat_completion(
+        &self,
+        cfg: &OpenAiConfig,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ApiError> {
+        let _permit = self.acquire_permit().await?;
+        self.client.chat_completion(cfg, request).await
+    }
+
     async fn acquire_permit(&self) -> Result<Option<OwnedSemaphorePermit>, ApiError> {
         let limiter = self.limiter.read().await.clone();
         match limiter {
@@ -111,6 +222,27 @@ fn limit_to_semaphore(limit: i64) -> Result<Option<Arc<Semaphore>>, ApiError> {
     })
 }
 
+fn endpoint_url(endpoint: &Url, suffix: &str) -> Result<Url, ApiError> {
+    let mut url = endpoint.clone();
+    let base = url.path().trim_end_matches('/');
+    url.set_path(&format!("{base}/{suffix}"));
+    Ok(url)
+}
+
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    match attempt {
+        0 => Duration::from_millis(100),
+        1 => Duration::from_millis(250),
+        _ => Duration::from_millis(500),
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChatRole {
@@ -139,19 +271,16 @@ pub struct ChatCompletionResponse {
 }
 
 #[derive(Deserialize)]
-#[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
 struct ModelsResponse {
     data: Vec<ModelInfo>,
 }
 
 #[derive(Deserialize)]
-#[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
 struct ModelInfo {
     id: String,
 }
 
 #[derive(Serialize)]
-#[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
 struct ChatRequestBody<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
@@ -163,30 +292,25 @@ struct ChatRequestBody<'a> {
 }
 
 #[derive(Deserialize)]
-#[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
 struct ChatResponseBody {
     choices: Vec<ChatChoice>,
 }
 
 #[derive(Deserialize)]
-#[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
 struct ChatChoice {
     message: ChatResponseMessage,
     finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-#[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
 struct ChatResponseMessage {
     content: Option<String>,
 }
 
-#[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
 fn invalid_provider_config(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidArgs, message)
 }
 
-#[expect(dead_code, reason = "implemented in M1b follow-up tasks")]
 fn provider_http_error(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::BAD_GATEWAY, ErrorCode::HttpError, message)
 }
