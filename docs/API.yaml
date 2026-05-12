@@ -3,14 +3,21 @@ info:
   title: Plexus HTTP API
   version: 0.1.0
   description: |
-    REST + SSE surface exposed by `plexus-server`. Pairs with
+    Target M1 REST + SSE contract for `plexus-server`. Pairs with
     [DECISIONS.md](DECISIONS.md) and [TOOLS.md](TOOLS.md).
 
-    **Design principle:** every user-meaningful agent capability has a matching
-    REST endpoint over the same underlying abstractions (workspace_fs, cron
-    scheduler, etc.). REST and tools are two entrances for two different
+    **M1b implementation status:** the current `rebuild-m1-M1b` server
+    implements the auth/me/admin-config foundation, including validated LLM
+    provider identity config. Chat sessions, message ingress, per-session SSE,
+    per-user SSE events, workspace/file/device/channel/cron APIs, agent task
+    spawning, and compaction decisions are target M1 routes for later slices;
+    their paths remain in this spec so the future contract stays visible.
+
+    **Target design principle:** every user-meaningful agent capability has a
+    matching REST endpoint over the same underlying abstractions (workspace_fs,
+    cron scheduler, etc.). REST and tools are two entrances for two different
     callers (human-via-browser vs. agent-via-LLM) hitting the same service
-    layer.
+    layer. This is not fully implemented in M1b.
 
     **Parallel with tools (see TOOLS.md):**
 
@@ -49,7 +56,7 @@ info:
     - Timestamps are ISO 8601 with timezone offset.
     - UUIDs unless noted.
 
-    **Chat consumption pattern (ADR-093):** the SSE stream at
+    **Target chat consumption pattern (ADR-093; not implemented in M1b):** the SSE stream at
     `GET /api/sessions/{id}/stream` is the single entry point for
     "show me the chat" — it replays recent history on connect, then
     delivers live events. `GET /api/sessions/{id}/messages` is a
@@ -61,7 +68,8 @@ info:
     - Discord and Telegram ingress. Those are internal adapter modules inside
       `plexus-server`, not public HTTP endpoints. The only public ingress for
       chat messages is `POST /api/sessions/{id}/messages` (browser) plus the
-      `WS /ws/device` handshake for devices.
+      `WS /ws/device` handshake for devices. These ingress paths are target M1
+      behavior and are not implemented in M1b.
 
 servers:
   - url: http://localhost:8080
@@ -75,7 +83,7 @@ tags:
   - name: Me
     description: The authenticated user's own account
   - name: Sessions
-    description: Chat sessions + messages + SSE stream
+    description: Target chat sessions + messages + SSE stream; not implemented in M1b
   - name: Workspaces
     description: Personal + shared workspace management
   - name: Workspace Files
@@ -85,7 +93,7 @@ tags:
   - name: Channels
     description: Discord / Telegram bot configurations per user
   - name: Cron
-    description: Scheduled agent invocations
+    description: Target scheduled agent invocations; not implemented in M1b
   - name: Admin
     description: Admin-only — system config, user management, server-side MCPs
 
@@ -229,8 +237,10 @@ paths:
   /api/me/events:
     get:
       tags: [Me]
-      summary: SSE stream — per-user account-scoped events (ADR-106)
+      summary: Target SSE stream — per-user account-scoped events (ADR-106; not M1b)
       description: |
+        Target M1 route, not implemented in M1b.
+
         Server-Sent Events stream scoped to the authenticated user.
         Carries account-scoped notifications that aren't tied to any
         specific chat session: MCP rejections (ADR-049, ADR-105),
@@ -262,7 +272,7 @@ paths:
         described under `components.schemas` (`UserEvent*`).
       responses:
         '200':
-          description: SSE stream opened.
+          description: Target SSE stream opened; not implemented in M1b.
           content:
             text/event-stream:
               schema: { type: string }
@@ -274,7 +284,9 @@ paths:
   /api/sessions:
     get:
       tags: [Sessions]
-      summary: List the user's chat sessions
+      summary: Target route — list the user's chat sessions (not M1b)
+      description: |
+        Target M1 route for browser chat/session slices. Not implemented in M1b.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Offset'
@@ -295,7 +307,9 @@ paths:
         schema: { type: string }
     get:
       tags: [Sessions]
-      summary: Get a single session
+      summary: Target route — get a single session (not M1b)
+      description: |
+        Target M1 route for browser chat/session slices. Not implemented in M1b.
       responses:
         '200':
           description: OK
@@ -305,7 +319,9 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [Sessions]
-      summary: Delete a session and its message history
+      summary: Target route — delete a session and its message history (not M1b)
+      description: |
+        Target M1 route for browser chat/session slices. Not implemented in M1b.
       responses:
         '204': { description: Deleted. }
 
@@ -317,8 +333,10 @@ paths:
         schema: { type: string }
     get:
       tags: [Sessions]
-      summary: Paginated scroll-up of older message history (ADR-093)
+      summary: Target route — paginated older message history (ADR-093; not M1b)
       description: |
+        Target M1 route for browser chat/session slices. Not implemented in M1b.
+
         Returns messages strictly older than the `before` cursor, in
         reverse chronological order. Used when the user scrolls past
         the window that was replayed by `GET /api/sessions/{id}/stream`
@@ -344,10 +362,12 @@ paths:
                 items: { $ref: '#/components/schemas/Message' }
     post:
       tags: [Sessions]
-      summary: Send a user message to this session (fire-and-forget, ADR-013)
+      summary: Target route — send a user message and spawn agent work (ADR-013; not M1b)
       description: |
-        Returns `202 Accepted` immediately after persisting the user
-        message and spawning the agent task. Subscribe to
+        Target M1 route for browser chat/session slices. Not implemented in M1b.
+
+        Target behavior: return `202 Accepted` immediately after persisting the
+        user message and spawning the agent task. Subscribe to
         `GET /api/sessions/{id}/stream` to receive the agent's reply
         events.
 
@@ -376,7 +396,7 @@ paths:
                       items: { $ref: '#/components/schemas/ContentBlock' }
       responses:
         '202':
-          description: Accepted — message persisted, agent task spawned.
+          description: Target response — message persisted, agent task spawned; not implemented in M1b.
           content:
             application/json:
               schema:
@@ -396,8 +416,10 @@ paths:
         schema: { type: string }
     get:
       tags: [Sessions]
-      summary: SSE stream — replay recent history, then live events (ADR-003, ADR-093)
+      summary: Target SSE stream — replay recent history, then live events (ADR-003, ADR-093; not M1b)
       description: |
+        Target M1 route for browser chat/session slices. Not implemented in M1b.
+
         Opens a Server-Sent Events stream. The server holds the
         connection open and writes `event: <name>\ndata: <json>\n\n`
         chunks as things happen. Cookie auth works because
@@ -449,7 +471,7 @@ paths:
             skip replay entirely.
       responses:
         '200':
-          description: SSE stream opened.
+          description: Target SSE stream opened; not implemented in M1b.
           content:
             text/event-stream:
               schema: { type: string }
@@ -462,8 +484,10 @@ paths:
         schema: { type: string }
     post:
       tags: [Sessions]
-      summary: Stop button — request cancellation at next iteration boundary (ADR-035)
+      summary: Target route — request cancellation at next iteration boundary (ADR-035; not M1b)
       description: |
+        Target M1 route for browser chat/session slices. Not implemented in M1b.
+
         Sets the session's `cancel_requested` flag. At the next
         iteration boundary, the agent loop inserts
         `"[User pressed stop]"` as a user message and exits. DB may
@@ -1253,11 +1277,13 @@ paths:
             (e.g. `gpt-4o`). ADR-101.
           - `llm_max_context_tokens` (int) — LLM context window in tokens
             (e.g. `128000`). Counted with tiktoken-rs (ADR-025). ADR-101.
-          - `llm_compaction_threshold_tokens` (int) — headroom that
-            triggers compaction (default `16000`). Compaction fires when
-            `llm_max_context_tokens − tiktoken_count(prompt) <
-            llm_compaction_threshold_tokens`. Summary `max_output_tokens`
-            = `threshold − 4000`. ADR-028, ADR-101.
+          - `llm_compaction_threshold_tokens` (int) — accepted/reserved
+            config for later compaction decisions (default `16000`). The
+            intended future trigger compares
+            `llm_max_context_tokens − tiktoken_count(prompt)` with
+            `llm_compaction_threshold_tokens`; summary `max_output_tokens`
+            = `threshold − 4000`. M1b stores the value but does not perform
+            compaction decisions. ADR-028, ADR-101.
           - `llm_max_concurrent_requests` (int) — optional
             in-process semaphore in the shared LLM provider layer. Default
             `0` means unlimited and creates no semaphore. A positive integer
@@ -1817,6 +1843,8 @@ components:
     #
     SseEventMessage:
       description: |
+        Target per-session SSE payload; not emitted by M1b.
+
         A persisted user/assistant/tool message. Same shape as a
         row from `GET /api/sessions/{id}/messages`. Emitted during
         both historical replay (on stream connect) and live mode
