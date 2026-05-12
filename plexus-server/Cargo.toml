@@ -11,6 +11,7 @@ repository.workspace = true
 plexus-common = { path = "../plexus-common" }
 axum.workspace = true
 cookie.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
