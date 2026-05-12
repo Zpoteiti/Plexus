@@ -209,6 +209,7 @@ as `0`.
 - `0` means unlimited and creates no semaphore.
 - A positive integer creates an in-process semaphore with that many permits.
 - Negative values are invalid.
+- Values above the server maximum are invalid.
 - Runtime chat-completion calls acquire a permit before making the external
   `POST /chat/completions` request and release it when the request completes.
 

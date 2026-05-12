@@ -1,8 +1,13 @@
 # Plexus
 
-**Run AI agents on one server. Execute tools on any machine.**
+**In-progress distributed AI agent platform in Rust.**
 
-Plexus is a distributed AI agent platform built in Rust. The core idea: separate *thinking* (LLM orchestration) from *doing* (tool execution). Your agent brain lives on a central server. Your tools run on remote machines — dev laptops, production servers, cloud VMs, wherever you need them.
+Plexus is being rebuilt as a distributed AI agent platform. The target idea is
+to separate *thinking* (LLM orchestration) from *doing* (tool execution): the
+agent brain will live on a central server, and tools will run on remote
+machines such as dev laptops, production servers, or cloud VMs.
+
+Target architecture sketch:
 
 ```
 You ── Browser ── Server ── Client (your laptop)
@@ -12,6 +17,31 @@ You ── Browser ── Server ── Client (your laptop)
 ```
 
 Heavily inspired by [nanobot](https://github.com/nanobot-ai/nanobot) — a brilliant Python-based personal AI assistant framework. Plexus takes the patterns we learned from studying nanobot (multi-channel support, tool orchestration, memory, skills, cron, security) and re-architects them for distributed, multi-user, multi-machine deployment in Rust.
+
+## Current M1b Status
+
+The `rebuild-m1-M1b` branch is not a usable end-user agent yet. It currently
+contains the server foundation and the OpenAI-compatible LLM provider
+foundation:
+
+- PostgreSQL-backed `plexus-server` startup and admin/auth foundations from
+  M1a.
+- Admin LLM config keys for `llm_endpoint`, `llm_api_key`, `llm_model`, and
+  `llm_max_concurrent_requests`.
+- Validate-before-commit provider identity checks through `GET
+  {llm_endpoint}/models`.
+- Write-only admin API behavior for `llm_api_key`, with configured keys shown
+  as `"<redacted>"` in admin responses.
+- Internal non-streaming Chat Completions call mechanics in
+  `plexus-server/src/openai.rs` with `stream=false`.
+- Hermetic Rust tests using an in-process fake provider, plus an optional
+  sibling FastAPI mock for local/manual provider smoke testing.
+
+Not implemented in M1b: browser chat, SSE chat delivery, persisted
+conversation workflows, agent orchestration, tool execution, context
+compaction, cron, heartbeat, Discord/Telegram adapters, the production
+frontend, and the standalone client. The sections below describe the target
+product unless they explicitly mention M1b.
 
 ## Why Plexus?
 
@@ -23,12 +53,16 @@ Most AI agent frameworks assume everything runs on one machine. That breaks when
 - You want your agent accessible from a **web browser, Discord, Telegram** — all at once
 - You need **real security** — sandboxed execution, SSRF protection, env isolation
 
-Plexus solves all of these by splitting the architecture: the server handles the agent loop, memory, sessions, and LLM calls. Lightweight clients on remote machines just expose and execute tools.
+The target architecture solves these by splitting responsibilities: the server
+will handle the agent loop, memory, sessions, and LLM calls, while lightweight
+clients on remote machines expose and execute tools.
 
-## Features
+## Target Features
 
-- **Distributed tool execution** — connect any machine as an execution node
-- **Multi-channel** — talk to your agent via web UI, Discord, or Telegram
+These are intended product capabilities, not all current M1b behavior.
+
+- **Distributed tool execution** — connect machines as execution nodes
+- **Multi-channel** — web UI, Discord, and Telegram ingress
 - **ReAct agent loop** — up to 200 iterations with trap-in-loop detection
 - **Per-device security policies** — sandbox or unrestricted filesystem access
 - **Shell sandbox** — bubblewrap on Linux, env isolation always on
@@ -40,13 +74,12 @@ Plexus solves all of these by splitting the architecture: the server handles the
 - **Cron jobs** — schedule recurring tasks, one-shot reminders, cross-channel delivery
 - **Built for scale** — DashMap-based routing, concurrent DB pool, designed for 1K users and 500 concurrent sessions
 
-## Quick Start
+## M1b Development Quick Start
 
 ### Prerequisites
 
 - Rust 1.85+ (edition 2024)
 - PostgreSQL 15+
-- Node.js 18+ (for building the web frontend)
 
 ### Dev DB reset and test helper
 
@@ -84,14 +117,7 @@ Use these admin config values:
 }
 ```
 
-### 1. Build the frontend
-
-```bash
-cd plexus-frontend
-npm install && npm run build
-```
-
-### 2. Start the server
+### 1. Start the server
 
 ```bash
 # Set required env vars (or use a .env file)
@@ -101,69 +127,51 @@ export ADMIN_TOKEN=your-admin-secret
 export SERVER_PORT=8080
 export PLEXUS_WORKSPACE_ROOT=/var/lib/plexus/workspaces
 
-# Start the server (also serves the web UI in release builds)
+# Start the M1b server foundation
 cd plexus-server && cargo run
 ```
 
-The server is a single binary serving everything: REST API, SSE streams for the browser, WebSocket for devices, and the embedded React frontend. No separate gateway process — put nginx/Caddy in front for TLS in production.
+The M1b server foundation exposes auth/admin REST behavior and LLM provider
+configuration mechanics. Use an API client or automated tests to register an
+admin and exercise `PATCH /api/admin/config` with the mock values above.
 
-### 3. Set up via the web UI
+The web UI, browser chat, SSE delivery, device WebSocket flow, standalone
+client, and agent execution loop are later milestones and are not available in
+M1b.
 
-Open `http://localhost:8080` in your browser. Anyone registering with the matching `ADMIN_TOKEN` becomes an admin; multiple admins are possible — just share the token with whoever should have admin rights. Regular users register without the token.
-
-First-time admin flow:
-
-1. **Register** your admin account, supplying the `ADMIN_TOKEN`
-2. **Configure LLM** — point to any OpenAI-compatible API (OpenAI, Anthropic via proxy, local models, etc.)
-3. **Set workspace defaults** — personal quota, shared workspace cap, and other platform settings
-4. **Create your first device** — give it a name (e.g. "laptop") and copy the generated token to connect a client
-
-### 4. Connect a client
-
-```bash
-cd plexus-client
-
-export PLEXUS_SERVER_WS_URL=ws://localhost:8080/ws
-export PLEXUS_AUTH_TOKEN=<paste your device token here>
-
-cargo run
-```
-
-Your machine is now an execution node. The agent can run shell commands, read/write files, and use any MCP servers you configure — all on your machine. Connect as many machines as you want.
-
-### 5. Start chatting
-
-Go back to the web UI and send your first message. The agent is ready.
-
-## Architecture
+## Target Architecture
 
 ```
 plexus-common/     Shared protocol types, error codes, constants, MCP client
-plexus-server/     Orchestration hub — agent loop, DB, auth, channels, tools, web UI
-plexus-client/     Execution node — tool runtime, MCP, shell sandbox
-plexus-frontend/   React web UI — chat, settings, admin panel (embedded in server binary in release builds)
+plexus-server/     Server hub - DB, auth, admin config, and target orchestration
+plexus-client/     Planned execution node - tool runtime, MCP, shell sandbox
+plexus-frontend/   Planned React web UI - chat, settings, admin panel
 ```
 
 | Component | Role | Scales to |
 |-----------|------|-----------|
-| **Server** | Agent brain, LLM calls, memory, sessions, web UI, browser SSE | 1K users, 500 concurrent sessions |
-| **Client** | Tool execution, file I/O, shell commands | Thousands of connections per server |
-| **Frontend** | Chat UI, settings, admin | Embedded in server binary; Vite dev server in development |
+| **Server** | Current M1b: DB/auth/admin config and LLM provider foundation. Target: agent brain, LLM calls, memory, sessions, browser SSE. | 1K users, 500 concurrent sessions |
+| **Client** | Planned tool execution, file I/O, and shell commands. | Thousands of connections per server |
+| **Frontend** | Planned chat UI, settings, and admin panel. | Embedded in server binary in target release builds |
 
-## How It Works
+## Target Runtime Flow
 
-1. You send a message — browser uses REST + SSE, Discord/Telegram come in through their SDKs, devices ride a WebSocket back to the server
-2. The server's agent loop builds a system prompt with your soul, memory, available tools, skills, and accessible workspaces
-3. The LLM responds — either with text (done) or tool calls (continue)
-4. Tool calls get routed to the right client by device name (or run server-side for file ops on the workspace)
-5. The client executes the tool (with security guards) and returns the result
-6. Loop back to step 3 until the LLM says it's done (or hits 200 iterations)
+When later M1 slices are implemented:
 
-All messages, tool results, and memory are persisted in PostgreSQL. Context compression kicks in automatically when the conversation gets long.
+1. A user sends a message through browser REST + SSE, Discord/Telegram, or another channel.
+2. The server's agent loop builds a system prompt with user memory, available tools, skills, and accessible workspaces.
+3. The LLM responds with either text or tool calls.
+4. Tool calls route to the right client by device name or to server-side workspace file tools.
+5. The client executes the tool with security guards and returns the result.
+6. The loop continues until the LLM is done or hits its iteration cap.
+
+The target design persists messages, tool results, and memory in PostgreSQL.
+Context compression is planned for later orchestration work, not M1b.
 
 ## Security
 
-Plexus uses a server-authoritative security model — the server defines policy, clients enforce it.
+Plexus is designed around a server-authoritative security model: the server
+defines policy, and clients enforce it once the client/device slices exist.
 
 - **Filesystem policy** — per-device: Sandbox (workspace only) or Unrestricted (typed-name confirmation required to flip)
 - **Bubblewrap sandbox** — Linux process isolation, workspace rw + minimal system ro + secrets hidden
