@@ -229,6 +229,35 @@ async fn invalid_llm_endpoint_is_rejected_before_persistence() {
 }
 
 #[tokio::test]
+async fn llm_endpoint_with_allowed_scheme_but_missing_host_is_rejected_before_persistence() {
+    let app = TestApp::spawn().await;
+    let token = register_admin(app.router.clone()).await;
+    let fake = FakeOpenAi::valid().await;
+
+    let (status, _) = json_request(
+        app.router.clone(),
+        Method::PATCH,
+        "/api/admin/config",
+        json!({
+            "quota_bytes": 999,
+            "llm_endpoint": "https:///v1",
+            "llm_api_key": fake.api_key(),
+            "llm_model": fake.model()
+        }),
+        Some(&token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let quota: (serde_json::Value,) =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'quota_bytes'")
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_ne!(quota.0, json!(999));
+}
+
+#[tokio::test]
 async fn first_llm_identity_setup_requires_all_three_keys() {
     let app = TestApp::spawn().await;
     let token = register_admin(app.router.clone()).await;
