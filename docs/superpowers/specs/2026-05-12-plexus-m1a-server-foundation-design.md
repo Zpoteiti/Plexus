@@ -1,6 +1,6 @@
 # Plexus M1a Server Foundation Sub-Spec
 
-**Status:** design review
+**Status:** approved for implementation planning
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1`
 **Authors:** brainstormed in collaborative session 2026-05-12
