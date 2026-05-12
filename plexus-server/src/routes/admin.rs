@@ -10,7 +10,7 @@ pub async fn get_config(
     let values = system_config::get_all(state.pool())
         .await
         .map_err(ApiError::from_sqlx)?;
-    Ok(Json(values))
+    Ok(Json(system_config::redact_for_response(values)))
 }
 
 pub async fn patch_config(
@@ -19,6 +19,19 @@ pub async fn patch_config(
     Json(input): Json<BTreeMap<String, Value>>,
 ) -> Result<Json<BTreeMap<String, Value>>, ApiError> {
     let values = system_config::validate_patch(input)?;
+    let current = system_config::get_all(state.pool())
+        .await
+        .map_err(ApiError::from_sqlx)?;
+
+    if system_config::identity_changed(&values) {
+        let cfg = system_config::merged_llm_config(&current, &values)?;
+        state.openai().client().validate_config(&cfg).await?;
+    }
+
+    if let Some(limit) = system_config::concurrency_limit(&values) {
+        state.openai().set_concurrency_limit(limit).await?;
+    }
+
     let mut tx = state.pool().begin().await.map_err(ApiError::from_sqlx)?;
     system_config::set_many(&mut tx, &values)
         .await
@@ -28,5 +41,5 @@ pub async fn patch_config(
     let current = system_config::get_all(state.pool())
         .await
         .map_err(ApiError::from_sqlx)?;
-    Ok(Json(current))
+    Ok(Json(system_config::redact_for_response(current)))
 }

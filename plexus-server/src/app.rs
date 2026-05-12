@@ -1,4 +1,4 @@
-use crate::{config::ServerConfig, routes};
+use crate::{config::ServerConfig, openai::OpenAiRuntime, routes};
 use axum::Router;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -11,12 +11,25 @@ pub struct AppState {
 pub struct AppStateInner {
     pub pool: PgPool,
     pub config: ServerConfig,
+    pub openai: OpenAiRuntime,
 }
 
 impl AppState {
     pub fn new(pool: PgPool, config: ServerConfig) -> Self {
+        Self::new_with_openai_runtime(pool, config, OpenAiRuntime::default())
+    }
+
+    pub fn new_with_openai_runtime(
+        pool: PgPool,
+        config: ServerConfig,
+        openai: OpenAiRuntime,
+    ) -> Self {
         Self {
-            inner: Arc::new(AppStateInner { pool, config }),
+            inner: Arc::new(AppStateInner {
+                pool,
+                config,
+                openai,
+            }),
         }
     }
 
@@ -26,6 +39,10 @@ impl AppState {
 
     pub fn config(&self) -> &ServerConfig {
         &self.inner.config
+    }
+
+    pub fn openai(&self) -> &OpenAiRuntime {
+        &self.inner.openai
     }
 }
 
