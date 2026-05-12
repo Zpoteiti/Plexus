@@ -60,6 +60,30 @@ persistent `plexus` database.
 scripts/reset-postgres18-and-test.sh
 ```
 
+### Mock LLM for M1b development
+
+The deterministic OpenAI-compatible mock service lives beside this repository
+at `../Plexus-mock-llm`. It is a local/manual dev target for M1b provider
+validation and non-streaming external-call testing; Plexus Rust tests use an
+in-process fake provider instead.
+
+```bash
+cd ../Plexus-mock-llm
+conda activate Plexus
+uvicorn app.main:app --host 127.0.0.1 --port 8089
+```
+
+Use these admin config values:
+
+```json
+{
+  "llm_endpoint": "http://127.0.0.1:8089/v1",
+  "llm_api_key": "plexus-mock-key",
+  "llm_model": "plexus-fake-qa",
+  "llm_max_concurrent_requests": 0
+}
+```
+
 ### 1. Build the frontend
 
 ```bash

@@ -1238,14 +1238,17 @@ paths:
       tags: [Admin]
       summary: Get system-wide config (admin only)
       description: |
-        Returns every row of the `system_config` table. Known keys:
+        Returns admin-visible `system_config` values. Secret-bearing values such
+        as a configured `llm_api_key` are redacted. Known keys:
 
           - `quota_bytes` (int) — per-user workspace quota (ADR-046).
           - `llm_endpoint` (string) — base URL of the OpenAI-compatible
             chat-completions API (e.g. `https://api.openai.com/v1`,
             `http://litellm:4000/v1`). ADR-101.
           - `llm_api_key` (string) — bearer credential the server uses on
-            outbound LLM requests. ADR-101.
+            outbound LLM requests. Write-only in admin API responses: once
+            configured, GET/PATCH responses return `"<redacted>"` instead of
+            the raw key. ADR-101.
           - `llm_model` (string) — model name passed in the request body
             (e.g. `gpt-4o`). ADR-101.
           - `llm_max_context_tokens` (int) — LLM context window in tokens
@@ -1258,8 +1261,10 @@ paths:
           - `llm_max_concurrent_requests` (int) — optional
             in-process semaphore in the shared LLM provider layer. Default
             `0` means unlimited and creates no semaphore. A positive integer
-            caps concurrent in-flight LLM calls. Applies to normal chat,
-            cron, heartbeat, compaction, and future LLM calls. ADR-101.
+            caps concurrent in-flight LLM calls. Applies to internal
+            non-streaming chat-completion calls made through the shared LLM
+            provider layer; later chat, cron, heartbeat, and compaction flows
+            will use the same layer. ADR-101.
           - `server_mcp` (array of `McpServerConfig`) — admin-configured
             shared-service MCPs, exposed as install site `server`.
             ADR-114.
@@ -1268,12 +1273,13 @@ paths:
         deployment-local keys; everything not listed above is treated
         as opaque metadata by Plexus.
 
-        M1a implementation note: the initial server slice only accepts
-        `quota_bytes`, `shared_workspace_quota_bytes`,
-        `llm_max_context_tokens`, `llm_compaction_threshold_tokens`, and
-        `llm_max_concurrent_requests` on PATCH. Provider identity keys are
-        rejected until M1b can validate them before DB write; `server_mcp`
-        is implemented in the later MCP slice.
+        M1b accepts `llm_endpoint`, `llm_api_key`, and `llm_model` on PATCH
+        after validating the merged provider identity with `GET
+        {llm_endpoint}/models`. `GET /api/admin/config` redacts a configured
+        `llm_api_key` as `"<redacted>"`; callers rotate the key by sending a
+        new value and keep the existing key by omitting `llm_api_key`.
+        Sending `"<redacted>"` as a new key is rejected. `server_mcp` remains
+        documented for the later MCP slice and is not accepted in M1b.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1298,14 +1304,18 @@ paths:
         and include the configured `llm_model`. Validation failure returns
         `400 Bad Request` and leaves the existing DB config unchanged.
 
-        M1a rejects `llm_endpoint`, `llm_api_key`, `llm_model`, and
-        `server_mcp` rather than storing unvalidated or inactive config. The
-        accepted M1a PATCH keys are `quota_bytes`,
-        `shared_workspace_quota_bytes`, `llm_max_context_tokens`,
-        `llm_compaction_threshold_tokens`, and
-        `llm_max_concurrent_requests`. M1b treats
-        `llm_max_concurrent_requests=0` as unlimited and positive integers as
-        an in-process cap.
+        First-time LLM identity setup requires `llm_endpoint`, `llm_api_key`,
+        and `llm_model` in the same PATCH. After a valid identity exists,
+        later PATCHes may reuse stored values by omitting unchanged identity
+        keys. `GET /api/admin/config` and successful PATCH responses redact a
+        configured `llm_api_key` as `"<redacted>"`; callers rotate the key by
+        sending a new value and keep the existing key by omitting
+        `llm_api_key`. Sending `"<redacted>"` as a new key is rejected.
+
+        M1b treats `llm_max_concurrent_requests=0` as unlimited/no semaphore
+        and positive integers as an in-process cap for outbound
+        chat-completion calls. Negative values and values above the server
+        maximum are invalid.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]

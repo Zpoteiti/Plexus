@@ -32,8 +32,8 @@ before moving on.
 
 | Field | Value |
 |---|---|
-| Overall M1 state | M1a verified; M1b design approved |
-| Current focus | Write the `M1b` LLM provider foundation implementation plan |
+| Overall M1 state | M1a verified; M1b implementing |
+| Current focus | Implement the `M1b` LLM provider foundation |
 | Next implementation slice | `M1b` LLM provider foundation |
 | Frontend scope | Out of M1; frontend remains M3 |
 | Client scope | Standalone client remains M2, but M1 includes server-side device WebSocket support |
@@ -185,7 +185,7 @@ because the chat path needs a provider contract.
 | ID | Status | Scope | Depends on | Exit criteria |
 |---|---|---|---|---|
 | `M1a` | Verified | Server crate, startup, DB bootstrap, canonical schema application, real auth, basic REST/admin persistence, test harness | M0 | Verified by `cargo test -p plexus-server`, `cargo test --workspace`, `cargo fmt --all -- --check`, and `cargo check --workspace` |
-| `M1b` | Approved | OpenAI-compatible LLM foundation, admin config validation, external FastAPI mock service, hermetic fake-provider test strategy, concurrency semaphore | `M1a` | Invalid provider config is rejected before DB write; valid fake provider can complete chat calls |
+| `M1b` | Implementing | OpenAI-compatible LLM foundation, admin config validation, external FastAPI mock service, hermetic fake-provider test strategy, concurrency semaphore | `M1a` | Invalid provider config is rejected before DB write; valid fake provider can complete non-streaming external call mechanics |
 | `M1c` | Planned | Browser chat path: REST message ingress, session storage, SSE history replay/live stream, fake LLM-backed response loop | `M1a`, `M1b` | API test sends a message and receives agent response through SSE |
 | `M1d` | Planned | Server workspace/file REST APIs, server-side workspace FS, quota reporting, server-side shared file tools | `M1a` | REST and tool tests create/read/edit/list server workspace files and report quota |
 | `M1e` | Planned | Device token lifecycle, device naming rules, device WebSocket handshake/control frames | `M1a` | Device can be registered, connect over WS, and appear reachable |
@@ -238,17 +238,23 @@ After each sub-milestone, update this document with:
 
 ---
 
-## 8. Current Handoff to M1b
+## 8. Current M1b Implementation Focus
 
 `M1a` is verified. The server crate exists, empty PostgreSQL databases bootstrap
 from the canonical schema, real auth works through REST, and the M1a admin
 config subset persists to `system_config`.
 
-The next document to write is the `M1b` LLM provider foundation sub-spec. Its
-core proof should be that provider identity changes are validated through
-`GET {llm_endpoint}/models` before DB write, valid fake OpenAI-compatible
-providers can serve chat-completion calls, and the optional provider-level
-concurrency semaphore is enforced in the shared provider layer.
+`M1b` implementation is in progress. Its scope is the LLM identity validation
+and external-call foundation only: `plexus-server/src/openai.rs` handles
+OpenAI-compatible `GET /models` validation and non-streaming
+`POST /chat/completions` mechanics with `stream=false`, but does not read or
+write chat messages from the database and does not implement browser chat,
+agent orchestration, compaction decisions, cron, or heartbeat flows.
+
+External Anthropic, Gemini, local-model, or other non-OpenAI-native services
+must be reached through an external OpenAI-compatible gateway if needed.
+Automated Rust tests use a hermetic in-process fake provider. The sibling
+`../Plexus-mock-llm` FastAPI service is only for local/manual smoke testing.
 
 M1a verification evidence:
 

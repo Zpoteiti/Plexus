@@ -24,22 +24,25 @@ Known keys (admin-editable via `PATCH /api/admin/config`):
 |---|---|---|---|
 | `quota_bytes` | int | ADR-046 | Per-user workspace quota (default 5 GB). |
 | `llm_endpoint` | string | ADR-101 | OpenAI-compatible chat-completions base URL. |
-| `llm_api_key` | string | ADR-101 | Bearer credential for outbound LLM calls. |
+| `llm_api_key` | string | ADR-101 | Bearer credential for outbound LLM calls; redacted in admin API responses. |
 | `llm_model` | string | ADR-101 | Model name passed in request body. |
 | `llm_max_context_tokens` | int | ADR-101 | LLM context window in tokens (e.g. `128000` for gpt-4o). Counted with tiktoken-rs (ADR-025). |
 | `llm_compaction_threshold_tokens` | int | ADR-028, ADR-101 | Headroom that triggers compaction. Default `16000`. Summary `max_output_tokens` = `threshold − 4000`. |
-| `llm_max_concurrent_requests` | int | ADR-101 | Optional in-process semaphore for outbound LLM calls. Default `0` means unlimited and creates no semaphore. A positive integer caps concurrent in-flight LLM calls. |
+| `llm_max_concurrent_requests` | int | ADR-101 | Optional in-process semaphore for outbound LLM calls. Default `0` means unlimited and creates no semaphore. A positive integer caps concurrent in-flight LLM calls; negative values and values above the server maximum are invalid. |
 | `shared_workspace_quota_bytes` | int | ADR-108 | Quota ceiling that any single shared workspace may request at create or rename time. Default 25 GB. |
 | `server_mcp` | array of `McpServerConfig` | ADR-114 | Admin-configured shared-service MCPs exposed as install site `server`; shared credentials, one runtime per MCP, bounded queue. |
 
 Deployments may carry additional opaque keys; Plexus reads only the ones it knows about.
 
-M1a implementation note: the first server slice accepts only
-`quota_bytes`, `shared_workspace_quota_bytes`, `llm_max_context_tokens`,
-`llm_compaction_threshold_tokens`, and `llm_max_concurrent_requests`.
-`llm_endpoint`, `llm_api_key`, and `llm_model` are rejected until M1b adds
-provider validation. `server_mcp` is documented for the overall M1/MCP scope
-and is not accepted by the M1a admin-config endpoint.
+M1b accepts `llm_endpoint`, `llm_api_key`, and `llm_model` only after provider
+validation succeeds. First setup must provide all three identity values; later
+PATCHes may reuse stored values by omitting unchanged identity keys. Validation
+uses `GET {llm_endpoint}/models` before any DB write, so failed identity
+changes do not persist paired config updates. `llm_api_key` is stored in
+`system_config` for outbound calls but redacted as `"<redacted>"` in admin
+config read and patch responses. Sending the literal redaction marker as a new
+key is rejected. `server_mcp` is documented for the overall M1/MCP scope and
+is not accepted by the M1b admin-config endpoint.
 
 ---
 

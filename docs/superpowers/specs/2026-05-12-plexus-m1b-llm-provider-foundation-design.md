@@ -1,6 +1,6 @@
 # Plexus M1b OpenAI-Compatible LLM Foundation Sub-Spec
 
-**Status:** approved for implementation planning
+**Status:** implementation in progress; final M1b verification not yet recorded
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1-M1b`
 **Base:** `rebuild-m1`
