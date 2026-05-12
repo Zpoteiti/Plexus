@@ -4,7 +4,7 @@
 **Branch:** `rebuild-m1`
 **Authors:** brainstormed in collaborative session 2026-05-12
 **Supersedes:** none
-**Last updated:** 2026-05-12
+**Last updated:** 2026-05-13
 
 ---
 
@@ -32,9 +32,9 @@ before moving on.
 
 | Field | Value |
 |---|---|
-| Overall M1 state | M1a verified; M1b implementing |
-| Current focus | Implement the `M1b` LLM provider foundation |
-| Next implementation slice | `M1b` LLM provider foundation |
+| Overall M1 state | M1b verified; M1c planning next |
+| Current focus | Write the `M1c` browser chat path sub-spec |
+| Next implementation slice | `M1c` browser chat path |
 | Frontend scope | Out of M1; frontend remains M3 |
 | Client scope | Standalone client remains M2, but M1 includes server-side device WebSocket support |
 | Discord/Telegram | Required for M1; live tokens supplied by the user for smoke testing when ready |
@@ -185,7 +185,7 @@ because the chat path needs a provider contract.
 | ID | Status | Scope | Depends on | Exit criteria |
 |---|---|---|---|---|
 | `M1a` | Verified | Server crate, startup, DB bootstrap, canonical schema application, real auth, basic REST/admin persistence, test harness | M0 | Verified by `cargo test -p plexus-server`, `cargo test --workspace`, `cargo fmt --all -- --check`, and `cargo check --workspace` |
-| `M1b` | Implementing | OpenAI-compatible LLM foundation, admin config validation, external FastAPI mock service, hermetic fake-provider test strategy, concurrency semaphore | `M1a` | Invalid provider config is rejected before DB write; valid fake provider can complete non-streaming external call mechanics |
+| `M1b` | Verified | OpenAI-compatible LLM foundation, admin config validation, external FastAPI mock service, hermetic fake-provider test strategy, concurrency semaphore | `M1a` | Verified on 2026-05-13 from branch `rebuild-m1-M1b`: invalid provider config is rejected before DB write, valid fake provider completes non-streaming external call mechanics, sibling mock tests pass |
 | `M1c` | Planned | Browser chat path: REST message ingress, session storage, SSE history replay/live stream, fake LLM-backed response loop | `M1a`, `M1b` | API test sends a message and receives agent response through SSE |
 | `M1d` | Planned | Server workspace/file REST APIs, server-side workspace FS, quota reporting, server-side shared file tools | `M1a` | REST and tool tests create/read/edit/list server workspace files and report quota |
 | `M1e` | Planned | Device token lifecycle, device naming rules, device WebSocket handshake/control frames | `M1a` | Device can be registered, connect over WS, and appear reachable |
@@ -238,18 +238,18 @@ After each sub-milestone, update this document with:
 
 ---
 
-## 8. Current M1b Implementation Focus
+## 8. Current M1 Status
 
 `M1a` is verified. The server crate exists, empty PostgreSQL databases bootstrap
 from the canonical schema, real auth works through REST, and the M1a admin
 config subset persists to `system_config`.
 
-`M1b` implementation is in progress. Its scope is the LLM identity validation
-and external-call foundation only: `plexus-server/src/openai.rs` handles
-OpenAI-compatible `GET /models` validation and non-streaming
-`POST /chat/completions` mechanics with `stream=false`, but does not read or
-write chat messages from the database and does not implement browser chat,
-agent orchestration, compaction decisions, cron, or heartbeat flows.
+`M1b` is verified. Its scope is the LLM identity validation and external-call
+foundation only: `plexus-server/src/openai.rs` handles OpenAI-compatible
+`GET /models` validation and non-streaming `POST /chat/completions` mechanics
+with `stream=false`, but does not read or write chat messages from the database
+and does not implement browser chat, agent orchestration, compaction decisions,
+cron, or heartbeat flows.
 
 External Anthropic, Gemini, local-model, or other non-OpenAI-native services
 must be reached through an external OpenAI-compatible gateway if needed.
@@ -264,3 +264,19 @@ M1a verification evidence:
 - `cargo check --workspace`
 - schema/docs consistency search for canonical tables, indexes, `server_mcp`,
   `llm_max_concurrent_requests`, and reserved `server` device-name constraint
+
+M1b verification evidence from 2026-05-13 on branch `rebuild-m1-M1b`:
+
+- `rtk git status --short`
+- `rtk cargo fmt --all -- --check`
+- `rtk cargo clippy --workspace --all-targets -- -D warnings`
+- `rtk bash scripts/reset-postgres18-and-test.sh`
+- `rtk env PLEXUS_TEST_DATABASE_URL=postgres://plexus:plexus@127.0.0.1:5432/plexus cargo test --workspace --all-targets`
+- `rtk conda run -n Plexus pytest -q` in `../Plexus-mock-llm`
+- `rtk git diff --check`
+- `docs/API.yaml` validated with `ruamel.yaml`
+
+PostgreSQL 18 verification used container `plexus` from `pgvector/pgvector:pg18`.
+After both PostgreSQL-backed test runs, only the persistent `plexus` database
+matched `plexus%`, and the persistent `plexus.public` schema contained no
+tables. No test tables or rows landed in the persistent database.

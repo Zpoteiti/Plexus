@@ -1,6 +1,6 @@
 # Plexus M1b OpenAI-Compatible LLM Foundation Sub-Spec
 
-**Status:** implementation in progress; final M1b verification not yet recorded
+**Status:** Verified on 2026-05-13 from branch `rebuild-m1-M1b`
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1-M1b`
 **Base:** `rebuild-m1`
@@ -395,3 +395,25 @@ M1b is complete when:
 - Plexus CI tests use only hermetic test fakes;
 - the provider-wide chat-completion semaphore is tested;
 - docs are synced with the implemented behavior.
+
+---
+
+## 13. Verification Evidence
+
+M1b was verified on 2026-05-13 from branch `rebuild-m1-M1b`.
+
+Required checks all exited 0:
+
+- `rtk git status --short`
+- `rtk cargo fmt --all -- --check`
+- `rtk cargo clippy --workspace --all-targets -- -D warnings`
+- `rtk bash scripts/reset-postgres18-and-test.sh`
+- `rtk env PLEXUS_TEST_DATABASE_URL=postgres://plexus:plexus@127.0.0.1:5432/plexus cargo test --workspace --all-targets`
+- `rtk conda run -n Plexus pytest -q` in `../Plexus-mock-llm`
+- `rtk git diff --check`
+- `docs/API.yaml` validated with `ruamel.yaml`
+
+PostgreSQL 18 verification used container `plexus` from `pgvector/pgvector:pg18`.
+After both PostgreSQL-backed test runs, only the persistent `plexus` database
+matched `plexus%`, and the persistent `plexus.public` schema contained no
+tables. No test tables or rows landed in the persistent database.
