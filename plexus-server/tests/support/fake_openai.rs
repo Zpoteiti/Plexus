@@ -13,7 +13,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+use tokio::{net::TcpListener, task::JoinHandle};
 
 #[derive(Clone)]
 struct FakeState {
@@ -34,7 +34,6 @@ enum FakeMode {
 
 pub struct FakeOpenAi {
     pub base_url: String,
-    shutdown: Option<oneshot::Sender<()>>,
     handle: JoinHandle<()>,
     max_in_flight: Arc<AtomicUsize>,
 }
@@ -87,19 +86,12 @@ impl FakeOpenAi {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let handle = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                })
-                .await
-                .unwrap();
+            axum::serve(listener, router).await.unwrap();
         });
 
         Self {
             base_url: format!("http://{addr}/v1"),
-            shutdown: Some(shutdown_tx),
             handle,
             max_in_flight,
         }
@@ -108,10 +100,17 @@ impl FakeOpenAi {
 
 impl Drop for FakeOpenAi {
     fn drop(&mut self) {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
         self.handle.abort();
+    }
+}
+
+struct InFlightGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -148,12 +147,18 @@ async fn chat(
         return (StatusCode::UNAUTHORIZED, Json(error("invalid_api_key")));
     }
 
+    if body.get("model").and_then(Value::as_str) != Some(state.model.as_str()) {
+        return (StatusCode::NOT_FOUND, Json(error("model_not_found")));
+    }
+
     let current = state.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+    let _in_flight = InFlightGuard {
+        counter: state.in_flight.clone(),
+    };
     update_max(&state.max_in_flight, current);
     if !state.delay.is_zero() {
         tokio::time::sleep(state.delay).await;
     }
-    state.in_flight.fetch_sub(1, Ordering::SeqCst);
 
     let stream = body.get("stream").and_then(Value::as_bool);
     if stream != Some(false) {
