@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::BTreeMap;
 
@@ -15,7 +15,10 @@ pub const DEFERRED_LLM_IDENTITY_KEYS: &[&str] = &["llm_endpoint", "llm_api_key",
 pub async fn seed_defaults(pool: &PgPool) -> Result<(), sqlx::Error> {
     let defaults = [
         ("quota_bytes", json!(5_i64 * 1024 * 1024 * 1024)),
-        ("shared_workspace_quota_bytes", json!(25_i64 * 1024 * 1024 * 1024)),
+        (
+            "shared_workspace_quota_bytes",
+            json!(25_i64 * 1024 * 1024 * 1024),
+        ),
         ("llm_max_context_tokens", json!(128000)),
         ("llm_compaction_threshold_tokens", json!(16000)),
         ("llm_max_concurrent_requests", Value::Null),

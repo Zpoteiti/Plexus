@@ -71,7 +71,9 @@ async fn create_database(admin_url: &str, db_name: &str) {
         .await
         .expect("connect admin database");
     let sql = format!(r#"CREATE DATABASE "{}""#, db_name);
-    conn.execute(sql.as_str()).await.expect("create test database");
+    conn.execute(sql.as_str())
+        .await
+        .expect("create test database");
 }
 
 async fn drop_database(admin_url: &str, db_name: &str) {

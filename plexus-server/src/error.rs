@@ -1,4 +1,4 @@
-use axum::{http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, http::StatusCode, response::IntoResponse};
 use plexus_common::ErrorCode;
 use serde::Serialize;
 
@@ -22,6 +22,18 @@ impl ApiError {
             code,
             message: message.into(),
         }
+    }
+
+    pub fn from_sqlx(err: sqlx::Error) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::IoError,
+            format!("database error: {err}"),
+        )
+    }
+
+    pub fn invalid_args(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, ErrorCode::InvalidArgs, message)
     }
 }
 
