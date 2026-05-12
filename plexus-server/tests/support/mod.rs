@@ -100,3 +100,5 @@ fn database_url_for_db(admin_url: &str, db_name: &str) -> String {
 pub fn workspace_path(root: &TempDir, user_id: Uuid) -> PathBuf {
     root.path().join(user_id.to_string())
 }
+
+pub mod fake_openai;
