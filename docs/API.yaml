@@ -225,8 +225,10 @@ paths:
               schema: { $ref: '#/components/schemas/User' }
     delete:
       tags: [Me]
-      summary: Delete own account (cascades to all user data)
+      summary: Target delete own account (cascades to all user data; not M1b)
       description: |
+        Target M1 route, not implemented in M1b.
+
         Cascades to devices, sessions, messages, cron_jobs, discord_configs,
         telegram_configs, and personal workspace files (ADR-058).
         Shared workspace memberships are removed; shared workspaces the user

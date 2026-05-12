@@ -1396,10 +1396,11 @@ Set via `PATCH /api/admin/config`. Read via `GET /api/admin/config`. No `LLM_*` 
 
 When an admin changes `llm_endpoint`, `llm_api_key`, or `llm_model`, the server validates before writing to `system_config`: `GET {llm_endpoint}/models` must be reachable with the configured bearer credential, return a well-formed OpenAI-compatible models response, and include the configured `llm_model`. Failure rejects the admin request and leaves the existing DB config unchanged. Automated tests use a fake OpenAI-compatible HTTP server; real provider credentials are only needed for live smoke testing.
 
-Implementation sequencing: M1a exposes only the admin config keys that can be
-validated without the provider runtime. `llm_endpoint`, `llm_api_key`, and
-`llm_model` are deliberately rejected by the M1a endpoint until M1b implements
-the provider validation described above.
+Implementation sequencing: M1a exposed only the admin config keys that could be
+validated without the provider runtime, so `llm_endpoint`, `llm_api_key`, and
+`llm_model` were deliberately rejected in that slice. M1b implements the
+provider validation described above; those keys are now accepted only after the
+`/models` check succeeds.
 
 **Consequences:** No provider abstraction trait, no per-provider modules, no vision-format adapters per provider — vision retry (ADR-026) targets a single request shape. Switching the model is a `PATCH` away. Switching the *provider* is "stand up LiteLLM, change `llm_endpoint` and `llm_api_key`" — handled outside Plexus. Admin operating overhead (one extra container if they want non-OpenAI) is the trade we're willing to make for codebase simplicity. The optional concurrency cap is deliberately provider-wide rather than heartbeat-specific, so weaker deployments can protect their LLM backend without changing individual subsystems.
 
