@@ -14,4 +14,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/me", get(me::get_me).patch(me::patch_me))
+        .route(
+            "/api/admin/config",
+            get(admin::get_config).patch(admin::patch_config),
+        )
 }

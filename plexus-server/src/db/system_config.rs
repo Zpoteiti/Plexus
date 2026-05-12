@@ -1,3 +1,6 @@
+use crate::error::ApiError;
+use axum::http::StatusCode;
+use plexus_common::ErrorCode;
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::BTreeMap;
@@ -62,4 +65,61 @@ pub async fn set_many(
         .await?;
     }
     Ok(())
+}
+
+pub fn validate_patch(input: BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>, ApiError> {
+    let mut out = BTreeMap::new();
+    for (key, value) in input {
+        if DEFERRED_LLM_IDENTITY_KEYS.contains(&key.as_str()) {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidArgs,
+                format!("{key} requires M1b provider validation before DB write"),
+            ));
+        }
+        if !SUPPORTED_M1A_KEYS.contains(&key.as_str()) {
+            return Err(ApiError::invalid_args(format!(
+                "unsupported config key: {key}"
+            )));
+        }
+        validate_value(&key, &value)?;
+        out.insert(key, value);
+    }
+    Ok(out)
+}
+
+fn validate_value(key: &str, value: &Value) -> Result<(), ApiError> {
+    match key {
+        "quota_bytes" | "shared_workspace_quota_bytes" | "llm_max_context_tokens" => {
+            positive_i64(key, value).map(|_| ())
+        }
+        "llm_compaction_threshold_tokens" => {
+            let value = positive_i64(key, value)?;
+            if value <= 4000 {
+                return Err(ApiError::invalid_args(
+                    "llm_compaction_threshold_tokens must be greater than 4000",
+                ));
+            }
+            Ok(())
+        }
+        "llm_max_concurrent_requests" => {
+            if value.is_null() {
+                return Ok(());
+            }
+            positive_i64(key, value).map(|_| ())
+        }
+        _ => Err(ApiError::invalid_args(format!(
+            "unsupported config key: {key}"
+        ))),
+    }
+}
+
+fn positive_i64(key: &str, value: &Value) -> Result<i64, ApiError> {
+    let n = value
+        .as_i64()
+        .ok_or_else(|| ApiError::invalid_args(format!("{key} must be an integer")))?;
+    if n <= 0 {
+        return Err(ApiError::invalid_args(format!("{key} must be positive")));
+    }
+    Ok(n)
 }
