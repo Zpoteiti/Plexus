@@ -48,6 +48,18 @@ Plexus solves all of these by splitting the architecture: the server handles the
 - PostgreSQL 15+
 - Node.js 18+ (for building the web frontend)
 
+### Dev DB reset and test helper
+
+For this dev box, `scripts/reset-postgres18-and-test.sh` removes every Docker
+container, starts a clean PostgreSQL 18 container named `plexus` with database,
+user, and password all set to `plexus`, runs `cargo test --workspace` against
+it, then prints any remaining `plexus%` databases and public tables in the
+persistent `plexus` database.
+
+```bash
+scripts/reset-postgres18-and-test.sh
+```
+
 ### 1. Build the frontend
 
 ```bash
