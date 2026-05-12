@@ -1,3 +1,4 @@
+use super::validation;
 use crate::{
     app::AppState,
     auth::{jwt, password},
@@ -42,8 +43,8 @@ pub async fn register(
     let is_admin = state
         .config()
         .admin_token
-        .as_deref()
-        .is_some_and(|token| req.admin_token.as_deref() == Some(token));
+        .as_ref()
+        .is_some_and(|token| req.admin_token.as_deref() == Some(token.expose_secret()));
     let user = users::create_user(state.pool(), &req.email, &hash, &req.name, is_admin)
         .await
         .map_err(map_create_user_error)?;
@@ -56,14 +57,18 @@ pub async fn register(
             format!("workspace creation failed: {err}"),
         ));
     }
-    let token =
-        jwt::issue_token(&state.config().jwt_secret, user.id, user.is_admin).map_err(|_| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::IoError,
-                "token issue failed",
-            )
-        })?;
+    let token = jwt::issue_token(
+        state.config().jwt_secret.expose_secret(),
+        user.id,
+        user.is_admin,
+    )
+    .map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::IoError,
+            "token issue failed",
+        )
+    })?;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -113,14 +118,18 @@ pub async fn login(
         is_admin: found.is_admin,
         created_at: found.created_at,
     };
-    let token =
-        jwt::issue_token(&state.config().jwt_secret, user.id, user.is_admin).map_err(|_| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                ErrorCode::IoError,
-                "token issue failed",
-            )
-        })?;
+    let token = jwt::issue_token(
+        state.config().jwt_secret.expose_secret(),
+        user.id,
+        user.is_admin,
+    )
+    .map_err(|_| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::IoError,
+            "token issue failed",
+        )
+    })?;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
@@ -143,29 +152,21 @@ pub async fn logout(State(state): State<AppState>) -> (StatusCode, HeaderMap) {
 }
 
 fn validate_register(req: &RegisterRequest) -> Result<(), ApiError> {
-    if req.email.trim().is_empty() || !req.email.contains('@') {
-        return Err(ApiError::invalid_args("email must be valid"));
-    }
-    if req.password.len() < 8 {
-        return Err(ApiError::invalid_args(
-            "password must be at least 8 characters",
-        ));
-    }
-    if req.name.trim().is_empty() {
-        return Err(ApiError::invalid_args("name is required"));
-    }
+    validation::email(&req.email)?;
+    validation::password(&req.password)?;
+    validation::name(&req.name)?;
     Ok(())
 }
 
 fn map_create_user_error(err: sqlx::Error) -> ApiError {
-    if let sqlx::Error::Database(db_err) = &err {
-        if db_err.is_unique_violation() {
-            return ApiError::new(
-                StatusCode::CONFLICT,
-                ErrorCode::InvalidArgs,
-                "email already in use",
-            );
-        }
+    if let sqlx::Error::Database(db_err) = &err
+        && db_err.is_unique_violation()
+    {
+        return ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::InvalidArgs,
+            "email already in use",
+        );
     }
     ApiError::from_sqlx(err)
 }

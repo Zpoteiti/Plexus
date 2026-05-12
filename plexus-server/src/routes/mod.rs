@@ -7,6 +7,7 @@ use axum::{
 pub mod admin;
 pub mod auth;
 pub mod me;
+mod validation;
 
 pub fn router() -> Router<AppState> {
     Router::new()

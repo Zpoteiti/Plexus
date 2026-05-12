@@ -1,3 +1,4 @@
+use super::validation;
 use crate::{
     auth::{AuthUser, password},
     db::users,
@@ -24,17 +25,21 @@ pub async fn patch_me(
     Json(req): Json<PatchMeRequest>,
 ) -> Result<Json<users::User>, ApiError> {
     let password_hash = match req.password.as_deref() {
-        Some(password) if password.len() < 8 => {
-            return Err(ApiError::invalid_args(
-                "password must be at least 8 characters",
-            ));
+        Some(password) => {
+            validation::password(password)?;
+            Some(
+                password::hash_password(password)
+                    .map_err(|_| ApiError::invalid_args("password could not be hashed"))?,
+            )
         }
-        Some(password) => Some(
-            password::hash_password(password)
-                .map_err(|_| ApiError::invalid_args("password could not be hashed"))?,
-        ),
         None => None,
     };
+    if let Some(email) = req.email.as_deref() {
+        validation::email(email)?;
+    }
+    if let Some(name) = req.name.as_deref() {
+        validation::name(name)?;
+    }
     let user = users::update_profile(
         state.pool(),
         auth.user.id,
@@ -48,14 +53,14 @@ pub async fn patch_me(
 }
 
 fn map_update_user_error(err: sqlx::Error) -> ApiError {
-    if let sqlx::Error::Database(db_err) = &err {
-        if db_err.is_unique_violation() {
-            return ApiError::new(
-                axum::http::StatusCode::CONFLICT,
-                ErrorCode::InvalidArgs,
-                "email already in use",
-            );
-        }
+    if let sqlx::Error::Database(db_err) = &err
+        && db_err.is_unique_violation()
+    {
+        return ApiError::new(
+            axum::http::StatusCode::CONFLICT,
+            ErrorCode::InvalidArgs,
+            "email already in use",
+        );
     }
     ApiError::from_sqlx(err)
 }

@@ -1266,6 +1266,13 @@ paths:
         `additionalProperties: true` because deployments may carry
         deployment-local keys; everything not listed above is treated
         as opaque metadata by Plexus.
+
+        M1a implementation note: the initial server slice only accepts
+        `quota_bytes`, `shared_workspace_quota_bytes`,
+        `llm_max_context_tokens`, `llm_compaction_threshold_tokens`, and
+        `llm_max_concurrent_requests` on PATCH. Provider identity keys are
+        rejected until M1b can validate them before DB write; `server_mcp`
+        is implemented in the later MCP slice.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]
@@ -1289,6 +1296,13 @@ paths:
         credential, return a well-formed OpenAI-compatible models response,
         and include the configured `llm_model`. Validation failure returns
         `400 Bad Request` and leaves the existing DB config unchanged.
+
+        M1a rejects `llm_endpoint`, `llm_api_key`, `llm_model`, and
+        `server_mcp` rather than storing unvalidated or inactive config. The
+        accepted M1a PATCH keys are `quota_bytes`,
+        `shared_workspace_quota_bytes`, `llm_max_context_tokens`,
+        `llm_compaction_threshold_tokens`, and
+        `llm_max_concurrent_requests`.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]

@@ -261,6 +261,59 @@ async fn wrong_password_returns_unauthorized() {
 }
 
 #[tokio::test]
+async fn patch_me_rejects_invalid_profile_fields() {
+    let app = TestApp::spawn().await;
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        "/api/auth/register",
+        json!({
+            "email": "profile@example.com",
+            "password": "correct horse battery staple",
+            "name": "Profile"
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let jwt = body["jwt"].as_str().unwrap().to_string();
+
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::PATCH,
+        "/api/me",
+        json!({ "email": "not-an-email" }),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_args");
+
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::PATCH,
+        "/api/me",
+        json!({ "name": "   " }),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_args");
+
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/me",
+        Value::Null,
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["email"], "profile@example.com");
+    assert_eq!(body["name"], "Profile");
+}
+
+#[tokio::test]
 async fn auth_error_shape_uses_common_code_and_message() {
     let app = TestApp::spawn().await;
 

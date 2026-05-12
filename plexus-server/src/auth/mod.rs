@@ -35,13 +35,14 @@ impl FromRequestParts<AppState> for AuthUser {
                     "authentication required",
                 )
             })?;
-        let claims = jwt::verify_token(&state.config().jwt_secret, &token).map_err(|_| {
-            ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                ErrorCode::TokenInvalid,
-                "token is invalid or expired",
-            )
-        })?;
+        let claims =
+            jwt::verify_token(state.config().jwt_secret.expose_secret(), &token).map_err(|_| {
+                ApiError::new(
+                    StatusCode::UNAUTHORIZED,
+                    ErrorCode::TokenInvalid,
+                    "token is invalid or expired",
+                )
+            })?;
         let user = users::find_by_id(state.pool(), claims.sub)
             .await
             .map_err(ApiError::from_sqlx)?

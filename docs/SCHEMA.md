@@ -34,6 +34,13 @@ Known keys (admin-editable via `PATCH /api/admin/config`):
 
 Deployments may carry additional opaque keys; Plexus reads only the ones it knows about.
 
+M1a implementation note: the first server slice accepts only
+`quota_bytes`, `shared_workspace_quota_bytes`, `llm_max_context_tokens`,
+`llm_compaction_threshold_tokens`, and `llm_max_concurrent_requests`.
+`llm_endpoint`, `llm_api_key`, and `llm_model` are rejected until M1b adds
+provider validation. `server_mcp` is documented for the overall M1/MCP scope
+and is not accepted by the M1a admin-config endpoint.
+
 ---
 
 ## 2. `users` — Plexus accounts

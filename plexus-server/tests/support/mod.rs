@@ -1,3 +1,4 @@
+use plexus_common::{AdminToken, JwtSecret};
 use plexus_server::{app, config::ServerConfig, db};
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use std::{env, path::PathBuf};
@@ -18,7 +19,7 @@ impl TestApp {
     pub async fn spawn() -> Self {
         let admin_url = env::var("PLEXUS_TEST_DATABASE_URL")
             .or_else(|_| env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://nexus:nexus@127.0.0.1:5432/nexus".to_string());
+            .unwrap_or_else(|_| "postgres://plexus:plexus@127.0.0.1:5432/plexus".to_string());
 
         let db_name = format!("plexus_test_{}", Uuid::now_v7().simple());
         create_database(&admin_url, &db_name).await;
@@ -30,8 +31,8 @@ impl TestApp {
             database_url,
             workspace_root: workspace_root.path().to_path_buf(),
             bind: "127.0.0.1:0".parse().unwrap(),
-            jwt_secret: "test-jwt-secret-with-enough-entropy".to_string(),
-            admin_token: Some("test-admin-token".to_string()),
+            jwt_secret: JwtSecret::new("test-jwt-secret-with-enough-entropy".to_string()),
+            admin_token: Some(AdminToken::new("test-admin-token".to_string())),
             cookie_secure: false,
         };
 

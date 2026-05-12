@@ -35,6 +35,22 @@ jobs:
   test:
     name: cargo test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: plexus
+          POSTGRES_PASSWORD: plexus
+          POSTGRES_DB: plexus
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U plexus -d plexus"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PLEXUS_TEST_DATABASE_URL: postgres://plexus:plexus@127.0.0.1:5432/plexus
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

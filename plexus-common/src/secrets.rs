@@ -74,6 +74,11 @@ secret_newtype!(
 );
 
 secret_newtype!(
+    AdminToken,
+    "Optional bootstrap token that grants admin rights during user registration. Loaded from env at server startup."
+);
+
+secret_newtype!(
     LlmApiKey,
     "API key for the OpenAI-compatible LLM endpoint (ADR-101). Stored in `system_config.llm_api_key`."
 );
@@ -115,6 +120,13 @@ mod tests {
         let secret = JwtSecret::new("my-jwt-secret".into());
         let dbg = format!("{:?}", secret);
         assert!(!dbg.contains("jwt-secret"), "Debug leaked: {}", dbg);
+    }
+
+    #[test]
+    fn admin_token_redacts() {
+        let token = AdminToken::new("my-admin-token".into());
+        let dbg = format!("{:?}", token);
+        assert!(!dbg.contains("admin-token"), "Debug leaked: {}", dbg);
     }
 
     #[test]

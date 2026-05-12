@@ -51,7 +51,7 @@ pub use protocol::{
     TransferBeginFrame, TransferDirection, TransferEndFrame, TransferProgressFrame, WsFrame,
     pack_chunk, parse_chunk,
 };
-pub use secrets::{DeviceToken, JwtSecret, LlmApiKey};
+pub use secrets::{AdminToken, DeviceToken, JwtSecret, LlmApiKey};
 pub use tools::Tool;
 pub use tools::result::wrap_result;
 pub use tools::validate::{validate_args, validate_with};
