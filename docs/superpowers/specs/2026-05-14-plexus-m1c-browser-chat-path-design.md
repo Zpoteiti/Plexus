@@ -67,9 +67,10 @@ shape. Those updates are part of the milestone, not incidental cleanup.
 
 ## 3. Contract Corrections
 
-The existing docs contain one important tension: `docs/API.yaml` uses
-`/api/sessions/{id}`, while ADR-098 discusses browser writes to
-`/api/sessions/{key}/messages`.
+Earlier docs contained one important tension: `docs/API.yaml` used
+`/api/sessions/{id}`, while ADR-098 discussed browser writes to
+`/api/sessions/{key}/messages`. M1c resolves the tension in favor of UUID
+browser routes, and ADR-098 now records that correction.
 
 M1c resolves this as follows:
 

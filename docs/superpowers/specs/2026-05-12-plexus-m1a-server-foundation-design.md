@@ -1,6 +1,6 @@
 # Plexus M1a Server Foundation Sub-Spec
 
-**Status:** approved for implementation planning
+**Status:** Verified; see the M1 living tracker for current status/evidence
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1`
 **Authors:** brainstormed in collaborative session 2026-05-12
@@ -172,7 +172,8 @@ Behavior:
 - If `admin_token` matches `ADMIN_TOKEN`, the new user gets `is_admin=true`.
 - Duplicate email returns `409 Conflict`.
 - Login verifies the password hash, returns a JWT, and sets the same cookie.
-- Logout clears the cookie and returns `204`.
+- Logout clears the cookie and returns `204`. It is idempotent and does not
+  require authentication.
 - `GET /api/me` accepts either the cookie JWT or Bearer JWT.
 - `PATCH /api/me` updates `name`, `email`, and/or `password`; password updates
   are re-hashed, and duplicate email returns `409 Conflict`.
@@ -189,6 +190,9 @@ JWT:
 - Include user id, admin flag, issued-at, and expiry claims.
 - Use a bounded expiry suitable for browser sessions.
 - Verify signature and expiry on every authenticated route.
+- Admin routes verify JWT identity, then reload the current database user row
+  and require `users.is_admin=true`. The DB row is authoritative; the JWT admin
+  claim is informational and not the final authorization source.
 
 ---
 
@@ -200,7 +204,8 @@ M1a implements:
 - `PATCH /api/admin/config`
 
 Both routes require authenticated admin users. Non-admin users receive
-`403 Forbidden`; unauthenticated requests receive `401 Unauthorized`.
+`403 Forbidden`; unauthenticated requests receive `401 Unauthorized`. Admin
+authorization uses the freshly loaded database user row.
 
 Accepted M1a keys:
 

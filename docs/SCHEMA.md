@@ -127,19 +127,22 @@ Adding a future channel = adding a `<channel>_configs` table; no `users` migrati
 CREATE TABLE IF NOT EXISTS sessions (
     id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id           UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    session_key       TEXT         NOT NULL UNIQUE,
+    session_key       TEXT         NOT NULL,
     channel           TEXT         NOT NULL,
     chat_id           TEXT         NOT NULL,
+    title             TEXT         NOT NULL DEFAULT 'New chat',
     last_inbound_at   TIMESTAMPTZ,
     cancel_requested  BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_session_key ON sessions(user_id, session_key);
 ```
 
-- `session_key` is the composite identity from ADR-006 — `{channel}:{chat_id}` for external channels, an override (`cron:{job_id}`, `heartbeat:{user_id}`, `web:{...}`) for internal/web sessions. UNIQUE because it's the de-facto lookup key.
-- `id` is the internal UUID used as FK target by `messages.session_id`. Most internal code uses `id`; external surfaces use `session_key`.
+- `session_key` is the composite identity from ADR-006 — `{channel}:{chat_id}` for external channels, an override (`cron:{job_id}`, `heartbeat:{user_id}`, `web:{id}`) for internal/web sessions. It is unique per user, not globally unique.
+- `id` is the internal UUID used as FK target by `messages.session_id` and the browser REST path identifier. Most internal code uses `id`; channel adapters may look up by `(user_id, session_key)`.
+- `title` is the human-facing mutable session name. It defaults to `"New chat"` and never affects `id`, `chat_id`, or `session_key`.
 - `last_inbound_at` — bumped on every new InboundMessage; powers session-list ordering in the UI.
 - `cancel_requested` — set true by `POST /api/sessions/{id}/cancel` (ADR-035), observed at the next iteration boundary, then cleared.
 
@@ -161,7 +164,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_created
     ON messages(session_id, created_at);
 ```
 
-- `content` — JSONB array of OpenAI chat-completions content blocks (ADR-059, ADR-101). Block shapes mirror what the LLM will receive — request body is a pass-through with no translation. **Images** are stored both as `image_url` blocks with base64 data URLs inline AND on disk under server's `.attachments/` (ADR-044). **Non-image files** (PDFs, CSVs, audio, ...) live ONLY on disk under `.attachments/`; the DB carries just the path-text marker block (ADR-027) since OpenAI chat completions has no `file_url` block type.
+- `content` — JSONB array of OpenAI chat-completions content blocks (ADR-059, ADR-101). Block shapes mirror what the LLM will receive — request body is a pass-through with no translation. **Images** are stored as `image_url` blocks with base64 data URLs inline. Target v1 also writes image bytes on disk under server `.attachments/` (ADR-044); M1c browser inline-image messages may temporarily skip that `.attachments/` copy until M1d. **Non-image files** (PDFs, CSVs, audio, ...) live ONLY on disk under `.attachments/`; the DB carries just the path-text marker block (ADR-027) since OpenAI chat completions has no `file_url` block type.
 - `role` — strictly `user`, `assistant`, or `tool` (ADR-089). No synthetic roles. Compaction summaries use `role='assistant'` plus `is_compaction_summary=true`.
 - The `idx_messages_session_created` index powers the SSE replay and the `GET /api/sessions/{id}/messages` cursor scan.
 - Runtime block (ADR-094) is prepended into the user-row's `content` JSONB at ingress time; not a separate column.
@@ -288,7 +291,7 @@ CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_fire  ON cron_jobs(next_fire_at)
 |---|---|---|
 | `users_email_key` | users (UNIQUE on `email`) | Login lookup. |
 | `idx_sessions_user_id` | sessions | List user's sessions. |
-| `sessions_session_key_key` | sessions (UNIQUE on `session_key`) | Channel-message → session lookup. |
+| `idx_sessions_user_session_key` | sessions (UNIQUE on `(user_id, session_key)`) | Per-user channel-message → session lookup. |
 | `idx_messages_session_created` | messages (`session_id, created_at`) | History replay + cursor scan. |
 | `idx_devices_user_id` | devices | List user's devices. |
 | `devices_user_id_name_key` | devices (UNIQUE on `(user_id, name)`) | URL resolution `/api/devices/{name}`. |

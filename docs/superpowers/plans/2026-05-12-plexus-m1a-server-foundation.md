@@ -8,6 +8,14 @@
 
 **Tech Stack:** Rust 2024, Axum, Tokio, SQLx/Postgres, Argon2id, JSON Web Tokens, real PostgreSQL integration tests.
 
+**Post-implementation alignment notes:** The verified implementation keeps
+logout unauthenticated/idempotent, maps duplicate profile-email updates to
+`409 Conflict`, uses the current database `users.is_admin` row as the
+authoritative admin source, and treats `llm_max_concurrent_requests=0` as
+unlimited. The final route tests extend the initial failing snippets below with
+wrong-password login, cookie JWT auth, profile patch name/email/password cases,
+admin config read success, and invalid-value rejection.
+
 ---
 
 ## File Structure
@@ -602,15 +610,17 @@ CREATE TABLE IF NOT EXISTS telegram_configs (
 CREATE TABLE IF NOT EXISTS sessions (
     id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id           UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    session_key       TEXT         NOT NULL UNIQUE,
+    session_key       TEXT         NOT NULL,
     channel           TEXT         NOT NULL,
     chat_id           TEXT         NOT NULL,
+    title             TEXT         NOT NULL DEFAULT 'New chat',
     last_inbound_at   TIMESTAMPTZ,
     cancel_requested  BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_session_key ON sessions(user_id, session_key);
 
 CREATE TABLE IF NOT EXISTS messages (
     id                       UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -726,7 +736,7 @@ pub async fn seed_defaults(pool: &PgPool) -> Result<(), sqlx::Error> {
         ("shared_workspace_quota_bytes", json!(25_i64 * 1024 * 1024 * 1024)),
         ("llm_max_context_tokens", json!(128000)),
         ("llm_compaction_threshold_tokens", json!(16000)),
-        ("llm_max_concurrent_requests", Value::Null),
+        ("llm_max_concurrent_requests", json!(0)),
     ];
 
     for (key, value) in defaults {
@@ -1632,8 +1642,21 @@ pub async fn patch_me(
         password_hash.as_deref(),
     )
     .await
-    .map_err(ApiError::from_sqlx)?;
+    .map_err(map_update_user_error)?;
     Ok(Json(user))
+}
+
+fn map_update_user_error(err: sqlx::Error) -> ApiError {
+    if let sqlx::Error::Database(db_err) = &err {
+        if db_err.is_unique_violation() {
+            return ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                plexus_common::ErrorCode::InvalidArgs,
+                "email already in use",
+            );
+        }
+    }
+    ApiError::from_sqlx(err)
 }
 ```
 
@@ -1851,13 +1874,20 @@ fn validate_value(key: &str, value: &Value) -> Result<(), ApiError> {
             Ok(())
         }
         "llm_max_concurrent_requests" => {
-            if value.is_null() {
-                return Ok(());
-            }
-            positive_i64(key, value).map(|_| ())
+            non_negative_i64(key, value).map(|_| ())
         }
         _ => Err(ApiError::invalid_args(format!("unsupported config key: {key}"))),
     }
+}
+
+fn non_negative_i64(key: &str, value: &Value) -> Result<i64, ApiError> {
+    let n = value
+        .as_i64()
+        .ok_or_else(|| ApiError::invalid_args(format!("{key} must be an integer")))?;
+    if n < 0 {
+        return Err(ApiError::invalid_args(format!("{key} must be zero or positive")));
+    }
+    Ok(n)
 }
 
 fn positive_i64(key: &str, value: &Value) -> Result<i64, ApiError> {

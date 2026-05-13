@@ -45,7 +45,9 @@ info:
       token with teammates who should have admin rights.
     - All other endpoints use JWT, delivered either via `HttpOnly` cookie
       (browser) or `Authorization: Bearer <jwt>` (programmatic).
-    - Admin-only endpoints require the JWT's `is_admin` claim.
+    - Admin-only endpoints require a valid JWT. The server reloads the current
+      user row and requires `users.is_admin=true`; the database row is
+      authoritative for admin authorization.
 
     **Wire conventions:**
 
@@ -56,7 +58,7 @@ info:
     - Timestamps are ISO 8601 with timezone offset.
     - UUIDs unless noted.
 
-    **Target chat consumption pattern (ADR-093; not implemented in M1b):** the SSE stream at
+    **M1c chat consumption pattern (ADR-093):** the SSE stream at
     `GET /api/sessions/{id}/stream` is the single entry point for
     "show me the chat" — it replays recent history on connect, then
     delivers live events. `GET /api/sessions/{id}/messages` is a
@@ -69,7 +71,8 @@ info:
       `plexus-server`, not public HTTP endpoints. The only public ingress for
       chat messages is `POST /api/sessions/{id}/messages` (browser) plus the
       `WS /ws/device` handshake for devices. These ingress paths are target M1
-      behavior and are not implemented in M1b.
+      behavior. These ingress paths start in M1c for browser chat and expand
+      to device/channel adapters in later M1 slices.
 
 servers:
   - url: http://localhost:8080
@@ -83,7 +86,7 @@ tags:
   - name: Me
     description: The authenticated user's own account
   - name: Sessions
-    description: Target chat sessions + messages + SSE stream; not implemented in M1b
+    description: M1c chat sessions + messages + SSE stream
   - name: Workspaces
     description: Target personal + shared workspace management; not implemented in M1b
   - name: Workspace Files
@@ -184,6 +187,7 @@ paths:
     post:
       tags: [Auth]
       summary: Log out (clear session cookie)
+      security: []
       responses:
         '204':
           description: Cookie cleared.
@@ -223,6 +227,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Email already belongs to another user.
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     delete:
       tags: [Me]
       summary: Target delete own account (cascades to all user data; not M1b)
@@ -284,12 +293,13 @@ paths:
   # --- Sessions ---
   #
   /api/sessions:
-    description: Target M1 chat session route; not implemented in M1b.
+    description: Target M1 chat session route; M1c browser chat slice.
     get:
       tags: [Sessions]
-      summary: Target route — list the user's chat sessions (not M1b)
+      summary: Target route — list the user's chat sessions (M1c)
       description: |
-        Target M1 route for browser chat/session slices. Not implemented in M1b.
+        Returns sessions owned by the authenticated user. M1c sorts by
+        `last_inbound_at DESC NULLS LAST`, then `created_at DESC`.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Offset'
@@ -301,9 +311,33 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/Session' }
+    post:
+      tags: [Sessions]
+      summary: Target route — create a browser chat session (M1c)
+      description: |
+        Creates a `web` session. The server generates `sessions.id`, sets
+        `chat_id = id::text`, sets `session_key = web:{id}`, and stores a
+        human-editable `title`. Missing, empty, or whitespace-only title
+        becomes `New chat`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  maxLength: 120
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   /api/sessions/{id}:
-    description: Target M1 chat session route; not implemented in M1b.
+    description: Target M1 chat session route; M1c browser chat slice.
     parameters:
       - name: id
         in: path
@@ -311,9 +345,9 @@ paths:
         schema: { type: string }
     get:
       tags: [Sessions]
-      summary: Target route — get a single session (not M1b)
+      summary: Target route — get a single session (M1c)
       description: |
-        Target M1 route for browser chat/session slices. Not implemented in M1b.
+        Returns one session owned by the authenticated user.
       responses:
         '200':
           description: OK
@@ -321,16 +355,43 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Session' }
         '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Sessions]
+      summary: Target route — rename a session title (M1c)
+      description: |
+        Renames the human-facing title only. `id`, `chat_id`, and
+        `session_key` are server-owned and never change because of rename.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
     delete:
       tags: [Sessions]
-      summary: Target route — delete a session and its message history (not M1b)
+      summary: Target route — delete a session and its message history (M1c)
       description: |
-        Target M1 route for browser chat/session slices. Not implemented in M1b.
+        Deletes a session owned by the authenticated user. `ON DELETE CASCADE`
+        removes its messages.
       responses:
         '204': { description: Deleted. }
 
   /api/sessions/{id}/messages:
-    description: Target M1 chat message route; not implemented in M1b.
+    description: Target M1 chat message route; M1c browser chat slice.
     parameters:
       - name: id
         in: path
@@ -367,41 +428,34 @@ paths:
                 items: { $ref: '#/components/schemas/Message' }
     post:
       tags: [Sessions]
-      summary: Target route — send a user message and spawn agent work (ADR-013; not M1b)
+      summary: Target route — send a user message and spawn agent work (ADR-013; M1c)
       description: |
-        Target M1 route for browser chat/session slices. Not implemented in M1b.
+        Returns `202 Accepted` immediately after persisting the user message
+        and spawning agent work. Subscribe to `GET /api/sessions/{id}/stream`
+        to receive the agent's reply events.
 
-        Target behavior: return `202 Accepted` immediately after persisting the
-        user message and spawning the agent task. Subscribe to
-        `GET /api/sessions/{id}/stream` to receive the agent's reply
-        events.
-
-        **Session-key allow-list (ADR-098).** Only session keys whose
-        channel prefix is `web:` (the frontend's namespace) are accepted
-        on this endpoint. Any other prefix (`cron:`, `heartbeat:`,
-        `discord:`, `telegram:`, ...) is rejected with `400 Bad Request`.
-        Discord/Telegram/cron/heartbeat sessions receive their messages
-        exclusively from their own pipelines (channel adapters,
-        scheduler, heartbeat synthesizer) — REST is the frontend's
-        inbox only. Reads (GET messages, GET stream) remain open for
-        any session the authenticated user owns.
+        **Browser write allow-list (ADR-098).** `{id}` is `sessions.id`, not
+        `session_key`. The server loads the session, verifies ownership, and
+        accepts writes only when `channel == "web"` and `session_key` starts
+        with `web:`. Discord/Telegram/cron/heartbeat sessions are read-only
+        through browser REST and receive messages exclusively from their own
+        pipelines.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [content]
               properties:
                 content:
-                  description: OpenAI chat-completions content blocks (text + image_url). Strings are accepted as shorthand for a single text block. (ADR-101 — Plexus speaks OpenAI chat completions only.)
+                  description: OpenAI chat-completions content blocks (text + image_url). Strings are accepted as shorthand for a single text block. Omitted content or an empty string/array is a valid empty user message. M1c accepts only inline base64 `data:image/...;base64,...` image URLs; external image URLs and multipart uploads are deferred to M1d.
                   oneOf:
                     - { type: string }
                     - type: array
                       items: { $ref: '#/components/schemas/ContentBlock' }
       responses:
         '202':
-          description: Target response — message persisted, agent task spawned; not implemented in M1b.
+          description: Message persisted, agent task spawned.
           content:
             application/json:
               schema:
@@ -410,11 +464,11 @@ paths:
                   message_id: { type: string }
         '400':
           description: |
-            Session key is not a frontend-writable prefix. Only `web:`
-            session keys may receive POSTed messages (ADR-098).
+            Session is not browser-writable, JSON/content shape is invalid, or
+            an image URL is not an inline base64 data URL.
 
   /api/sessions/{id}/stream:
-    description: Target M1 chat SSE stream route; not implemented in M1b.
+    description: Target M1 chat SSE stream route; M1c browser chat slice.
     parameters:
       - name: id
         in: path
@@ -422,10 +476,8 @@ paths:
         schema: { type: string }
     get:
       tags: [Sessions]
-      summary: Target SSE stream — replay recent history, then live events (ADR-003, ADR-093; not M1b)
+      summary: Target SSE stream — replay recent history, then live events (ADR-003, ADR-093; M1c)
       description: |
-        Target M1 route for browser chat/session slices. Not implemented in M1b.
-
         Opens a Server-Sent Events stream. The server holds the
         connection open and writes `event: <name>\ndata: <json>\n\n`
         chunks as things happen. Cookie auth works because
@@ -443,8 +495,8 @@ paths:
            `replay_limit=0`.
         2. **Cut-over marker.** One-off `event: history_end` with
            empty payload — tells the client "you're live now."
-        3. **Live phase.** `event: hint`, `event: message`,
-           `event: session_update`, `event: kick` as things occur.
+        3. **Live phase.** M1c emits live `event: message` chunks. Future M1
+           slices may add `hint`, `session_update`, and `kick`.
 
         Every `event: message` carries an `id:` SSE header with
         the DB `message_id`; EventSource uses it for
@@ -453,16 +505,14 @@ paths:
         **Event names (see `SseEvent*` schemas):**
 
         - `message` — a persisted user / assistant / tool message
-          (both replay and live). Assistant messages here are the
-          terminal responses (no more tool_use); user messages
-          include inbound turns from the current channel AND any
-          synthesized markers like `[User pressed stop]` (ADR-035).
-        - `hint` — transient tool-dispatch notification (ADR-017);
-          not persisted, not replayed on reconnect.
+          (both replay and live). M1c assistant messages are terminal
+          responses or synthetic Plexus error messages; tool/hint/cancel
+          events are future M1 slices.
         - `history_end` — one-off marker between replay and live.
-        - `session_update` — state transitions (cancel_requested,
-          cancelled, resumed).
-        - `kick` — server-initiated termination.
+        - `hint` — future transient tool-dispatch notification (ADR-017);
+          not persisted, not replayed on reconnect.
+        - `session_update` — future state transitions.
+        - `kick` — future server-initiated termination.
 
         OpenAPI does not model SSE first-class; event payloads
         are described under `components.schemas`.
@@ -477,13 +527,13 @@ paths:
             skip replay entirely.
       responses:
         '200':
-          description: Target SSE stream opened; not implemented in M1b.
+          description: SSE stream opened.
           content:
             text/event-stream:
               schema: { type: string }
 
   /api/sessions/{id}/cancel:
-    description: Target M1 chat cancellation route; not implemented in M1b.
+    description: Target M1 chat cancellation route; deferred from M1c.
     parameters:
       - name: id
         in: path
@@ -491,9 +541,9 @@ paths:
         schema: { type: string }
     post:
       tags: [Sessions]
-      summary: Target route — request cancellation at next iteration boundary (ADR-035; not M1b)
+      summary: Target route — request cancellation at next iteration boundary (ADR-035; not M1c)
       description: |
-        Target M1 route for browser chat/session slices. Not implemented in M1b.
+        Target M1 route, deferred from M1c.
 
         Sets the session's `cancel_requested` flag. At the next
         iteration boundary, the agent loop inserts
@@ -1537,7 +1587,7 @@ components:
       type: apiKey
       in: cookie
       name: plexus_session
-      description: HttpOnly; Secure; SameSite=Strict JWT cookie set by `/api/auth/login` and `/api/auth/register`.
+      description: HttpOnly; SameSite=Strict JWT cookie set by `/api/auth/login` and `/api/auth/register`. `Secure` is controlled by `PLEXUS_COOKIE_SECURE`; production deployments should enable it behind TLS, while local dev may omit it.
     bearerAuth:
       type: http
       scheme: bearer
@@ -1606,15 +1656,18 @@ components:
 
     Session:
       type: object
-      required: [id, user_id, channel, chat_id, created_at]
+      required: [id, user_id, session_key, channel, chat_id, title, created_at]
       properties:
         id: { type: string }
         user_id: { type: string }
         session_key:
           type: string
-          description: Composite key; usually `{channel}:{chat_id}` (ADR-006).
+          description: Composite key; usually `{channel}:{chat_id}` (ADR-006). Browser sessions use `web:{id}` and clients cannot set or rename it.
         channel: { type: string }
         chat_id: { type: string }
+        title:
+          type: string
+          description: Human-facing mutable title. Defaults to `New chat`.
         last_inbound_at: { type: string, format: date-time }
         cancel_requested: { type: boolean }
         created_at: { type: string, format: date-time }
@@ -1654,8 +1707,10 @@ components:
                   type: string
                   description: |
                     Base64 data URL (`data:image/png;base64,...`). See ADR-059.
-                    Images are stored inline in DB; workspace `.attachments/`
-                    copy exists only for the agent's file tools.
+                    M1c accepts inline base64 data URLs only. Target v1 also
+                    writes workspace `.attachments/` copies for agent file
+                    tools; M1c browser inline-image messages may skip that
+                    copy until M1d.
         - type: object
           required: [type, id, name, input]
           properties:

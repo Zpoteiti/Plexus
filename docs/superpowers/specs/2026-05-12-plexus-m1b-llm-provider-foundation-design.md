@@ -343,12 +343,13 @@ Required automated tests:
 - first provider setup without all three identity keys is rejected;
 - changing one identity key after a valid setup validates against the merged
   effective config;
-- unauthorized `/models` rejects and leaves DB rows unchanged;
-- malformed `/models` rejects and leaves DB rows unchanged;
-- models response missing `llm_model` rejects and leaves DB rows unchanged;
-- unreachable or timed-out provider rejects and leaves DB rows unchanged;
+- direct OpenAI-client validation rejects unauthorized `/models`, malformed
+  `/models`, and models responses missing `llm_model`;
+- admin-route validation failures reject before committing unrelated config
+  writes, including missing model and invalid endpoint cases;
 - `GET /api/admin/config` redacts configured `llm_api_key`;
 - sending `llm_api_key: "<redacted>"` in a patch is rejected;
+- negative and above-maximum `llm_max_concurrent_requests` values are rejected;
 - valid fake provider completes a non-streaming chat completion call;
 - `llm_max_concurrent_requests` caps simultaneous chat-completion calls.
 
@@ -360,8 +361,11 @@ Manual smoke with `Plexus-mock-llm`:
    - `llm_api_key`: `plexus-mock-key`;
    - `llm_model`: `plexus-fake-qa`.
 3. Confirm provider validation succeeds.
-4. Call the internal chat-completion path through tests or a later caller and
-   confirm `hello` returns `hi`.
+4. Confirm `GET /api/admin/config` redacts the stored API key.
+5. Confirm mock chat completion returns `hi` for `hello` either directly
+   against the mock service or through the automated OpenAI-client test. M1b
+   has no public browser chat endpoint; the Plexus end-to-end chat path starts
+   in M1c.
 
 Real provider smoke is optional after M1b and must not be part of CI.
 

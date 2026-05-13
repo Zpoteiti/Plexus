@@ -8,6 +8,14 @@
 
 **Tech Stack:** Rust 2024, Axum, Tokio, SQLx/Postgres, Reqwest with rustls, `plexus-common::LlmApiKey`, FastAPI, Miniforge/conda env `Plexus`.
 
+**Post-implementation alignment notes:** The verified implementation enforces
+the canonical `llm_max_concurrent_requests` maximum of `1_000_000`, redacts the
+configured API key on `GET /api/admin/config`, uses direct OpenAI-client tests
+for malformed/unauthorized `/models` responses, and uses admin-route tests for
+successful validation, missing-model atomic rejection, endpoint/config
+pre-validation, secret redaction, redaction-marker rejection, concurrency
+bounds, and runtime-limit refresh after commit.
+
 ---
 
 ## Scope Check
@@ -132,7 +140,7 @@ def content_to_text(content: Any) -> str:
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") in {"text", "input_text"}:
+            if isinstance(item, dict) and item.get("type") == "text":
                 text = item.get("text")
                 if isinstance(text, str):
                     parts.append(text)
@@ -1445,6 +1453,7 @@ pub const SUPPORTED_CONFIG_KEYS: &[&str] = &[
 ];
 
 pub const LLM_IDENTITY_KEYS: &[&str] = &["llm_endpoint", "llm_api_key", "llm_model"];
+pub const MAX_CONCURRENCY_LIMIT: i64 = 1_000_000;
 ```
 
 Change the seeded `llm_max_concurrent_requests` default:
@@ -1469,7 +1478,9 @@ Extend `validate_value`:
 
 ```rust
 "llm_endpoint" | "llm_api_key" | "llm_model" => non_empty_string(key, value),
-"llm_max_concurrent_requests" => non_negative_i64(key, value).map(|_| ()),
+"llm_max_concurrent_requests" => non_negative_i64(key, value)
+    .and_then(validate_concurrency_limit)
+    .map(|_| ()),
 ```
 
 Add helpers:
@@ -1567,6 +1578,15 @@ fn non_negative_i64(key: &str, value: &Value) -> Result<i64, ApiError> {
         return Err(ApiError::invalid_args(format!("{key} must be zero or positive")));
     }
     Ok(n)
+}
+
+fn validate_concurrency_limit(value: i64) -> Result<i64, ApiError> {
+    if value > MAX_CONCURRENCY_LIMIT {
+        return Err(ApiError::invalid_args(format!(
+            "llm_max_concurrent_requests must be at most {MAX_CONCURRENCY_LIMIT}"
+        )));
+    }
+    Ok(value)
 }
 ```
 
@@ -1777,13 +1797,27 @@ From `../Plexus-mock-llm`, run:
 rtk conda run -n Plexus uvicorn app.main:app --host 127.0.0.1 --port 8089
 ```
 
-In a second shell, run the Rust admin config test against the normal hermetic fake:
+In a second shell, verify the external mock directly:
 
 ```bash
-rtk env PLEXUS_TEST_DATABASE_URL=postgres://plexus:plexus@127.0.0.1:5432/plexus cargo test -p plexus-server --test m1b_admin_config
+curl -sS http://127.0.0.1:8089/v1/models \
+  -H 'Authorization: Bearer plexus-mock-key'
 ```
 
-Expected: Rust tests pass. Stop uvicorn after the smoke check.
+Then run Plexus, register an admin, and patch `/api/admin/config` with:
+
+```json
+{
+  "llm_endpoint": "http://127.0.0.1:8089/v1",
+  "llm_api_key": "plexus-mock-key",
+  "llm_model": "plexus-fake-qa"
+}
+```
+
+Expected: the patch succeeds only after mock `/models` validation, and
+`GET /api/admin/config` returns `"llm_api_key": "<redacted>"`. M1b has no public
+browser chat endpoint, so `hello -> hi` is covered by the direct mock check and
+the OpenAI-client test; Plexus end-to-end chat smoke starts in M1c.
 
 - [ ] **Step 6: Mark M1b verified and commit**
 

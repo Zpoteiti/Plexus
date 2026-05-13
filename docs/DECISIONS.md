@@ -49,8 +49,8 @@ These supersede the historical ADR set in the previous Plexus codebase — most 
 ### ADR-004 · Auth: cookie for browser, bearer for programmatic
 
 **Status:** accepted
-**Decision:** Same JWT, two delivery mechanisms. Login returns the JWT + sets an `HttpOnly; Secure; SameSite=Strict` cookie. Browser uses cookie automatically (including for SSE, since EventSource sends cookies). Programmatic consumers (scripts, CLI) use `Authorization: Bearer <jwt>`.
-**Consequences:** No client-side token storage bugs in the frontend (the past `localStorage.getItem('token')` vs. Zustand-envelope mismatch cannot recur). Same-origin enables zero CORS friction.
+**Decision:** Same JWT, two delivery mechanisms. Login returns the JWT + sets an `HttpOnly; SameSite=Strict` cookie. `Secure` is controlled by `PLEXUS_COOKIE_SECURE`: production/TLS deployments enable it, while local dev may omit it. Browser uses cookie automatically (including for SSE, since EventSource sends cookies). Programmatic consumers (scripts, CLI) use `Authorization: Bearer <jwt>`.
+**Consequences:** No client-side token storage bugs in the frontend (the past `localStorage.getItem('token')` vs. Zustand-envelope mismatch cannot recur). Same-origin enables zero CORS friction. Admin routes verify the JWT identity, then reload the current `users` row and require `users.is_admin=true`; the database row is authoritative for admin revocation, not a stale JWT claim.
 
 ---
 
@@ -78,8 +78,8 @@ pub struct InboundMessage {
 ### ADR-006 · `session_key` = override ∨ `{channel}:{chat_id}`
 
 **Status:** accepted
-**Decision:** Session identity is computed from the InboundMessage. If `session_key_override` is set (cron/heartbeat/API), use it verbatim. Otherwise compose `format!("{channel}:{chat_id}")`.
-**Consequences:** External channel messages get natural per-conversation sessions. Internal synthesizers can route history to isolated sessions while still targeting the original channel for delivery.
+**Decision:** Session identity is computed from the InboundMessage. If `session_key_override` is set (cron/heartbeat/API), use it verbatim. Otherwise compose `format!("{channel}:{chat_id}")`. Browser-created sessions use the generated session UUID as `chat_id`, so their key is `web:{session.id}`. Discord examples: `discord:dm:{user_id}` and `discord:guild:{guild_id}:channel:{channel_id}`.
+**Consequences:** External channel messages get natural per-conversation sessions. Internal synthesizers can route history to isolated sessions while still targeting the original channel for delivery. The internal UUID `sessions.id` remains the public REST path identifier for browser APIs; `session_key` remains the channel-routing identity.
 
 ### ADR-007 · No `is_partner` field; wrap baked into content at adapter
 
@@ -263,8 +263,8 @@ pub struct ContextInputs<'a> {
 
 **Status:** accepted
 **Context:** Some LLMs don't support images. Prior design had `vision_stripped: bool` on session state, persisted across turns.
-**Decision:** No session state. On LLM error, if the request contained `image_url` blocks, retry once with them stripped (keep all text blocks, including path-text markers). Return result. No flag propagates.
-**Consequences:** ~100 LoC simpler. DB stores full-fidelity messages always. Switching to a VLM mid-session works immediately — no stale flag. Cost: one 500ms retry per image turn on non-VLM.
+**Decision:** No session state. Send the full provider payload first. Auth/config errors fail fast. Transient errors retry the same payload with exponential backoff. If the request contained `image_url` blocks and the provider returns an image/payload compatibility error (`400`, `413`, `415`, `422`, or clear unsupported-image text), retry with only the `image_url` blocks stripped and keep all text blocks. If stripping leaves no content, send an empty content array/string rather than inventing a marker. The stripped path has its own normal transient retries. No flag propagates.
+**Consequences:** DB stores full-fidelity messages always. Switching to a VLM mid-session works immediately — no stale flag. Non-VLM providers can still answer text-only content after image stripping.
 
 ### ADR-027 · Path-text markers accompany every chat attachment
 
@@ -272,6 +272,7 @@ pub struct ContextInputs<'a> {
 **Decision:** When a channel adapter receives an inbound message with one or more attachments, it adds a text block per attachment: `"User has uploaded a file to device='server', path='.attachments/{msg_id}/{filename}'"`. This fires for **every** attachment regardless of MIME type:
 - **Images** — adapter adds the path-text block AND an `image_url` block (base64 inline per ADR-059). After vision-strip retry, the path-text block remains so a non-VLM agent still knows the file exists.
 - **Non-image files** (PDFs, CSVs, audio, archives, anything else) — adapter adds the path-text block ONLY. There is no `file_url` content block in OpenAI chat completions (ADR-101), so non-image bytes never live inline in `messages.content`. The agent reaches them via `read_file` against the workspace path.
+- **M1c browser inline-image exception** — before `.attachments/` writing lands in M1d, browser messages may store only an inline base64 `image_url` block with no path-text marker. Image stripping therefore removes only the image block and keeps whatever user text blocks remain, possibly empty.
 
 **Consequences:** Non-VLM agents can still reason about uploaded files structurally. VLM agents have redundancy on images (path + base64), which is fine. Non-image files have a single path of access (workspace `.attachments/`) — uniform model regardless of whether the LLM supports vision.
 
@@ -1073,14 +1074,14 @@ All three live in `plexus-client/src/mcp/`. The worker stitches them together fo
 
 Canonical block types:
 - **text:** `{"type": "text", "text": "..."}`
-- **image:** `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` — bytes inline as base64 data URL, not a path. The workspace copy at `.attachments/` (ADR-044) is for the agent's file tools; the DB copy is for durable conversation replay.
+- **image:** `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` — bytes inline as base64 data URL, not a path. The target workspace copy at `.attachments/` (ADR-044) is for the agent's file tools; the DB copy is for durable conversation replay. M1c browser inline-image messages may store only the DB copy until M1d adds `.attachments/` writing.
 - **tool_use / tool_result:** per the provider's tool spec.
 
 User, assistant, and tool messages all use the same block schema.
 
 **Consequences:**
 - No translation between DB storage and LLM request — content blocks go out to the provider as-stored.
-- History replay is full-fidelity for VLMs and for non-VLMs (vision-retry strips `image_url` blocks per ADR-026, leaving path-text markers per ADR-027).
+- History replay is full-fidelity for VLMs. Non-VLM retries strip `image_url` blocks per ADR-026 and keep all text blocks, including ADR-027 path-text markers once attachments are written.
 - Frontend can render images by emitting the base64 data URL directly — no extra fetch.
 - Durable if the workspace attachment is deleted: conversation history continues to render correctly even when the workspace copy is gone (user-initiated cleanup, per ADR-044 + ADR-081).
 - DB rows with images can be large (MBs). Message storage grows with images independently of workspace quota. For v1 this is acceptable; if DB bloat becomes a real concern, a future optimization is to strip `image_url` blocks from compacted rows (keep text/path markers) — tracked as a future enhancement, not a v1 constraint.
@@ -1218,17 +1219,12 @@ No system-prompt rule is added. The wrap itself is the signal — the agent lear
 - The agent can still *use* information inside tool results; it just doesn't follow instructions embedded there. Same distinction as for channel messages.
 - Compaction, persistence, and LLM-call pass-through all work unchanged — the wrap is just part of the content string.
 
-### ADR-098 · REST `/api/sessions/{key}/messages` accepts only frontend session keys; reads are open
+### ADR-098 · Browser REST writes use session UUIDs and only web sessions are writable
 
 **Status:** accepted
-**Context:** Session keys follow `{channel}:{chat_id}` or an override (ADR-006). Internal synthesizers use overrides like `cron:{job_id}` and `heartbeat:{user_id}`. A user with valid auth could otherwise call `POST /api/sessions/cron:abc/messages` and inject a synthetic-looking message into a cron job's history, or `POST /api/sessions/discord:9999/messages` to forge a Discord-origin message. Codex-style audit flagged this as a session-key injection vector.
-**Decision:** Asymmetric per verb on the session-key path:
-
-- **Write** — `POST /api/sessions/{key}/messages`: **allow-list** the channel prefix. Only keys whose prefix is `web:` (the frontend's namespace) are accepted. Everything else (`cron:`, `heartbeat:`, `discord:`, `telegram:`, any future channel) is rejected with `400 Bad Request`. Default deny — no block-list to maintain. The frontend can only inject into its own `web:` sessions; Discord/Telegram/cron/heartbeat sessions get their messages exclusively from their own pipelines (channel adapters, scheduler, heartbeat phase-2 synthesizer).
-- **Read** — `GET /api/sessions/{key}/stream`, `GET /api/sessions/{key}/messages`, `GET /api/sessions/{key}`: any key whose `session.user_id` matches the authenticated user. The web UI can show Discord history, cron history, heartbeat history — read-only — without being able to write into those streams. Impersonation isn't possible through a read.
-- The user-ownership check (`session.user_id == jwt.user_id`) applies to both verbs unchanged.
-
-**Consequences:** Frontend retains a clean inbox into its own web-channel sessions. Internal session namespaces stay sealed against impersonation. The web UI can render any of the user's session histories (the multi-tab "show me what my agent said on Discord today" view) without exposing a forge primitive. No block-list bookkeeping — adding a new channel namespace later doesn't require remembering to deny-list it.
+**Context:** Session keys follow `{channel}:{chat_id}` or an override (ADR-006). Internal synthesizers use overrides like `cron:{job_id}` and `heartbeat:{user_id}`. A user with valid auth must not be able to forge messages into cron, heartbeat, Discord, or Telegram histories. Earlier drafts described browser writes as `/api/sessions/{key}/messages`, but the API uses UUID routes.
+**Decision:** Browser REST routes use the internal UUID path: `POST /api/sessions/{id}/messages`, `GET /api/sessions/{id}/stream`, `GET /api/sessions/{id}/messages`, and `GET/PATCH/DELETE /api/sessions/{id}`. On write, the server loads the session by UUID, verifies `session.user_id == jwt.user_id`, and requires `session.channel == "web"` and `session.session_key` to start with `web:`. Non-web sessions are read-only through browser REST. Browser-created sessions use `chat_id = id::text` and `session_key = web:{id}`. Users may rename `sessions.title`, but cannot set or rename `session_key`.
+**Consequences:** Frontend retains a clean inbox into its own web-channel sessions while internal namespaces stay sealed against impersonation. The web UI can render any of the user's session histories without exposing a forge primitive. UUID routes avoid leaking mutable or natural channel keys as the primary browser API identifier.
 
 ---
 
