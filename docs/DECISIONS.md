@@ -112,8 +112,8 @@ pub struct InboundMessage {
 **Status:** accepted
 **Decision:** `publish_inbound` maintains `DashMap<session_key, Arc<Mutex<()>>>` and `DashMap<session_key, mpsc::Sender<InboundMessage>>`. When a new InboundMessage arrives:
 - If a pending queue exists for this session, enqueue it and return (a prior message is still processing).
-- Otherwise, spawn a task that: acquires the session lock, creates the pending queue, ensures DB session row exists, runs the agent turn, drains the pending queue at the end by re-feeding into publish_inbound.
-**Consequences:** Per-session serial, cross-session concurrent. Mid-turn follow-ups from the same user naturally queue (no parallel agent tasks on the same session). No long-lived actor tasks — sessions are DB rows + transient lock entries. Race-free via `DashMap::entry().or_insert_with()`.
+- Otherwise, spawn a task that: acquires the session lock, creates the pending queue, ensures DB session row exists, and runs the agent turn. Safe-boundary pending drains are defined in ADR-034; any pending input left after the turn ends is re-fed into `publish_inbound`.
+**Consequences:** Per-session serial, cross-session concurrent. Mid-turn follow-ups from the same user naturally queue (no parallel agent tasks on the same session). The loop may observe the pending queue before starting the next external action, so a user can redirect the agent before an as-yet-undispatched tool runs (ADR-034). No long-lived actor tasks — sessions are DB rows + transient lock entries. Race-free via `DashMap::entry().or_insert_with()`.
 
 ### ADR-012 · Three external ingress sources + two internal synthesizers
 
@@ -214,9 +214,14 @@ enum Outbound {
 5. Call LLM (provider handles vision retry internally, ADR-026)
 6. Persist assistant response
 7. If no tool_use blocks → publish Final, exit
-8. Otherwise: for each tool_use, dispatch serially, persist each tool_result
-9. Drain pending queue (mid-turn user messages) if any
-10. Continue
+8. Otherwise: before each new tool dispatch, check cancellation and pending
+   inbound (ADR-034, ADR-035). If either exists, synthesize error
+   `tool_result` blocks for every unrun `tool_use` in the assistant message,
+   then persist the cancellation/user messages before the next LLM call.
+9. If no cancellation or pending inbound exists, dispatch the next tool
+   serially and persist its `tool_result`.
+10. Continue until the assistant message has no unrun `tool_use` blocks, then
+    drain any pending queue at the iteration boundary and continue.
 
 ### ADR-022 · `context::build_context` is a pure function
 
@@ -327,14 +332,27 @@ Otherwise the loop continues.
 ### ADR-034 · Mid-turn inbound queues; drains at iteration boundary
 
 **Status:** accepted
-**Decision:** When a new InboundMessage arrives for a session that is currently processing, `publish_inbound` enqueues into the session's pending queue (created at agent-loop spawn). At the iteration boundary (after tools are persisted, before next build_context), the agent loop drains the queue and persists each as a role="user" message. The next iteration's LLM call sees the new messages naturally.
-**Consequences:** Users can redirect mid-turn ("wait, do Y instead") without waiting for the current turn to finish. No special plumbing — just drain at boundary.
+**Decision:** When a new InboundMessage arrives for a session that is currently processing, `publish_inbound` enqueues into the session's pending queue (created at agent-loop spawn).
+
+The active turn never interrupts an in-flight LLM request or an in-flight tool call. It checks the pending queue only at safe boundaries:
+- after an LLM response has been persisted and before dispatching any newly requested tool;
+- after each tool result has been persisted and before dispatching the next tool;
+- after a terminal assistant response has been persisted.
+
+If pending user messages exist before the next tool dispatch, the loop does not start that tool. Instead, it preserves the OpenAI chat-completions pairing invariant by inserting a synthetic error `tool_result` for each unrun `tool_use` from the just-persisted assistant message. The synthetic content is a concise interruption note such as `[user interrupt: tool was not run because a newer user message arrived]`, with the matching `tool_use_id`. The loop then drains the pending queue and persists each queued item as a role="user" message. The next iteration's LLM call sees the assistant tool request, the paired interruption tool result, and the user's newer message in chronological order.
+
+If pending input arrives while a tool is already executing, the active tool is allowed to finish. Its real `tool_result` is persisted first; any remaining unrun tools from the same assistant message receive synthetic interruption `tool_result` rows before queued user messages are persisted.
+
+**Consequences:** Users can redirect mid-turn ("wait, do Y instead") without waiting for the entire tool plan to finish, while in-flight external work is not abruptly cancelled and LLM history never contains unpaired `tool_use` blocks during normal operation. ADR-014 remains the crash-recovery backstop for cases where the process dies before the synthetic pairing rows can be inserted.
 
 ### ADR-035 · User stop button: cancel flag + persisted user message
 
 **Status:** accepted
-**Decision:** Frontend offers a stop button. `POST /api/sessions/{id}/cancel` sets `session.cancel_requested: AtomicBool`. At the next iteration boundary, the agent loop observes the flag, INSERTs `"[User pressed stop]"` as `role=user` directly into `messages` (per ADR-032's persist-on-every-state-transition rule), and exits the loop. DB may end with unpaired tool_use from the interrupted turn; ADR-014 repair handles it on resume.
-**Consequences:** No separate cancel pipeline. The stop marker is a normal user-turn row. Next inbound for this session loads history from DB, sees the stop marker, and the agent picks up the interruption context cleanly — no in-memory state needed to "remember" that the user stopped.
+**Decision:** Frontend offers a stop button. `POST /api/sessions/{id}/cancel` sets `session.cancel_requested`. At the next safe boundary (ADR-034), the agent loop observes the flag, pairs any unrun `tool_use` blocks with synthetic interruption `tool_result` rows when needed, inserts `"[User pressed stop]"` as `role=user` directly into `messages` (per ADR-032's persist-on-every-state-transition rule), clears `session.cancel_requested`, and exits the loop.
+
+If cancellation arrives while an LLM request or tool call is already in flight, that external action is not force-killed by this ADR. The cancellation is observed before the next external action starts. If the process crashes before synthetic pairing rows can be written, ADR-014 repairs any remaining unpaired `tool_use` blocks on the next inbound message.
+
+**Consequences:** No separate cancel pipeline. The stop marker is a normal user-turn row. Next inbound for this session loads history from DB, sees the stop marker, and the agent picks up the interruption context cleanly — no in-memory state needed to "remember" that the user stopped. In normal non-crash cancellation, DB history remains valid for OpenAI chat completions because skipped tools are paired with synthetic error results.
 
 ### ADR-036 · Hard cap 200 iterations + trap-in-loop detection
 
