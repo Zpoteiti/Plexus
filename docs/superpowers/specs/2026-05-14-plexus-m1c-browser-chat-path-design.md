@@ -1,6 +1,6 @@
 # Plexus M1c Browser Chat Path Sub-Spec
 
-**Status:** Automated checks passed; awaiting live smoke
+**Status:** Verified
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1-M1c`
 **Base:** `rebuild-m1`
@@ -235,6 +235,11 @@ The route persists the user message, broadcasts it to active SSE subscribers,
 starts the M1c response worker if one is not already active for this session,
 and returns `202 Accepted`.
 
+The request body must include `reasoning_effort` with one of:
+`none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. This is a required
+per-turn browser choice rather than an admin default. The frontend may render
+`none` as "off", but the wire value remains `none`.
+
 ### 5.5 Message History
 
 ```text
@@ -449,11 +454,16 @@ Image messages use OpenAI-compatible image blocks:
 }
 ```
 
-Assistant responses are persisted as one text block containing
-`choices[0].message.content`. If a provider returns an unsupported assistant
-content shape, M1c treats it as a provider response error.
+Assistant responses are persisted as one text block containing the normalized
+visible answer. The provider layer also normalizes native
+`choices[0].message.reasoning_content` and leading `<think>...</think>` blocks
+into durable `messages.reasoning_content`. Assistant history is replayed with
+that stored reasoning value, or with `reasoning_content: ""` when no reasoning
+was stored for the assistant row.
 
-`stream` remains `false`.
+`stream` remains `false`. The provider request always includes both
+`reasoning_effort` and `chat_template_kwargs.enable_thinking`; the latter is
+`false` only when `reasoning_effort = "none"`.
 
 ---
 
@@ -630,15 +640,14 @@ Automated verification from 2026-05-14 on branch `rebuild-m1-M1c`:
 - `rtk conda run -n Plexus python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('docs/API.yaml').read_text()); print('API.yaml ok')"`
 - `git diff --check`
 
-Result: automated checks passed. M1c is not `Verified` until the user completes
-the manual live smoke below with a real OpenAI-compatible provider.
+Result: automated checks passed.
 
 ---
 
 ## 16. Manual Live Smoke
 
-M1c is not `Verified` until the user completes a manual live smoke with a real
-OpenAI-compatible provider.
+M1c live smoke passed on 2026-05-14 with a real OpenAI-compatible MiniMax
+provider.
 
 Expected smoke path:
 
@@ -656,14 +665,19 @@ Expected smoke path:
     image-strip fallback produces a safe response or diagnostic;
 11. confirm persisted history replays after reconnect.
 
-Before this smoke passes, status may be recorded as:
+Actual smoke evidence:
 
-```text
-Automated checks passed; awaiting live smoke
-```
-
-After the user confirms live smoke, update the M1 living design and this sub-spec
-with the verification date and evidence, then mark M1c `Verified`.
+- temporary Plexus server on an isolated PostgreSQL database;
+- admin registration and `GET /api/me` succeeded;
+- `PATCH /api/admin/config` validated the MiniMax endpoint/model through
+  Plexus provider validation;
+- `POST /api/sessions` created a `web:{id}` browser session;
+- `GET /api/sessions/{id}/stream?replay_limit=0` emitted `history_end`;
+- `POST /api/sessions/{id}/messages` returned `202`;
+- live SSE emitted the persisted user message and a real assistant message;
+- assistant `reasoning_content` was present;
+- `GET /api/sessions/{id}/messages` returned persisted user and assistant rows;
+- reconnect replay emitted both persisted rows before `history_end`.
 
 ---
 

@@ -1,8 +1,11 @@
 use crate::error::ApiError;
 use axum::http::StatusCode;
-use plexus_common::{ChatRole, ContentBlock, ErrorCode, LlmApiKey, contains_image, strip_images};
+use plexus_common::{
+    ChatRole, ContentBlock, ErrorCode, LlmApiKey, ReasoningEffort, contains_image, strip_images,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 
@@ -87,10 +90,12 @@ impl OpenAiClient {
                         .map(|message| ChatMessage {
                             role: message.role,
                             content: strip_images(&message.content),
+                            reasoning_content: message.reasoning_content,
                         })
                         .collect(),
                     max_tokens: request.max_tokens,
                     temperature: request.temperature,
+                    reasoning_effort: request.reasoning_effort,
                 };
                 self.chat_completion_attempts(cfg, stripped).await
             }
@@ -104,12 +109,17 @@ impl OpenAiClient {
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, ApiError> {
         let url = endpoint_url(&cfg.endpoint, "chat/completions")?;
+        let messages = provider_messages(&request.messages);
         let body = ChatRequestBody {
             model: &cfg.model,
-            messages: &request.messages,
+            messages,
             stream: false,
             max_tokens: request.max_tokens,
             temperature: request.temperature,
+            reasoning_effort: request.reasoning_effort,
+            chat_template_kwargs: ChatTemplateKwargs {
+                enable_thinking: request.reasoning_effort.enables_thinking(),
+            },
         };
 
         let mut last_error: Option<ApiError> = None;
@@ -159,13 +169,11 @@ impl OpenAiClient {
                 .into_iter()
                 .next()
                 .ok_or_else(|| provider_http_error("LLM chat response had no choices"))?;
-            let content = choice
-                .message
-                .content
-                .ok_or_else(|| provider_http_error("LLM chat response had no assistant content"))?;
+            let (content, reasoning_content) = normalize_response_message(choice.message)?;
 
             return Ok(ChatCompletionResponse {
                 content,
+                reasoning_content,
                 finish_reason: choice.finish_reason,
             });
         }
@@ -312,6 +320,7 @@ fn retry_delay(attempt: usize) -> Duration {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: Vec<ContentBlock>,
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -319,11 +328,13 @@ pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    pub reasoning_effort: ReasoningEffort,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChatCompletionResponse {
     pub content: String,
+    pub reasoning_content: Option<String>,
     pub finish_reason: Option<String>,
 }
 
@@ -340,12 +351,27 @@ struct ModelInfo {
 #[derive(Serialize)]
 struct ChatRequestBody<'a> {
     model: &'a str,
-    messages: &'a [ChatMessage],
+    messages: Vec<ProviderChatMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    reasoning_effort: ReasoningEffort,
+    chat_template_kwargs: ChatTemplateKwargs,
+}
+
+#[derive(Serialize)]
+struct ChatTemplateKwargs {
+    enable_thinking: bool,
+}
+
+#[derive(Serialize)]
+struct ProviderChatMessage {
+    role: ChatRole,
+    content: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -362,6 +388,83 @@ struct ChatChoice {
 #[derive(Deserialize)]
 struct ChatResponseMessage {
     content: Option<String>,
+    reasoning_content: Option<String>,
+}
+
+fn provider_messages(messages: &[ChatMessage]) -> Vec<ProviderChatMessage> {
+    messages
+        .iter()
+        .map(|message| {
+            let is_assistant = message.role == ChatRole::Assistant;
+            ProviderChatMessage {
+                role: message.role,
+                content: if is_assistant {
+                    Value::String(content_blocks_to_text(&message.content))
+                } else {
+                    serde_json::to_value(&message.content).expect("content blocks serialize")
+                },
+                reasoning_content: is_assistant
+                    .then(|| message.reasoning_content.clone().unwrap_or_default()),
+            }
+        })
+        .collect()
+}
+
+fn content_blocks_to_text(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => text.clone(),
+            other => serde_json::to_string(other).expect("content block serializes"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_response_message(
+    message: ChatResponseMessage,
+) -> Result<(String, Option<String>), ApiError> {
+    let content = message
+        .content
+        .ok_or_else(|| provider_http_error("LLM chat response had no assistant content"))?;
+    let (tag_reasoning, stripped_content) = extract_leading_think_block(&content);
+    let reasoning_content = non_empty(message.reasoning_content).or(tag_reasoning);
+    let content = if reasoning_content.is_some() {
+        stripped_content
+    } else {
+        content
+    };
+    Ok((content, reasoning_content))
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn extract_leading_think_block(content: &str) -> (Option<String>, String) {
+    let trimmed = content.trim_start();
+    let Some(after_open) = trimmed.strip_prefix("<think>") else {
+        return (None, content.to_string());
+    };
+    let Some(close_index) = after_open.find("</think>") else {
+        return (None, content.to_string());
+    };
+    let reasoning = after_open[..close_index].trim();
+    let rest = after_open[close_index + "</think>".len()..]
+        .trim_start()
+        .to_string();
+    if reasoning.is_empty() {
+        (None, rest)
+    } else {
+        (Some(reasoning.to_string()), rest)
+    }
 }
 
 fn invalid_provider_config(message: impl Into<String>) -> ApiError {

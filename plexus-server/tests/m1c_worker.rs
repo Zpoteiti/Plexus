@@ -93,7 +93,10 @@ async fn post_text(app: &TestApp, token: &str, session_id: Uuid, text: &str) {
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
-        json!({"content": [{"type": "text", "text": text}]}),
+        json!({
+            "content": [{"type": "text", "text": text}],
+            "reasoning_effort": "medium"
+        }),
         Some(token),
     )
     .await;
@@ -115,6 +118,30 @@ async fn wait_for_assistant(app: &TestApp, session_id: Uuid) -> Value {
         .unwrap()
         {
             return content;
+        }
+        assert!(Instant::now() < deadline, "assistant message timed out");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_assistant_with_reasoning(
+    app: &TestApp,
+    session_id: Uuid,
+) -> (Value, Option<String>) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some((content, reasoning_content)) = sqlx::query_as::<_, (Value, Option<String>)>(
+            "SELECT content, reasoning_content FROM messages
+             WHERE session_id = $1 AND role = 'assistant'
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(session_id)
+        .fetch_optional(&app.pool)
+        .await
+        .unwrap()
+        {
+            return (content, reasoning_content);
         }
         assert!(Instant::now() < deadline, "assistant message timed out");
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -201,6 +228,53 @@ async fn post_message_calls_fake_provider_and_persists_assistant() {
 }
 
 #[tokio::test]
+async fn native_reasoning_content_is_persisted_and_returned_in_history() {
+    let app = TestApp::spawn().await;
+    let token = register(app.router.clone(), "admin-reasoning@example.com", true).await;
+    let fake = FakeOpenAi::reasoning_content().await;
+    configure_llm(&app, &token, &fake).await;
+    let session_id = create_session(&app, &token).await;
+
+    post_text(&app, &token, session_id, "hello").await;
+
+    let (content, reasoning_content) = wait_for_assistant_with_reasoning(&app, session_id).await;
+    assert_eq!(first_text(&content), "visible answer");
+    assert_eq!(reasoning_content.as_deref(), Some("native reasoning"));
+
+    let (status, body) = json_request(
+        app.router.clone(),
+        Method::GET,
+        &format!("/api/sessions/{session_id}/messages"),
+        Value::Null,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let assistant = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .unwrap();
+    assert_eq!(assistant["reasoning_content"], "native reasoning");
+}
+
+#[tokio::test]
+async fn leading_think_block_is_extracted_before_persistence() {
+    let app = TestApp::spawn().await;
+    let token = register(app.router.clone(), "admin-think-tag@example.com", true).await;
+    let fake = FakeOpenAi::think_tagged_content().await;
+    configure_llm(&app, &token, &fake).await;
+    let session_id = create_session(&app, &token).await;
+
+    post_text(&app, &token, session_id, "hello").await;
+
+    let (content, reasoning_content) = wait_for_assistant_with_reasoning(&app, session_id).await;
+    assert_eq!(first_text(&content), "visible answer");
+    assert_eq!(reasoning_content.as_deref(), Some("tag reasoning"));
+}
+
+#[tokio::test]
 async fn missing_llm_config_persists_synthetic_assistant_message() {
     let app = TestApp::spawn().await;
     let token = register(app.router.clone(), "alice@example.com", false).await;
@@ -262,6 +336,7 @@ async fn image_compatibility_failure_retries_stripped_and_persists_assistant() {
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
         json!({
+            "reasoning_effort": "medium",
             "content": [
                 {"type": "text", "text": "what is this"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}

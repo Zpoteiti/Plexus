@@ -446,7 +446,17 @@ paths:
           application/json:
             schema:
               type: object
+              required: [reasoning_effort]
               properties:
+                reasoning_effort:
+                  $ref: '#/components/schemas/ReasoningEffort'
+                  description: |
+                    Required per-turn reasoning setting selected by the
+                    frontend. Plexus forwards this value as
+                    `reasoning_effort` and also sends
+                    `chat_template_kwargs.enable_thinking`, set to `false`
+                    only when the value is `none`; provider incompatibility
+                    is surfaced as a persisted synthetic assistant error.
                 content:
                   description: OpenAI chat-completions content blocks (text + image_url). Strings are accepted as shorthand for a single text block. Omitted content or an empty string/array is a valid empty user message. M1c accepts only inline base64 `data:image/...;base64,...` image URLs; external image URLs and multipart uploads are deferred to M1d.
                   oneOf:
@@ -465,7 +475,9 @@ paths:
         '400':
           description: |
             Session is not browser-writable, JSON/content shape is invalid, or
-            an image URL is not an inline base64 data URL.
+            an image URL is not an inline base64 data URL. `reasoning_effort`
+            is required and must be one of `none`, `minimal`, `low`, `medium`,
+            `high`, or `xhigh`.
 
   /api/sessions/{id}/stream:
     description: Target M1 chat SSE stream route; M1c browser chat slice.
@@ -1689,7 +1701,21 @@ components:
         content:
           type: array
           items: { $ref: '#/components/schemas/ContentBlock' }
+        reasoning_content:
+          type: string
+          nullable: true
+          description: |
+            Assistant reasoning text normalized from provider-native
+            `reasoning_content` or a leading `<think>...</think>` block. Null
+            for user/tool messages or assistant messages without reasoning.
         created_at: { type: string, format: date-time }
+
+    ReasoningEffort:
+      type: string
+      enum: [none, minimal, low, medium, high, xhigh]
+      description: |
+        Required browser-selected per-turn reasoning setting. Frontend labels
+        may render `none` as "off"; the wire value remains `none`.
 
     ContentBlock:
       description: OpenAI chat-completions content block. See ADR-059, ADR-101.

@@ -58,6 +58,15 @@ async fn respond_once(
         .map_err(crate::error::ApiError::from_sqlx)?
         .ok_or_else(|| crate::error::ApiError::invalid_args("session user disappeared"))?;
     let cfg = system_config::current_llm_config(state.pool()).await?;
+    let reasoning_effort = state
+        .chat()
+        .reasoning_effort(session_id)
+        .await
+        .ok_or_else(|| {
+            crate::error::ApiError::invalid_args(
+                "reasoning_effort is required for pending chat turn",
+            )
+        })?;
     let system_prompt =
         prompt::build_system_prompt(&state.config().workspace_root, &user, &session).await?;
     let history = messages::history_chronological(state.pool(), session_id)
@@ -67,6 +76,7 @@ async fn respond_once(
     let mut chat_messages = vec![ChatMessage {
         role: ChatRole::System,
         content: vec![ContentBlock::text(system_prompt)],
+        reasoning_content: None,
     }];
     for row in history {
         let role = match row.role.as_str() {
@@ -77,7 +87,11 @@ async fn respond_once(
         let content = serde_json::from_value(row.content).map_err(|_| {
             crate::error::ApiError::invalid_args("stored message content was malformed")
         })?;
-        chat_messages.push(ChatMessage { role, content });
+        chat_messages.push(ChatMessage {
+            role,
+            content,
+            reasoning_content: row.reasoning_content,
+        });
     }
 
     let response = state
@@ -88,19 +102,21 @@ async fn respond_once(
                 messages: chat_messages,
                 max_tokens: None,
                 temperature: None,
+                reasoning_effort,
             },
         )
         .await;
 
-    let assistant_text = match response {
-        Ok(response) => response.content,
-        Err(err) => synthetic_error_text(&err.message),
+    let (assistant_text, reasoning_content) = match response {
+        Ok(response) => (response.content, response.reasoning_content),
+        Err(err) => (synthetic_error_text(&err.message), None),
     };
-    let message = messages::insert_message(
+    let message = messages::insert_message_with_reasoning(
         state.pool(),
         session_id,
         "assistant",
         vec![ContentBlock::text(assistant_text)],
+        reasoning_content,
     )
     .await
     .map_err(crate::error::ApiError::from_sqlx)?;

@@ -11,6 +11,7 @@ pub struct Message {
     pub session_id: Uuid,
     pub role: String,
     pub content: Value,
+    pub reasoning_content: Option<String>,
     pub is_compaction_summary: bool,
     pub created_at: OffsetDateTime,
 }
@@ -27,17 +28,28 @@ pub async fn insert_message(
     role: &str,
     content: Vec<ContentBlock>,
 ) -> Result<Message, sqlx::Error> {
+    insert_message_with_reasoning(pool, session_id, role, content, None).await
+}
+
+pub async fn insert_message_with_reasoning(
+    pool: &PgPool,
+    session_id: Uuid,
+    role: &str,
+    content: Vec<ContentBlock>,
+    reasoning_content: Option<String>,
+) -> Result<Message, sqlx::Error> {
     let content = serde_json::to_value(content).expect("content blocks serialize");
     sqlx::query_as::<_, Message>(
         r#"
-        INSERT INTO messages (session_id, role, content)
-        VALUES ($1, $2, $3)
-        RETURNING id, session_id, role, content, is_compaction_summary, created_at
+        INSERT INTO messages (session_id, role, content, reasoning_content)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, session_id, role, content, reasoning_content, is_compaction_summary, created_at
         "#,
     )
     .bind(session_id)
     .bind(role)
     .bind(content)
+    .bind(reasoning_content)
     .fetch_one(pool)
     .await
 }
@@ -51,7 +63,7 @@ pub async fn list_before(
     if let Some(before) = before {
         sqlx::query_as::<_, Message>(
             r#"
-            SELECT m.id, m.session_id, m.role, m.content, m.is_compaction_summary, m.created_at
+            SELECT m.id, m.session_id, m.role, m.content, m.reasoning_content, m.is_compaction_summary, m.created_at
             FROM messages m
             JOIN messages anchor ON anchor.id = $2 AND anchor.session_id = $1
             WHERE m.session_id = $1 AND m.created_at < anchor.created_at
@@ -67,7 +79,7 @@ pub async fn list_before(
     } else {
         sqlx::query_as::<_, Message>(
             r#"
-            SELECT id, session_id, role, content, is_compaction_summary, created_at
+            SELECT id, session_id, role, content, reasoning_content, is_compaction_summary, created_at
             FROM messages
             WHERE session_id = $1
             ORDER BY created_at DESC
@@ -88,7 +100,7 @@ pub async fn replay_recent(
 ) -> Result<Vec<Message>, sqlx::Error> {
     let mut rows = sqlx::query_as::<_, Message>(
         r#"
-        SELECT id, session_id, role, content, is_compaction_summary, created_at
+        SELECT id, session_id, role, content, reasoning_content, is_compaction_summary, created_at
         FROM messages
         WHERE session_id = $1
         ORDER BY created_at DESC
@@ -110,7 +122,7 @@ pub async fn replay_after(
 ) -> Result<Vec<Message>, sqlx::Error> {
     sqlx::query_as::<_, Message>(
         r#"
-        SELECT m.id, m.session_id, m.role, m.content, m.is_compaction_summary, m.created_at
+        SELECT m.id, m.session_id, m.role, m.content, m.reasoning_content, m.is_compaction_summary, m.created_at
         FROM messages m
         JOIN messages anchor ON anchor.id = $2 AND anchor.session_id = $1
         WHERE m.session_id = $1 AND m.created_at > anchor.created_at
@@ -147,7 +159,7 @@ pub async fn history_chronological(
 ) -> Result<Vec<Message>, sqlx::Error> {
     sqlx::query_as::<_, Message>(
         r#"
-        SELECT id, session_id, role, content, is_compaction_summary, created_at
+        SELECT id, session_id, role, content, reasoning_content, is_compaction_summary, created_at
         FROM messages
         WHERE session_id = $1
         ORDER BY created_at ASC

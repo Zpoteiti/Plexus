@@ -95,7 +95,10 @@ async fn post_text_message_persists_runtime_and_content_blocks() {
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
-        json!({"content": [{"type": "text", "text": "hello"}]}),
+        json!({
+            "content": [{"type": "text", "text": "hello"}],
+            "reasoning_effort": "medium"
+        }),
         Some(&token),
     )
     .await;
@@ -116,7 +119,11 @@ async fn post_text_message_persists_runtime_and_content_blocks() {
 async fn post_empty_forms_are_accepted() {
     let app = TestApp::spawn().await;
     let (token, session_id) = register_and_create_session(&app).await;
-    for body in [json!({}), json!({"content": ""}), json!({"content": []})] {
+    for body in [
+        json!({"reasoning_effort": "none"}),
+        json!({"content": "", "reasoning_effort": "minimal"}),
+        json!({"content": [], "reasoning_effort": "xhigh"}),
+    ] {
         let (status, _) = json_request(
             app.router.clone(),
             Method::POST,
@@ -138,7 +145,10 @@ async fn inline_base64_image_is_accepted_but_external_url_is_rejected() {
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
-        json!({"content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}]}),
+        json!({
+            "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}],
+            "reasoning_effort": "medium"
+        }),
         Some(&token),
     )
     .await;
@@ -148,7 +158,10 @@ async fn inline_base64_image_is_accepted_but_external_url_is_rejected() {
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
-        json!({"content": [{"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}]}),
+        json!({
+            "content": [{"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}],
+            "reasoning_effort": "medium"
+        }),
         Some(&token),
     )
     .await;

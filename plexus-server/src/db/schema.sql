@@ -58,9 +58,13 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id               UUID         NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     role                     TEXT         NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
     content                  JSONB        NOT NULL,
+    reasoning_content        TEXT,
     is_compaction_summary    BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at               TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS reasoning_content TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_created
     ON messages(session_id, created_at);

@@ -5,7 +5,7 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use plexus_common::{AdminToken, ChatRole, ContentBlock, JwtSecret, LlmApiKey};
+use plexus_common::{AdminToken, ChatRole, ContentBlock, JwtSecret, LlmApiKey, ReasoningEffort};
 use plexus_server::{
     app::{self as server_app, AppState},
     config::ServerConfig,
@@ -77,9 +77,11 @@ fn chat_request() -> ChatCompletionRequest {
         messages: vec![ChatMessage {
             role: ChatRole::User,
             content: vec![ContentBlock::text("ping")],
+            reasoning_content: None,
         }],
         max_tokens: None,
         temperature: None,
+        reasoning_effort: ReasoningEffort::Medium,
     }
 }
 

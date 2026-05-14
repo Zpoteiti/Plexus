@@ -32,9 +32,9 @@ before moving on.
 
 | Field | Value |
 |---|---|
-| Overall M1 state | M1b verified; M1c automated checks passed; awaiting live smoke |
-| Current focus | Manual live smoke for `M1c` browser chat path |
-| Next implementation slice | `M1d` planning after M1c live smoke |
+| Overall M1 state | M1b verified; M1c verified |
+| Current focus | `M1d` planning |
+| Next implementation slice | `M1d` |
 | Frontend scope | Out of M1; frontend remains M3 |
 | Client scope | Standalone client remains M2, but M1 includes server-side device WebSocket support |
 | Discord/Telegram | Required for M1; live tokens supplied by the user for smoke testing when ready |
@@ -188,7 +188,7 @@ because the chat path needs a provider contract.
 |---|---|---|---|---|
 | `M1a` | Verified | Server crate, startup, DB bootstrap, canonical schema application, real auth, basic REST/admin persistence, test harness | M0 | Verified by `cargo test -p plexus-server`, `cargo test --workspace`, `cargo fmt --all -- --check`, and `cargo check --workspace` |
 | `M1b` | Verified | OpenAI-compatible LLM foundation, admin config validation, external FastAPI mock service, hermetic fake-provider test strategy, concurrency semaphore | `M1a` | Verified on 2026-05-13 from branch `rebuild-m1-M1b`: invalid provider config is rejected before DB write, valid fake provider completes non-streaming external call mechanics, sibling mock tests pass |
-| `M1c` | Automated checks passed; awaiting live smoke | Browser chat path: UUID-addressed web sessions, editable titles, REST message ingress, session storage, SSE history replay/live stream, minimal SOUL/MEMORY prompt, inline content-block images, fake LLM-backed response loop, and required manual live smoke | `M1a`, `M1b` | Automated fake-provider tests pass; user must still confirm real-provider live smoke |
+| `M1c` | Verified | Browser chat path: UUID-addressed web sessions, editable titles, REST message ingress, session storage, SSE history replay/live stream, minimal SOUL/MEMORY prompt, inline content-block images, fake LLM-backed response loop, and required manual live smoke | `M1a`, `M1b` | Verified on 2026-05-14: automated checks passed and a real MiniMax provider smoke validated admin LLM config, SSE user/assistant flow, persisted history, and replay |
 | `M1d` | Planned | Server workspace/file REST APIs, server-side workspace FS, quota reporting, server-side shared file tools | `M1a` | REST and tool tests create/read/edit/list server workspace files and report quota |
 | `M1e` | Planned | Device token lifecycle, device naming rules, device WebSocket handshake/control frames | `M1a` | Device can be registered, connect over WS, and appear reachable |
 | `M1f` | Planned | Device-routed file and tool execution over WS, offline handling, transfer plumbing | `M1d`, `M1e` | REST/tool call reaches connected test device; offline target returns `device_unreachable` |
@@ -292,4 +292,9 @@ M1c automated verification evidence from 2026-05-14 on branch
 - `rtk conda run -n Plexus python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('docs/API.yaml').read_text()); print('API.yaml ok')"`
 - `git diff --check`
 
-M1c remains pending manual live smoke with a real OpenAI-compatible provider.
+M1c live-smoke verification from 2026-05-14 used a temporary Plexus server,
+isolated PostgreSQL database, and MiniMax OpenAI-compatible provider. The smoke
+validated admin `PATCH /api/admin/config` provider validation, browser session
+creation, `GET /api/sessions/{id}/stream` history cut-over, text message POST,
+live SSE user and assistant messages, persisted history containing both rows,
+SSE replay of persisted rows, and persisted assistant `reasoning_content`.

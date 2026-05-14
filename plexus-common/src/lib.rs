@@ -47,8 +47,8 @@ pub use mcp::session::McpSession;
 pub use protocol::{
     ChatRole, ConfigUpdateFrame, ContentBlock, DeviceConfig, ErrorFrame, FsPolicy, HEADER_SIZE,
     HelloAckFrame, HelloCaps, HelloFrame, ImageUrlBlock, McpSchemas, McpServerConfig, PingFrame,
-    PongFrame, PromptArgument, PromptDef, RegisterMcpFrame, ResourceDef, SpawnFailure,
-    ToolCallFrame, ToolDef, ToolResultFrame, TransferBeginFrame, TransferDirection,
+    PongFrame, PromptArgument, PromptDef, ReasoningEffort, RegisterMcpFrame, ResourceDef,
+    SpawnFailure, ToolCallFrame, ToolDef, ToolResultFrame, TransferBeginFrame, TransferDirection,
     TransferEndFrame, TransferProgressFrame, WsFrame, contains_image, pack_chunk, parse_chunk,
     strip_images,
 };

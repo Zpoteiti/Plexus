@@ -70,7 +70,10 @@ async fn register_create_and_post(app: &TestApp, text: &str) -> (String, String)
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
-        json!({"content": [{"type": "text", "text": text}]}),
+        json!({
+            "content": [{"type": "text", "text": text}],
+            "reasoning_effort": "medium"
+        }),
         Some(&token),
     )
     .await;
@@ -134,7 +137,10 @@ async fn post_text(app: &TestApp, token: &str, session_id: Uuid, text: &str) -> 
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
-        json!({"content": [{"type": "text", "text": text}]}),
+        json!({
+            "content": [{"type": "text", "text": text}],
+            "reasoning_effort": "medium"
+        }),
         Some(token),
     )
     .await;
@@ -229,7 +235,10 @@ async fn sse_emits_live_message_after_history_end() {
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
-        json!({"content": [{"type": "text", "text": "live hello"}]}),
+        json!({
+            "content": [{"type": "text", "text": "live hello"}],
+            "reasoning_effort": "medium"
+        }),
         Some(&token),
     )
     .await;

@@ -192,3 +192,72 @@ async fn session_ownership_returns_404_for_other_users() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn post_message_requires_reasoning_effort() {
+    let app = TestApp::spawn().await;
+    let token = register(app.router.clone(), "alice@example.com").await;
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        "/api/sessions",
+        json!({}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = body["id"].as_str().unwrap();
+
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        &format!("/api/sessions/{id}/messages"),
+        json!({"content": [{"type": "text", "text": "hello"}]}),
+        Some(&token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("reasoning_effort is required")
+    );
+}
+
+#[tokio::test]
+async fn post_message_rejects_invalid_reasoning_effort() {
+    let app = TestApp::spawn().await;
+    let token = register(app.router.clone(), "alice2@example.com").await;
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        "/api/sessions",
+        json!({}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = body["id"].as_str().unwrap();
+
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        &format!("/api/sessions/{id}/messages"),
+        json!({
+            "content": [{"type": "text", "text": "hello"}],
+            "reasoning_effort": "off"
+        }),
+        Some(&token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("reasoning_effort must be one of")
+    );
+}

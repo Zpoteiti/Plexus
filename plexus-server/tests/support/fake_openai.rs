@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::{
     net::SocketAddr,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -28,6 +28,7 @@ struct FakeState {
     chat_calls: Arc<AtomicUsize>,
     in_flight: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
+    last_chat_body: Arc<Mutex<Option<Value>>>,
 }
 
 #[derive(Clone)]
@@ -41,6 +42,8 @@ enum FakeMode {
     MalformedModels,
     ImageUnsupportedThenValid,
     AlwaysUnavailable,
+    ReasoningContent,
+    ThinkTaggedContent,
 }
 
 #[allow(
@@ -52,6 +55,7 @@ pub struct FakeOpenAi {
     handle: JoinHandle<()>,
     chat_calls: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
+    last_chat_body: Arc<Mutex<Option<Value>>>,
 }
 
 #[allow(
@@ -83,6 +87,14 @@ impl FakeOpenAi {
         Self::spawn(FakeMode::AlwaysUnavailable, Duration::ZERO).await
     }
 
+    pub async fn reasoning_content() -> Self {
+        Self::spawn(FakeMode::ReasoningContent, Duration::ZERO).await
+    }
+
+    pub async fn think_tagged_content() -> Self {
+        Self::spawn(FakeMode::ThinkTaggedContent, Duration::ZERO).await
+    }
+
     pub fn model(&self) -> &'static str {
         "plexus-fake-qa"
     }
@@ -99,10 +111,19 @@ impl FakeOpenAi {
         self.chat_calls.load(Ordering::SeqCst)
     }
 
+    pub fn last_chat_body(&self) -> Value {
+        self.last_chat_body
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("fake provider received chat request")
+    }
+
     async fn spawn(mode: FakeMode, delay: Duration) -> Self {
         let chat_calls = Arc::new(AtomicUsize::new(0));
         let in_flight = Arc::new(AtomicUsize::new(0));
         let max_in_flight = Arc::new(AtomicUsize::new(0));
+        let last_chat_body = Arc::new(Mutex::new(None));
         let state = FakeState {
             model: "plexus-fake-qa".to_string(),
             api_key: "plexus-mock-key".to_string(),
@@ -111,6 +132,7 @@ impl FakeOpenAi {
             chat_calls: chat_calls.clone(),
             in_flight,
             max_in_flight: max_in_flight.clone(),
+            last_chat_body: last_chat_body.clone(),
         };
 
         let router = Router::new()
@@ -129,6 +151,7 @@ impl FakeOpenAi {
             handle,
             chat_calls,
             max_in_flight,
+            last_chat_body,
         }
     }
 }
@@ -178,7 +201,10 @@ async fn models(State(state): State<FakeState>, headers: HeaderMap) -> (StatusCo
             })),
         ),
         FakeMode::MalformedModels => (StatusCode::OK, Json(json!({"data": "bad"}))),
-        FakeMode::ImageUnsupportedThenValid | FakeMode::AlwaysUnavailable => (
+        FakeMode::ImageUnsupportedThenValid
+        | FakeMode::AlwaysUnavailable
+        | FakeMode::ReasoningContent
+        | FakeMode::ThinkTaggedContent => (
             StatusCode::OK,
             Json(json!({
                 "object": "list",
@@ -198,6 +224,7 @@ async fn chat(
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
     state.chat_calls.fetch_add(1, Ordering::SeqCst);
+    *state.last_chat_body.lock().unwrap() = Some(body.clone());
 
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(error("invalid_api_key")));
@@ -256,6 +283,19 @@ async fn chat(
         "I do not have a fixture for that."
     };
 
+    let message = match state.mode {
+        FakeMode::ReasoningContent => json!({
+            "role": "assistant",
+            "content": "visible answer",
+            "reasoning_content": "native reasoning"
+        }),
+        FakeMode::ThinkTaggedContent => json!({
+            "role": "assistant",
+            "content": "<think>tag reasoning</think>\n\nvisible answer"
+        }),
+        _ => json!({"role": "assistant", "content": content}),
+    };
+
     (
         StatusCode::OK,
         Json(json!({
@@ -263,7 +303,7 @@ async fn chat(
             "object": "chat.completion",
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": message,
                 "finish_reason": "stop"
             }]
         })),

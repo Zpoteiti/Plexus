@@ -13,7 +13,7 @@ use axum::{
         sse::{KeepAlive, Sse},
     },
 };
-use plexus_common::ErrorCode;
+use plexus_common::{ErrorCode, ReasoningEffort};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -135,12 +135,17 @@ pub async fn post_message(
         ));
     }
 
+    let reasoning_effort = required_reasoning_effort(&body)?;
     let mut content = vec![runtime_block(&session)];
     content.extend(normalize_user_content(body.get("content").cloned())?);
 
     let message = messages::insert_message(state.pool(), session.id, "user", content)
         .await
         .map_err(ApiError::from_sqlx)?;
+    state
+        .chat()
+        .set_reasoning_effort(session.id, reasoning_effort)
+        .await;
     sessions::touch_last_inbound(state.pool(), session.id)
         .await
         .map_err(ApiError::from_sqlx)?;
@@ -216,6 +221,19 @@ fn not_found() -> ApiError {
         ErrorCode::NotFound,
         "session not found",
     )
+}
+
+fn required_reasoning_effort(body: &Map<String, Value>) -> Result<ReasoningEffort, ApiError> {
+    let value = body
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::invalid_args("reasoning_effort is required"))?;
+    value.parse::<ReasoningEffort>().map_err(|_| {
+        ApiError::invalid_args(format!(
+            "reasoning_effort must be one of: {}",
+            ReasoningEffort::ALLOWED_VALUES
+        ))
+    })
 }
 
 fn runtime_block(session: &sessions::Session) -> ContentBlock {

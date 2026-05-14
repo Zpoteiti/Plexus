@@ -2,7 +2,7 @@
 mod fake_openai;
 
 use fake_openai::FakeOpenAi;
-use plexus_common::{ChatRole, ContentBlock, ImageUrlBlock, LlmApiKey};
+use plexus_common::{ChatRole, ContentBlock, ImageUrlBlock, LlmApiKey, ReasoningEffort};
 use plexus_server::openai::{
     ChatCompletionRequest, ChatMessage, OpenAiClient, OpenAiConfig, OpenAiRuntime,
 };
@@ -20,6 +20,7 @@ fn user_message(text: &str) -> ChatMessage {
     ChatMessage {
         role: ChatRole::User,
         content: vec![ContentBlock::text(text)],
+        reasoning_content: None,
     }
 }
 
@@ -74,13 +75,150 @@ async fn chat_completion_sends_non_streaming_request_and_returns_content() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
+                reasoning_effort: ReasoningEffort::None,
             },
         )
         .await
         .expect("chat response");
 
     assert_eq!(response.content, "hi");
+    assert_eq!(response.reasoning_content, None);
     assert_eq!(response.finish_reason.as_deref(), Some("stop"));
+}
+
+#[tokio::test]
+async fn chat_completion_sends_reasoning_controls_for_none() {
+    let fake = FakeOpenAi::valid().await;
+    OpenAiClient::new()
+        .chat_completion(
+            &config(&fake),
+            ChatCompletionRequest {
+                messages: vec![user_message("hello")],
+                max_tokens: None,
+                temperature: None,
+                reasoning_effort: ReasoningEffort::None,
+            },
+        )
+        .await
+        .expect("chat response");
+
+    let body = fake.last_chat_body();
+    assert_eq!(body["reasoning_effort"], "none");
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+}
+
+#[tokio::test]
+async fn chat_completion_sends_reasoning_controls_for_high() {
+    let fake = FakeOpenAi::valid().await;
+    OpenAiClient::new()
+        .chat_completion(
+            &config(&fake),
+            ChatCompletionRequest {
+                messages: vec![user_message("hello")],
+                max_tokens: None,
+                temperature: None,
+                reasoning_effort: ReasoningEffort::High,
+            },
+        )
+        .await
+        .expect("chat response");
+
+    let body = fake.last_chat_body();
+    assert_eq!(body["reasoning_effort"], "high");
+    assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+}
+
+#[tokio::test]
+async fn assistant_history_sends_empty_reasoning_content() {
+    let fake = FakeOpenAi::valid().await;
+    OpenAiClient::new()
+        .chat_completion(
+            &config(&fake),
+            ChatCompletionRequest {
+                messages: vec![ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: vec![ContentBlock::text("previous answer")],
+                    reasoning_content: None,
+                }],
+                max_tokens: None,
+                temperature: None,
+                reasoning_effort: ReasoningEffort::Medium,
+            },
+        )
+        .await
+        .expect("chat response");
+
+    let body = fake.last_chat_body();
+    assert_eq!(body["messages"][0]["content"], "previous answer");
+    assert_eq!(body["messages"][0]["reasoning_content"], "");
+}
+
+#[tokio::test]
+async fn assistant_history_sends_stored_reasoning_content() {
+    let fake = FakeOpenAi::valid().await;
+    OpenAiClient::new()
+        .chat_completion(
+            &config(&fake),
+            ChatCompletionRequest {
+                messages: vec![ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: vec![ContentBlock::text("previous answer")],
+                    reasoning_content: Some("stored reasoning".to_string()),
+                }],
+                max_tokens: None,
+                temperature: None,
+                reasoning_effort: ReasoningEffort::Medium,
+            },
+        )
+        .await
+        .expect("chat response");
+
+    let body = fake.last_chat_body();
+    assert_eq!(body["messages"][0]["content"], "previous answer");
+    assert_eq!(body["messages"][0]["reasoning_content"], "stored reasoning");
+}
+
+#[tokio::test]
+async fn chat_completion_normalizes_native_reasoning_content() {
+    let fake = FakeOpenAi::reasoning_content().await;
+    let response = OpenAiClient::new()
+        .chat_completion(
+            &config(&fake),
+            ChatCompletionRequest {
+                messages: vec![user_message("hello")],
+                max_tokens: None,
+                temperature: None,
+                reasoning_effort: ReasoningEffort::Medium,
+            },
+        )
+        .await
+        .expect("chat response");
+
+    assert_eq!(response.content, "visible answer");
+    assert_eq!(
+        response.reasoning_content.as_deref(),
+        Some("native reasoning")
+    );
+}
+
+#[tokio::test]
+async fn chat_completion_extracts_leading_think_block() {
+    let fake = FakeOpenAi::think_tagged_content().await;
+    let response = OpenAiClient::new()
+        .chat_completion(
+            &config(&fake),
+            ChatCompletionRequest {
+                messages: vec![user_message("hello")],
+                max_tokens: None,
+                temperature: None,
+                reasoning_effort: ReasoningEffort::Medium,
+            },
+        )
+        .await
+        .expect("chat response");
+
+    assert_eq!(response.content, "visible answer");
+    assert_eq!(response.reasoning_content.as_deref(), Some("tag reasoning"));
 }
 
 #[tokio::test]
@@ -99,6 +237,7 @@ async fn chat_completion_does_not_retry_non_transient_request_errors() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
+                reasoning_effort: ReasoningEffort::Medium,
             },
         ),
     )
@@ -121,6 +260,7 @@ async fn chat_completion_accepts_endpoint_with_trailing_slash() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
+                reasoning_effort: ReasoningEffort::Medium,
             },
         )
         .await
@@ -138,6 +278,7 @@ async fn runtime_concurrency_limit_caps_in_flight_chat_requests() {
         messages: vec![user_message("ping")],
         max_tokens: None,
         temperature: None,
+        reasoning_effort: ReasoningEffort::Medium,
     };
 
     let started = Instant::now();
@@ -162,6 +303,7 @@ async fn chat_completion_sends_content_arrays() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
+                reasoning_effort: ReasoningEffort::Medium,
             },
         )
         .await
@@ -186,9 +328,11 @@ async fn image_payload_error_retries_with_images_stripped() {
                             },
                         },
                     ],
+                    reasoning_content: None,
                 }],
                 max_tokens: None,
                 temperature: None,
+                reasoning_effort: ReasoningEffort::Medium,
             },
         )
         .await
@@ -209,6 +353,7 @@ async fn auth_error_does_not_retry_or_strip_images() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
+                reasoning_effort: ReasoningEffort::Medium,
             },
         )
         .await

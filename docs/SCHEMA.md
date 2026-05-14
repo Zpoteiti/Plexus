@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id               UUID         NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     role                     TEXT         NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
     content                  JSONB        NOT NULL,
+    reasoning_content        TEXT,
     is_compaction_summary    BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at               TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
@@ -167,6 +168,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_created
 ```
 
 - `content` — JSONB array of OpenAI chat-completions content blocks (ADR-059, ADR-101). Block shapes mirror what the LLM will receive — request body is a pass-through with no translation. **Images** are stored as `image_url` blocks with base64 data URLs inline. Target v1 also writes image bytes on disk under server `.attachments/` (ADR-044); M1c browser inline-image messages may temporarily skip that `.attachments/` copy until M1d. **Non-image files** (PDFs, CSVs, audio, ...) live ONLY on disk under `.attachments/`; the DB carries just the path-text marker block (ADR-027) since OpenAI chat completions has no `file_url` block type.
+- `reasoning_content` — nullable assistant reasoning text normalized from provider-native `message.reasoning_content` or a leading `<think>...</think>` block in `message.content`. The visible assistant answer stays in `content`; provider replay sends assistant `reasoning_content` as an empty string when this column is null.
 - `role` — strictly `user`, `assistant`, or `tool` (ADR-089). No synthetic roles. Compaction summaries use `role='assistant'` plus `is_compaction_summary=true`.
 - The `idx_messages_session_created` index powers the SSE replay and the `GET /api/sessions/{id}/messages` cursor scan.
 - Runtime block (ADR-094) is prepended into the user-row's `content` JSONB at ingress time; not a separate column.
