@@ -11,6 +11,6 @@ pub use frames::{
 };
 pub use transfer::{HEADER_SIZE, pack_chunk, parse_chunk};
 pub use types::{
-    DeviceConfig, FsPolicy, McpSchemas, McpServerConfig, PromptArgument, PromptDef, ResourceDef,
-    ToolDef,
+    ChatRole, ContentBlock, DeviceConfig, FsPolicy, ImageUrlBlock, McpSchemas, McpServerConfig,
+    PromptArgument, PromptDef, ResourceDef, ToolDef, contains_image, strip_images,
 };

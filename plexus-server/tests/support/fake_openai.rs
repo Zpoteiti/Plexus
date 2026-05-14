@@ -25,6 +25,7 @@ struct FakeState {
     api_key: String,
     mode: FakeMode,
     delay: Duration,
+    chat_calls: Arc<AtomicUsize>,
     in_flight: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
 }
@@ -38,6 +39,8 @@ enum FakeMode {
     Valid,
     MissingModel,
     MalformedModels,
+    ImageUnsupportedThenValid,
+    AlwaysUnavailable,
 }
 
 #[allow(
@@ -47,6 +50,7 @@ enum FakeMode {
 pub struct FakeOpenAi {
     pub base_url: String,
     handle: JoinHandle<()>,
+    chat_calls: Arc<AtomicUsize>,
     max_in_flight: Arc<AtomicUsize>,
 }
 
@@ -71,6 +75,14 @@ impl FakeOpenAi {
         Self::spawn(FakeMode::Valid, delay).await
     }
 
+    pub async fn image_unsupported_then_valid() -> Self {
+        Self::spawn(FakeMode::ImageUnsupportedThenValid, Duration::ZERO).await
+    }
+
+    pub async fn always_unavailable() -> Self {
+        Self::spawn(FakeMode::AlwaysUnavailable, Duration::ZERO).await
+    }
+
     pub fn model(&self) -> &'static str {
         "plexus-fake-qa"
     }
@@ -83,7 +95,12 @@ impl FakeOpenAi {
         self.max_in_flight.load(Ordering::SeqCst)
     }
 
+    pub fn chat_call_count(&self) -> usize {
+        self.chat_calls.load(Ordering::SeqCst)
+    }
+
     async fn spawn(mode: FakeMode, delay: Duration) -> Self {
+        let chat_calls = Arc::new(AtomicUsize::new(0));
         let in_flight = Arc::new(AtomicUsize::new(0));
         let max_in_flight = Arc::new(AtomicUsize::new(0));
         let state = FakeState {
@@ -91,6 +108,7 @@ impl FakeOpenAi {
             api_key: "plexus-mock-key".to_string(),
             mode,
             delay,
+            chat_calls: chat_calls.clone(),
             in_flight,
             max_in_flight: max_in_flight.clone(),
         };
@@ -109,6 +127,7 @@ impl FakeOpenAi {
         Self {
             base_url: format!("http://{addr}/v1"),
             handle,
+            chat_calls,
             max_in_flight,
         }
     }
@@ -159,6 +178,13 @@ async fn models(State(state): State<FakeState>, headers: HeaderMap) -> (StatusCo
             })),
         ),
         FakeMode::MalformedModels => (StatusCode::OK, Json(json!({"data": "bad"}))),
+        FakeMode::ImageUnsupportedThenValid | FakeMode::AlwaysUnavailable => (
+            StatusCode::OK,
+            Json(json!({
+                "object": "list",
+                "data": [{"id": state.model, "object": "model"}]
+            })),
+        ),
     }
 }
 
@@ -171,6 +197,8 @@ async fn chat(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
+    state.chat_calls.fetch_add(1, Ordering::SeqCst);
+
     if !authorized(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, Json(error("invalid_api_key")));
     }
@@ -193,6 +221,20 @@ async fn chat(
         return (StatusCode::BAD_REQUEST, Json(error("stream_must_be_false")));
     }
 
+    if matches!(state.mode, FakeMode::AlwaysUnavailable) {
+        return (
+            StatusCode::from_u16(529).unwrap(),
+            Json(error("overloaded")),
+        );
+    }
+
+    if matches!(state.mode, FakeMode::ImageUnsupportedThenValid) && has_image_url(&body) {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(error("image_unsupported")),
+        );
+    }
+
     let last_user = body["messages"]
         .as_array()
         .and_then(|messages| {
@@ -201,13 +243,17 @@ async fn chat(
                 .rev()
                 .find(|message| message["role"] == "user")
         })
-        .and_then(|message| message["content"].as_str())
+        .map(|message| content_to_text(&message["content"]))
         .unwrap_or_default();
 
-    let content = match last_user {
-        "hello" => "hi",
-        "ping" => "pong",
-        _ => "I do not have a fixture for that.",
+    let content = if matches!(state.mode, FakeMode::ImageUnsupportedThenValid) {
+        "image stripped fallback"
+    } else {
+        match last_user.as_str() {
+            "hello" => "hi",
+            "ping" => "pong",
+            _ => "I do not have a fixture for that.",
+        }
     };
 
     (
@@ -242,6 +288,50 @@ fn authorized(state: &FakeState, headers: &HeaderMap) -> bool {
 )]
 fn error(code: &str) -> Value {
     json!({"error": {"message": code, "type": "invalid_request_error", "code": code}})
+}
+
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
+fn content_to_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    block.get("text").and_then(Value::as_str)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "compiled by shared test support; used by M1b OpenAI client tests"
+)]
+fn has_image_url(value: &Value) -> bool {
+    value
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block.get("type").and_then(Value::as_str) == Some("image_url")
+                        })
+                    })
+            })
+        })
 }
 
 #[allow(

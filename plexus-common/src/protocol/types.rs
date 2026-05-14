@@ -3,6 +3,51 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Stable chat role used by chat transcripts and provider requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+/// OpenAI-compatible chat content block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlBlock },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageUrlBlock {
+    pub url: String,
+}
+
+impl ContentBlock {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn is_image(&self) -> bool {
+        matches!(self, Self::ImageUrl { .. })
+    }
+}
+
+pub fn strip_images(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+    blocks
+        .iter()
+        .filter(|block| !block.is_image())
+        .cloned()
+        .collect()
+}
+
+pub fn contains_image(blocks: &[ContentBlock]) -> bool {
+    blocks.iter().any(ContentBlock::is_image)
+}
+
 /// Filesystem policy controlling both the file-tool jail and the subprocess
 /// jail (ADR-073).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +197,39 @@ mod tests {
             serde_json::to_string(&FsPolicy::Unrestricted).unwrap(),
             "\"unrestricted\""
         );
+    }
+
+    #[test]
+    fn chat_role_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&ChatRole::Assistant).unwrap(),
+            "\"assistant\""
+        );
+    }
+
+    #[test]
+    fn content_block_serializes_openai_compatible_shape() {
+        let blocks = vec![
+            ContentBlock::text("hello"),
+            ContentBlock::ImageUrl {
+                image_url: ImageUrlBlock {
+                    url: "data:image/png;base64,aGVsbG8=".to_string(),
+                },
+            },
+        ];
+        let json = serde_json::to_value(&blocks).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                {"type": "text", "text": "hello"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,aGVsbG8="}
+                }
+            ])
+        );
+        assert_eq!(strip_images(&blocks), vec![ContentBlock::text("hello")]);
+        assert!(contains_image(&blocks));
     }
 
     #[test]

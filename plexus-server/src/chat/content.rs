@@ -1,28 +1,6 @@
 use crate::error::ApiError;
-use serde::{Deserialize, Serialize};
+pub use plexus_common::{ContentBlock, ImageUrlBlock};
 use serde_json::Value;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlock {
-    Text { text: String },
-    ImageUrl { image_url: ImageUrlBlock },
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ImageUrlBlock {
-    pub url: String,
-}
-
-impl ContentBlock {
-    pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into() }
-    }
-
-    pub fn is_image(&self) -> bool {
-        matches!(self, Self::ImageUrl { .. })
-    }
-}
 
 pub fn normalize_user_content(raw: Option<Value>) -> Result<Vec<ContentBlock>, ApiError> {
     match raw {
@@ -33,18 +11,6 @@ pub fn normalize_user_content(raw: Option<Value>) -> Result<Vec<ContentBlock>, A
         Some(Value::Null) => Err(ApiError::invalid_args("content must not be null")),
         Some(_) => Err(ApiError::invalid_args("content must be a string or array")),
     }
-}
-
-pub fn strip_images(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
-    blocks
-        .iter()
-        .filter(|block| !block.is_image())
-        .cloned()
-        .collect()
-}
-
-pub fn contains_image(blocks: &[ContentBlock]) -> bool {
-    blocks.iter().any(ContentBlock::is_image)
 }
 
 fn parse_block(value: Value) -> Result<ContentBlock, ApiError> {

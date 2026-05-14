@@ -5,11 +5,11 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use plexus_common::{AdminToken, JwtSecret, LlmApiKey};
+use plexus_common::{AdminToken, ChatRole, ContentBlock, JwtSecret, LlmApiKey};
 use plexus_server::{
     app::{self as server_app, AppState},
     config::ServerConfig,
-    openai::{ChatCompletionRequest, ChatMessage, ChatRole, OpenAiConfig, OpenAiRuntime},
+    openai::{ChatCompletionRequest, ChatMessage, OpenAiConfig, OpenAiRuntime},
 };
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -76,7 +76,7 @@ fn chat_request() -> ChatCompletionRequest {
     ChatCompletionRequest {
         messages: vec![ChatMessage {
             role: ChatRole::User,
-            content: "ping".to_string(),
+            content: vec![ContentBlock::text("ping")],
         }],
         max_tokens: None,
         temperature: None,

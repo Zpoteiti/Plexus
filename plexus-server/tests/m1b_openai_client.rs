@@ -2,9 +2,9 @@
 mod fake_openai;
 
 use fake_openai::FakeOpenAi;
-use plexus_common::LlmApiKey;
+use plexus_common::{ChatRole, ContentBlock, ImageUrlBlock, LlmApiKey};
 use plexus_server::openai::{
-    ChatCompletionRequest, ChatMessage, ChatRole, OpenAiClient, OpenAiConfig, OpenAiRuntime,
+    ChatCompletionRequest, ChatMessage, OpenAiClient, OpenAiConfig, OpenAiRuntime,
 };
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,13 @@ fn config(fake: &FakeOpenAi) -> OpenAiConfig {
         endpoint: fake.base_url.parse().unwrap(),
         api_key: LlmApiKey::new(fake.api_key().to_string()),
         model: fake.model().to_string(),
+    }
+}
+
+fn user_message(text: &str) -> ChatMessage {
+    ChatMessage {
+        role: ChatRole::User,
+        content: vec![ContentBlock::text(text)],
     }
 }
 
@@ -64,10 +71,7 @@ async fn chat_completion_sends_non_streaming_request_and_returns_content() {
         .chat_completion(
             &config(&fake),
             ChatCompletionRequest {
-                messages: vec![ChatMessage {
-                    role: ChatRole::User,
-                    content: "hello".to_string(),
-                }],
+                messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
             },
@@ -92,10 +96,7 @@ async fn chat_completion_does_not_retry_non_transient_request_errors() {
         OpenAiClient::new().chat_completion(
             &cfg,
             ChatCompletionRequest {
-                messages: vec![ChatMessage {
-                    role: ChatRole::User,
-                    content: "hello".to_string(),
-                }],
+                messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
             },
@@ -117,10 +118,7 @@ async fn chat_completion_accepts_endpoint_with_trailing_slash() {
         .chat_completion(
             &cfg,
             ChatCompletionRequest {
-                messages: vec![ChatMessage {
-                    role: ChatRole::User,
-                    content: "hello".to_string(),
-                }],
+                messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
             },
@@ -137,10 +135,7 @@ async fn runtime_concurrency_limit_caps_in_flight_chat_requests() {
     let runtime = OpenAiRuntime::new(1).expect("valid runtime");
     let cfg = config(&fake);
     let request = ChatCompletionRequest {
-        messages: vec![ChatMessage {
-            role: ChatRole::User,
-            content: "ping".to_string(),
-        }],
+        messages: vec![user_message("ping")],
         max_tokens: None,
         temperature: None,
     };
@@ -155,4 +150,70 @@ async fn runtime_concurrency_limit_caps_in_flight_chat_requests() {
     right.expect("right response");
     assert_eq!(fake.max_in_flight(), 1);
     assert!(started.elapsed() >= Duration::from_millis(250));
+}
+
+#[tokio::test]
+async fn chat_completion_sends_content_arrays() {
+    let fake = FakeOpenAi::valid().await;
+    let response = OpenAiClient::new()
+        .chat_completion(
+            &config(&fake),
+            ChatCompletionRequest {
+                messages: vec![user_message("hello")],
+                max_tokens: None,
+                temperature: None,
+            },
+        )
+        .await
+        .expect("chat response");
+    assert_eq!(response.content, "hi");
+}
+
+#[tokio::test]
+async fn image_payload_error_retries_with_images_stripped() {
+    let fake = FakeOpenAi::image_unsupported_then_valid().await;
+    let response = OpenAiClient::new()
+        .chat_completion(
+            &config(&fake),
+            ChatCompletionRequest {
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: vec![
+                        ContentBlock::text("what is this"),
+                        ContentBlock::ImageUrl {
+                            image_url: ImageUrlBlock {
+                                url: "data:image/png;base64,aGVsbG8=".to_string(),
+                            },
+                        },
+                    ],
+                }],
+                max_tokens: None,
+                temperature: None,
+            },
+        )
+        .await
+        .expect("stripped retry response");
+    assert_eq!(response.content, "image stripped fallback");
+    assert_eq!(fake.chat_call_count(), 2);
+}
+
+#[tokio::test]
+async fn auth_error_does_not_retry_or_strip_images() {
+    let fake = FakeOpenAi::valid().await;
+    let mut cfg = config(&fake);
+    cfg.api_key = LlmApiKey::new("wrong-key".to_string());
+    let err = OpenAiClient::new()
+        .chat_completion(
+            &cfg,
+            ChatCompletionRequest {
+                messages: vec![user_message("hello")],
+                max_tokens: None,
+                temperature: None,
+            },
+        )
+        .await
+        .expect_err("auth failure");
+    assert_eq!(err.status, axum::http::StatusCode::BAD_GATEWAY);
+    assert!(err.message.contains("HTTP 401"));
+    assert_eq!(fake.chat_call_count(), 1);
 }

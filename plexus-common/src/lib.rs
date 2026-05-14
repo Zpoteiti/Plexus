@@ -45,11 +45,12 @@ pub use mcp::naming::{
 };
 pub use mcp::session::McpSession;
 pub use protocol::{
-    ConfigUpdateFrame, DeviceConfig, ErrorFrame, FsPolicy, HEADER_SIZE, HelloAckFrame, HelloCaps,
-    HelloFrame, McpSchemas, McpServerConfig, PingFrame, PongFrame, PromptArgument, PromptDef,
-    RegisterMcpFrame, ResourceDef, SpawnFailure, ToolCallFrame, ToolDef, ToolResultFrame,
-    TransferBeginFrame, TransferDirection, TransferEndFrame, TransferProgressFrame, WsFrame,
-    pack_chunk, parse_chunk,
+    ChatRole, ConfigUpdateFrame, ContentBlock, DeviceConfig, ErrorFrame, FsPolicy, HEADER_SIZE,
+    HelloAckFrame, HelloCaps, HelloFrame, ImageUrlBlock, McpSchemas, McpServerConfig, PingFrame,
+    PongFrame, PromptArgument, PromptDef, RegisterMcpFrame, ResourceDef, SpawnFailure,
+    ToolCallFrame, ToolDef, ToolResultFrame, TransferBeginFrame, TransferDirection,
+    TransferEndFrame, TransferProgressFrame, WsFrame, contains_image, pack_chunk, parse_chunk,
+    strip_images,
 };
 pub use secrets::{AdminToken, DeviceToken, JwtSecret, LlmApiKey};
 pub use tools::Tool;

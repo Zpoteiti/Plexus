@@ -1,4 +1,4 @@
-use crate::chat::content::ContentBlock;
+use plexus_common::ContentBlock;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::PgPool;

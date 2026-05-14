@@ -1,6 +1,6 @@
 use crate::error::ApiError;
 use axum::http::StatusCode;
-use plexus_common::{ErrorCode, LlmApiKey};
+use plexus_common::{ChatRole, ContentBlock, ErrorCode, LlmApiKey, contains_image, strip_images};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
@@ -72,6 +72,37 @@ impl OpenAiClient {
         cfg: &OpenAiConfig,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, ApiError> {
+        let has_images = request
+            .messages
+            .iter()
+            .any(|message| contains_image(&message.content));
+
+        match self.chat_completion_attempts(cfg, request.clone()).await {
+            Ok(response) => Ok(response),
+            Err(err) if has_images && err.message.contains("image-compatible retry") => {
+                let stripped = ChatCompletionRequest {
+                    messages: request
+                        .messages
+                        .into_iter()
+                        .map(|message| ChatMessage {
+                            role: message.role,
+                            content: strip_images(&message.content),
+                        })
+                        .collect(),
+                    max_tokens: request.max_tokens,
+                    temperature: request.temperature,
+                };
+                self.chat_completion_attempts(cfg, stripped).await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    async fn chat_completion_attempts(
+        &self,
+        cfg: &OpenAiConfig,
+        request: ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse, ApiError> {
         let url = endpoint_url(&cfg.endpoint, "chat/completions")?;
         let body = ChatRequestBody {
             model: &cfg.model,
@@ -108,9 +139,11 @@ impl OpenAiClient {
 
             let status = response.status();
             if !status.is_success() {
-                last_error = Some(provider_http_error(format!(
-                    "LLM chat request returned HTTP {status}"
-                )));
+                let body_text = response.text().await.unwrap_or_default();
+                let image_compatible = !is_auth_or_config_status(status)
+                    && (is_image_compatibility_status(status)
+                        || provider_error_mentions_image(&body_text));
+                last_error = Some(provider_status_error(status, image_compatible));
                 if attempt < 2 && is_transient_status(status) {
                     tokio::time::sleep(retry_delay(attempt)).await;
                     continue;
@@ -239,6 +272,34 @@ fn is_transient_request_error(err: &reqwest::Error) -> bool {
     err.is_timeout() || err.is_connect()
 }
 
+fn is_auth_or_config_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::UNAUTHORIZED
+        || status == reqwest::StatusCode::FORBIDDEN
+        || status == reqwest::StatusCode::NOT_FOUND
+}
+
+fn is_image_compatibility_status(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 400 | 413 | 415 | 422)
+}
+
+fn provider_error_mentions_image(body_text: &str) -> bool {
+    let lower = body_text.to_ascii_lowercase();
+    lower.contains("image")
+        || lower.contains("vision")
+        || lower.contains("content block")
+        || lower.contains("multimodal")
+}
+
+fn provider_status_error(status: reqwest::StatusCode, image_compatible: bool) -> ApiError {
+    if image_compatible {
+        provider_http_error(format!(
+            "LLM chat request returned HTTP {status}; image-compatible retry"
+        ))
+    } else {
+        provider_http_error(format!("LLM chat request returned HTTP {status}"))
+    }
+}
+
 fn retry_delay(attempt: usize) -> Duration {
     match attempt {
         0 => Duration::from_millis(100),
@@ -248,17 +309,9 @@ fn retry_delay(attempt: usize) -> Duration {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ChatRole {
-    System,
-    User,
-    Assistant,
-}
-
-#[derive(Clone, Debug, Serialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
-    pub content: String,
+    pub content: Vec<ContentBlock>,
 }
 
 #[derive(Clone, Debug)]
