@@ -1,4 +1,9 @@
-use crate::{auth::AuthUser, db::sessions, error::ApiError};
+use crate::{
+    auth::AuthUser,
+    chat::content::{ContentBlock, normalize_user_content},
+    db::{messages, sessions},
+    error::ApiError,
+};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -6,6 +11,7 @@ use axum::{
 };
 use plexus_common::ErrorCode;
 use serde::Deserialize;
+use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -22,6 +28,12 @@ pub struct CreateSessionRequest {
 #[derive(Deserialize)]
 pub struct RenameSessionRequest {
     title: String,
+}
+
+#[derive(Deserialize)]
+pub struct MessageHistoryQuery {
+    before: Option<Uuid>,
+    limit: Option<i64>,
 }
 
 pub async fn list_sessions(
@@ -87,6 +99,50 @@ pub async fn delete_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn list_messages(
+    auth: AuthUser,
+    State(state): State<crate::app::AppState>,
+    Path(session_id): Path<Uuid>,
+    Query(query): Query<MessageHistoryQuery>,
+) -> Result<Json<Vec<messages::Message>>, ApiError> {
+    let _session = owned_session_or_404(state.pool(), auth.user.id, session_id).await?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let rows = messages::list_before(state.pool(), session_id, query.before, limit)
+        .await
+        .map_err(ApiError::from_sqlx)?;
+    Ok(Json(rows))
+}
+
+pub async fn post_message(
+    auth: AuthUser,
+    State(state): State<crate::app::AppState>,
+    Path(session_id): Path<Uuid>,
+    Json(body): Json<Map<String, Value>>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let session = owned_session_or_404(state.pool(), auth.user.id, session_id).await?;
+    if session.channel != sessions::WEB_CHANNEL {
+        return Err(ApiError::invalid_args(
+            "browser REST can only write to web sessions",
+        ));
+    }
+
+    let mut content = vec![runtime_block(&session)];
+    content.extend(normalize_user_content(body.get("content").cloned())?);
+
+    let message = messages::insert_message(state.pool(), session.id, "user", content)
+        .await
+        .map_err(ApiError::from_sqlx)?;
+    sessions::touch_last_inbound(state.pool(), session.id)
+        .await
+        .map_err(ApiError::from_sqlx)?;
+    state.chat().broker().broadcast(message.clone()).await;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "message_id": message.id })),
+    ))
+}
+
 pub async fn owned_session_or_404(
     pool: &sqlx::PgPool,
     user_id: Uuid,
@@ -104,4 +160,12 @@ fn not_found() -> ApiError {
         ErrorCode::NotFound,
         "session not found",
     )
+}
+
+fn runtime_block(session: &sessions::Session) -> ContentBlock {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    ContentBlock::text(format!(
+        "<runtime>\ntime_unix: {now}\nchannel: {}\nchat_id: {}\n</runtime>",
+        session.channel, session.chat_id
+    ))
 }

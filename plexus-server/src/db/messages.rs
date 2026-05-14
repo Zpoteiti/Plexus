@@ -1,0 +1,159 @@
+use crate::chat::content::ContentBlock;
+use serde::Serialize;
+use serde_json::Value;
+use sqlx::PgPool;
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Message {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub role: String,
+    pub content: Value,
+    pub is_compaction_summary: bool,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct LatestUserMessage {
+    pub id: Uuid,
+    pub created_at: OffsetDateTime,
+}
+
+pub async fn insert_message(
+    pool: &PgPool,
+    session_id: Uuid,
+    role: &str,
+    content: Vec<ContentBlock>,
+) -> Result<Message, sqlx::Error> {
+    let content = serde_json::to_value(content).expect("content blocks serialize");
+    sqlx::query_as::<_, Message>(
+        r#"
+        INSERT INTO messages (session_id, role, content)
+        VALUES ($1, $2, $3)
+        RETURNING id, session_id, role, content, is_compaction_summary, created_at
+        "#,
+    )
+    .bind(session_id)
+    .bind(role)
+    .bind(content)
+    .fetch_one(pool)
+    .await
+}
+
+pub async fn list_before(
+    pool: &PgPool,
+    session_id: Uuid,
+    before: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<Message>, sqlx::Error> {
+    if let Some(before) = before {
+        sqlx::query_as::<_, Message>(
+            r#"
+            SELECT m.id, m.session_id, m.role, m.content, m.is_compaction_summary, m.created_at
+            FROM messages m
+            JOIN messages anchor ON anchor.id = $2 AND anchor.session_id = $1
+            WHERE m.session_id = $1 AND m.created_at < anchor.created_at
+            ORDER BY m.created_at DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(session_id)
+        .bind(before)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    } else {
+        sqlx::query_as::<_, Message>(
+            r#"
+            SELECT id, session_id, role, content, is_compaction_summary, created_at
+            FROM messages
+            WHERE session_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(session_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+}
+
+pub async fn replay_recent(
+    pool: &PgPool,
+    session_id: Uuid,
+    limit: i64,
+) -> Result<Vec<Message>, sqlx::Error> {
+    let mut rows = sqlx::query_as::<_, Message>(
+        r#"
+        SELECT id, session_id, role, content, is_compaction_summary, created_at
+        FROM messages
+        WHERE session_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2
+        "#,
+    )
+    .bind(session_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.reverse();
+    Ok(rows)
+}
+
+pub async fn replay_after(
+    pool: &PgPool,
+    session_id: Uuid,
+    after: Uuid,
+) -> Result<Vec<Message>, sqlx::Error> {
+    sqlx::query_as::<_, Message>(
+        r#"
+        SELECT m.id, m.session_id, m.role, m.content, m.is_compaction_summary, m.created_at
+        FROM messages m
+        JOIN messages anchor ON anchor.id = $2 AND anchor.session_id = $1
+        WHERE m.session_id = $1 AND m.created_at > anchor.created_at
+        ORDER BY m.created_at ASC
+        "#,
+    )
+    .bind(session_id)
+    .bind(after)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn latest_user_message(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<Option<LatestUserMessage>, sqlx::Error> {
+    sqlx::query_as::<_, LatestUserMessage>(
+        r#"
+        SELECT id, created_at
+        FROM messages
+        WHERE session_id = $1 AND role = 'user'
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn history_chronological(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<Vec<Message>, sqlx::Error> {
+    sqlx::query_as::<_, Message>(
+        r#"
+        SELECT id, session_id, role, content, is_compaction_summary, created_at
+        FROM messages
+        WHERE session_id = $1
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await
+}

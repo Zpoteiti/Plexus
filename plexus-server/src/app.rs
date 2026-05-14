@@ -1,4 +1,4 @@
-use crate::{config::ServerConfig, openai::OpenAiRuntime, routes};
+use crate::{chat::ChatRuntime, config::ServerConfig, openai::OpenAiRuntime, routes};
 use axum::Router;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ pub struct AppStateInner {
     pub pool: PgPool,
     pub config: ServerConfig,
     pub openai: OpenAiRuntime,
+    pub chat: ChatRuntime,
     pub admin_config_lock: Mutex<()>,
 }
 
@@ -31,6 +32,7 @@ impl AppState {
                 pool,
                 config,
                 openai,
+                chat: ChatRuntime::default(),
                 admin_config_lock: Mutex::new(()),
             }),
         }
@@ -46,6 +48,10 @@ impl AppState {
 
     pub fn openai(&self) -> &OpenAiRuntime {
         &self.inner.openai
+    }
+
+    pub fn chat(&self) -> &ChatRuntime {
+        &self.inner.chat
     }
 
     pub fn admin_config_lock(&self) -> &Mutex<()> {

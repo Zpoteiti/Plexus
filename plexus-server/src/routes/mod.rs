@@ -30,4 +30,8 @@ pub fn router() -> Router<AppState> {
                 .patch(sessions::rename_session)
                 .delete(sessions::delete_session),
         )
+        .route(
+            "/api/sessions/{id}/messages",
+            get(sessions::list_messages).post(sessions::post_message),
+        )
 }
