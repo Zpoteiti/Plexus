@@ -149,6 +149,11 @@ pub async fn current_concurrency_limit(pool: &PgPool) -> Result<i64, sqlx::Error
     Ok(value.and_then(|value| value.as_i64()).unwrap_or(0))
 }
 
+pub async fn current_llm_config(pool: &PgPool) -> Result<crate::openai::OpenAiConfig, ApiError> {
+    let current = get_all(pool).await.map_err(ApiError::from_sqlx)?;
+    merged_llm_config(&current, &BTreeMap::new())
+}
+
 pub fn merged_llm_config(
     current: &BTreeMap<String, Value>,
     patch: &BTreeMap<String, Value>,
