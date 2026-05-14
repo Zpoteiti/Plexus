@@ -7,8 +7,9 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use support::TestApp;
+use support::{TestApp, fake_openai::FakeOpenAi};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 async fn json_request(
     app: axum::Router,
@@ -75,6 +76,70 @@ async fn register_create_and_post(app: &TestApp, text: &str) -> (String, String)
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     (token, session_id)
+}
+
+async fn register(app: &TestApp, email: &str, admin: bool) -> String {
+    let mut body = json!({
+        "email": email,
+        "password": "correct horse battery staple",
+        "name": "Alice"
+    });
+    if admin {
+        body["admin_token"] = json!("test-admin-token");
+    }
+    let (status, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        "/api/auth/register",
+        body,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    body["jwt"].as_str().unwrap().to_string()
+}
+
+async fn configure_llm(app: &TestApp, token: &str, fake: &FakeOpenAi) {
+    let (status, _) = json_request(
+        app.router.clone(),
+        Method::PATCH,
+        "/api/admin/config",
+        json!({
+            "llm_endpoint": fake.base_url,
+            "llm_api_key": fake.api_key(),
+            "llm_model": fake.model(),
+            "llm_max_concurrent_requests": 0
+        }),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+async fn create_session(app: &TestApp, token: &str) -> Uuid {
+    let (status, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        "/api/sessions",
+        json!({}),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    Uuid::parse_str(body["id"].as_str().unwrap()).unwrap()
+}
+
+async fn post_text(app: &TestApp, token: &str, session_id: Uuid, text: &str) -> String {
+    let (status, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        &format!("/api/sessions/{session_id}/messages"),
+        json!({"content": [{"type": "text", "text": text}]}),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    body["message_id"].as_str().unwrap().to_string()
 }
 
 async fn read_sse_until(
@@ -174,4 +239,74 @@ async fn sse_emits_live_message_after_history_end() {
     let history_end = text.find("event: history_end").unwrap();
     let live_message = text.find("live hello").unwrap();
     assert!(history_end < live_message);
+}
+
+#[tokio::test]
+async fn sse_live_stream_receives_user_and_assistant_messages() {
+    let app = TestApp::spawn().await;
+    let token = register(&app, "admin@example.com", true).await;
+    let fake = FakeOpenAi::valid().await;
+    configure_llm(&app, &token, &fake).await;
+    let session_id = create_session(&app, &token).await;
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}/stream?replay_limit=0"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let reader = tokio::spawn(read_sse_until(
+        response,
+        "\"text\":\"hi\"",
+        std::time::Duration::from_secs(2),
+    ));
+    post_text(&app, &token, session_id, "hello").await;
+
+    let text = reader.await.unwrap();
+    assert!(text.contains("event: history_end"));
+    assert!(text.contains("hello"));
+    assert!(text.contains("\"text\":\"hi\""));
+}
+
+#[tokio::test]
+async fn last_event_id_replays_only_newer_messages() {
+    let app = TestApp::spawn().await;
+    let token = register(&app, "alice@example.com", false).await;
+    let session_id = create_session(&app, &token).await;
+    let first_id = post_text(&app, &token, session_id, "first marker").await;
+    post_text(&app, &token, session_id, "second marker").await;
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}/stream?replay_limit=50"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("last-event-id", first_id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let text = read_sse_until(
+        response,
+        "event: history_end",
+        std::time::Duration::from_secs(1),
+    )
+    .await;
+    assert!(text.contains("second marker"));
+    assert!(!text.contains("first marker"));
 }
