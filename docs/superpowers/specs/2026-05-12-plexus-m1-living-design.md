@@ -4,7 +4,7 @@
 **Branch:** `rebuild-m1`
 **Authors:** brainstormed in collaborative session 2026-05-12
 **Supersedes:** none
-**Last updated:** 2026-05-13
+**Last updated:** 2026-05-14
 
 ---
 
@@ -32,9 +32,9 @@ before moving on.
 
 | Field | Value |
 |---|---|
-| Overall M1 state | M1b verified; M1c design draft in review |
-| Current focus | Review the `M1c` browser chat path sub-spec |
-| Next implementation slice | `M1c` browser chat path after spec approval |
+| Overall M1 state | M1b verified; M1c automated checks passed; awaiting live smoke |
+| Current focus | Manual live smoke for `M1c` browser chat path |
+| Next implementation slice | `M1d` planning after M1c live smoke |
 | Frontend scope | Out of M1; frontend remains M3 |
 | Client scope | Standalone client remains M2, but M1 includes server-side device WebSocket support |
 | Discord/Telegram | Required for M1; live tokens supplied by the user for smoke testing when ready |
@@ -186,7 +186,7 @@ because the chat path needs a provider contract.
 |---|---|---|---|---|
 | `M1a` | Verified | Server crate, startup, DB bootstrap, canonical schema application, real auth, basic REST/admin persistence, test harness | M0 | Verified by `cargo test -p plexus-server`, `cargo test --workspace`, `cargo fmt --all -- --check`, and `cargo check --workspace` |
 | `M1b` | Verified | OpenAI-compatible LLM foundation, admin config validation, external FastAPI mock service, hermetic fake-provider test strategy, concurrency semaphore | `M1a` | Verified on 2026-05-13 from branch `rebuild-m1-M1b`: invalid provider config is rejected before DB write, valid fake provider completes non-streaming external call mechanics, sibling mock tests pass |
-| `M1c` | Designing | Browser chat path: UUID-addressed web sessions, editable titles, REST message ingress, session storage, SSE history replay/live stream, minimal SOUL/MEMORY prompt, inline content-block images, fake LLM-backed response loop, and required manual live smoke | `M1a`, `M1b` | API test sends a message and receives assistant response through SSE; user confirms real-provider live smoke |
+| `M1c` | Automated checks passed; awaiting live smoke | Browser chat path: UUID-addressed web sessions, editable titles, REST message ingress, session storage, SSE history replay/live stream, minimal SOUL/MEMORY prompt, inline content-block images, fake LLM-backed response loop, and required manual live smoke | `M1a`, `M1b` | Automated fake-provider tests pass; user must still confirm real-provider live smoke |
 | `M1d` | Planned | Server workspace/file REST APIs, server-side workspace FS, quota reporting, server-side shared file tools | `M1a` | REST and tool tests create/read/edit/list server workspace files and report quota |
 | `M1e` | Planned | Device token lifecycle, device naming rules, device WebSocket handshake/control frames | `M1a` | Device can be registered, connect over WS, and appear reachable |
 | `M1f` | Planned | Device-routed file and tool execution over WS, offline handling, transfer plumbing | `M1d`, `M1e` | REST/tool call reaches connected test device; offline target returns `device_unreachable` |
@@ -280,3 +280,14 @@ PostgreSQL 18 verification used container `plexus` from `pgvector/pgvector:pg18`
 After both PostgreSQL-backed test runs, only the persistent `plexus` database
 matched `plexus%`, and the persistent `plexus.public` schema contained no
 tables. No test tables or rows landed in the persistent database.
+
+M1c automated verification evidence from 2026-05-14 on branch
+`rebuild-m1-M1c`:
+
+- `rtk cargo fmt --all -- --check`
+- `rtk cargo clippy --workspace --all-targets -- -D warnings`
+- `rtk env PLEXUS_TEST_DATABASE_URL=postgres://plexus:plexus@127.0.0.1:5432/plexus cargo test --workspace --all-targets`
+- `rtk conda run -n Plexus python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('docs/API.yaml').read_text()); print('API.yaml ok')"`
+- `git diff --check`
+
+M1c remains pending manual live smoke with a real OpenAI-compatible provider.

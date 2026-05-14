@@ -1,6 +1,6 @@
 # Plexus M1c Browser Chat Path Sub-Spec
 
-**Status:** Draft for review
+**Status:** Automated checks passed; awaiting live smoke
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1-M1c`
 **Base:** `rebuild-m1`
@@ -620,7 +620,22 @@ Focused checks:
 
 ---
 
-## 15. Manual Live Smoke
+## 15. Automated Implementation Evidence
+
+Automated verification from 2026-05-14 on branch `rebuild-m1-M1c`:
+
+- `rtk cargo fmt --all -- --check`
+- `rtk cargo clippy --workspace --all-targets -- -D warnings`
+- `rtk env PLEXUS_TEST_DATABASE_URL=postgres://plexus:plexus@127.0.0.1:5432/plexus cargo test --workspace --all-targets`
+- `rtk conda run -n Plexus python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('docs/API.yaml').read_text()); print('API.yaml ok')"`
+- `git diff --check`
+
+Result: automated checks passed. M1c is not `Verified` until the user completes
+the manual live smoke below with a real OpenAI-compatible provider.
+
+---
+
+## 16. Manual Live Smoke
 
 M1c is not `Verified` until the user completes a manual live smoke with a real
 OpenAI-compatible provider.
@@ -652,7 +667,7 @@ with the verification date and evidence, then mark M1c `Verified`.
 
 ---
 
-## 16. Documentation Updates
+## 17. Documentation Updates
 
 M1c implementation must update:
 
@@ -678,7 +693,7 @@ M1c implementation must update:
 
 ---
 
-## 17. Exit Criteria
+## 18. Exit Criteria
 
 M1c can move from draft/design to implementation only after this spec is
 reviewed and approved.
