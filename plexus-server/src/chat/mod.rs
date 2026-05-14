@@ -1,8 +1,5 @@
 use plexus_common::ReasoningEffort;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -14,8 +11,14 @@ pub mod worker;
 #[derive(Clone, Default)]
 pub struct ChatRuntime {
     broker: sse::SseBroker,
-    active_workers: Arc<Mutex<HashSet<Uuid>>>,
-    reasoning_efforts: Arc<Mutex<HashMap<Uuid, ReasoningEffort>>>,
+    workers: Arc<Mutex<HashMap<Uuid, SessionWorkState>>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SessionWorkState {
+    active: bool,
+    wake_requested: bool,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl ChatRuntime {
@@ -23,27 +26,88 @@ impl ChatRuntime {
         &self.broker
     }
 
-    pub async fn try_start_worker(&self, session_id: Uuid) -> bool {
-        self.active_workers.lock().await.insert(session_id)
+    pub async fn enqueue_turn(&self, session_id: Uuid, effort: ReasoningEffort) -> bool {
+        let mut workers = self.workers.lock().await;
+        let worker = workers.entry(session_id).or_default();
+        worker.reasoning_effort = Some(effort);
+        if worker.active {
+            worker.wake_requested = true;
+            false
+        } else {
+            worker.active = true;
+            worker.wake_requested = false;
+            true
+        }
     }
 
-    pub async fn finish_worker(&self, session_id: Uuid) {
-        self.active_workers.lock().await.remove(&session_id);
-        self.reasoning_efforts.lock().await.remove(&session_id);
+    pub async fn finish_or_continue_worker(&self, session_id: Uuid) -> bool {
+        let mut workers = self.workers.lock().await;
+        let Some(worker) = workers.get_mut(&session_id) else {
+            return false;
+        };
+        if worker.wake_requested {
+            worker.wake_requested = false;
+            true
+        } else {
+            workers.remove(&session_id);
+            false
+        }
     }
 
-    pub async fn set_reasoning_effort(&self, session_id: Uuid, effort: ReasoningEffort) {
-        self.reasoning_efforts
-            .lock()
-            .await
-            .insert(session_id, effort);
+    pub async fn clear_observed_wake(&self, session_id: Uuid) {
+        if let Some(worker) = self.workers.lock().await.get_mut(&session_id) {
+            worker.wake_requested = false;
+        }
     }
 
     pub async fn reasoning_effort(&self, session_id: Uuid) -> Option<ReasoningEffort> {
-        self.reasoning_efforts
+        self.workers
             .lock()
             .await
             .get(&session_id)
-            .copied()
+            .and_then(|worker| worker.reasoning_effort)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatRuntime;
+    use plexus_common::ReasoningEffort;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn active_worker_keeps_wake_and_reasoning_until_followup_pass() {
+        let runtime = ChatRuntime::default();
+        let session_id = Uuid::now_v7();
+
+        assert!(
+            runtime
+                .enqueue_turn(session_id, ReasoningEffort::Medium)
+                .await
+        );
+        assert_eq!(
+            runtime.reasoning_effort(session_id).await,
+            Some(ReasoningEffort::Medium)
+        );
+
+        assert!(
+            !runtime
+                .enqueue_turn(session_id, ReasoningEffort::High)
+                .await
+        );
+        assert_eq!(
+            runtime.reasoning_effort(session_id).await,
+            Some(ReasoningEffort::High)
+        );
+
+        assert!(runtime.finish_or_continue_worker(session_id).await);
+        assert_eq!(
+            runtime.reasoning_effort(session_id).await,
+            Some(ReasoningEffort::High)
+        );
+
+        assert!(!runtime.finish_or_continue_worker(session_id).await);
+        assert_eq!(runtime.reasoning_effort(session_id).await, None);
+        assert!(runtime.enqueue_turn(session_id, ReasoningEffort::Low).await);
     }
 }

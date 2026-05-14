@@ -9,6 +9,7 @@ use uuid::Uuid;
 #[allow(dead_code)]
 pub struct TestApp {
     pub router: axum::Router,
+    pub state: app::AppState,
     pub pool: PgPool,
     pub db_name: String,
     pub admin_url: String,
@@ -40,10 +41,12 @@ impl TestApp {
             .await
             .expect("create workspace root");
         db::bootstrap(&pool).await.expect("bootstrap test db");
-        let router = app::router(app::AppState::new(pool.clone(), cfg));
+        let state = app::AppState::new(pool.clone(), cfg);
+        let router = app::router(state.clone());
 
         Self {
             router,
+            state,
             pool,
             db_name,
             admin_url,

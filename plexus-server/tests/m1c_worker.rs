@@ -324,6 +324,26 @@ async fn concurrent_posts_to_one_session_do_not_create_parallel_fake_provider_ca
 }
 
 #[tokio::test]
+async fn post_while_provider_in_flight_runs_one_serial_followup_pass() {
+    let app = TestApp::spawn().await;
+    let token = register(app.router.clone(), "admin@example.com", true).await;
+    let fake = FakeOpenAi::delayed(Duration::from_millis(150)).await;
+    configure_llm(&app, &token, &fake).await;
+    let session_id = create_session(&app, &token).await;
+
+    post_text(&app, &token, session_id, "hello").await;
+    wait_for_chat_calls(&fake, 1).await;
+    post_text(&app, &token, session_id, "ping").await;
+
+    wait_for_chat_calls(&fake, 2).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    assert_eq!(fake.max_in_flight(), 1);
+    assert_eq!(fake.chat_call_count(), 2);
+    assert!(fake.last_chat_body().to_string().contains("ping"));
+}
+
+#[tokio::test]
 async fn image_compatibility_failure_retries_stripped_and_persists_assistant() {
     let app = TestApp::spawn().await;
     let token = register(app.router.clone(), "admin@example.com", true).await;

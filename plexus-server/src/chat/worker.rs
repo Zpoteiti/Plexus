@@ -8,17 +8,18 @@ use uuid::Uuid;
 
 pub fn spawn_response_worker(state: crate::app::AppState, session_id: Uuid) {
     tokio::spawn(async move {
-        if !state.chat().try_start_worker(session_id).await {
-            return;
-        }
-        let result = run_worker_loop(state.clone(), session_id).await;
-        state.chat().finish_worker(session_id).await;
-        if let Err(err) = result {
-            let content = vec![ContentBlock::text(synthetic_error_text(&err.message))];
-            if let Ok(message) =
-                messages::insert_message(state.pool(), session_id, "assistant", content).await
-            {
-                state.chat().broker().broadcast(message).await;
+        loop {
+            let result = run_worker_loop(state.clone(), session_id).await;
+            if let Err(err) = result {
+                let content = vec![ContentBlock::text(synthetic_error_text(&err.message))];
+                if let Ok(message) =
+                    messages::insert_message(state.pool(), session_id, "assistant", content).await
+                {
+                    state.chat().broker().broadcast(message).await;
+                }
+            }
+            if !state.chat().finish_or_continue_worker(session_id).await {
+                break;
             }
         }
     });
@@ -30,6 +31,7 @@ async fn run_worker_loop(
 ) -> Result<(), crate::error::ApiError> {
     let mut last_answered_user_id = None;
     loop {
+        state.chat().clear_observed_wake(session_id).await;
         let Some(latest) = messages::latest_user_message(state.pool(), session_id)
             .await
             .map_err(crate::error::ApiError::from_sqlx)?
@@ -40,15 +42,14 @@ async fn run_worker_loop(
             return Ok(());
         }
 
-        respond_once(state.clone(), session_id).await?;
-        last_answered_user_id = Some(latest.id);
+        last_answered_user_id = Some(respond_once(state.clone(), session_id).await?);
     }
 }
 
 async fn respond_once(
     state: crate::app::AppState,
     session_id: Uuid,
-) -> Result<(), crate::error::ApiError> {
+) -> Result<Uuid, crate::error::ApiError> {
     let session = sessions::find_by_id(state.pool(), session_id)
         .await
         .map_err(crate::error::ApiError::from_sqlx)?
@@ -72,27 +73,9 @@ async fn respond_once(
     let history = messages::history_chronological(state.pool(), session_id)
         .await
         .map_err(crate::error::ApiError::from_sqlx)?;
-
-    let mut chat_messages = vec![ChatMessage {
-        role: ChatRole::System,
-        content: vec![ContentBlock::text(system_prompt)],
-        reasoning_content: None,
-    }];
-    for row in history {
-        let role = match row.role.as_str() {
-            "user" => ChatRole::User,
-            "assistant" => ChatRole::Assistant,
-            _ => continue,
-        };
-        let content = serde_json::from_value(row.content).map_err(|_| {
-            crate::error::ApiError::invalid_args("stored message content was malformed")
-        })?;
-        chat_messages.push(ChatMessage {
-            role,
-            content,
-            reasoning_content: row.reasoning_content,
-        });
-    }
+    let (chat_messages, last_user_id) = build_chat_messages(system_prompt, history)?;
+    let last_user_id = last_user_id
+        .ok_or_else(|| crate::error::ApiError::invalid_args("no user message in chat history"))?;
 
     let response = state
         .openai()
@@ -121,7 +104,38 @@ async fn respond_once(
     .await
     .map_err(crate::error::ApiError::from_sqlx)?;
     state.chat().broker().broadcast(message).await;
-    Ok(())
+    Ok(last_user_id)
+}
+
+fn build_chat_messages(
+    system_prompt: String,
+    history: Vec<messages::Message>,
+) -> Result<(Vec<ChatMessage>, Option<Uuid>), crate::error::ApiError> {
+    let mut last_user_id = None;
+    let mut chat_messages = vec![ChatMessage {
+        role: ChatRole::System,
+        content: vec![ContentBlock::text(system_prompt)],
+        reasoning_content: None,
+    }];
+    for row in history {
+        let role = match row.role.as_str() {
+            "user" => ChatRole::User,
+            "assistant" => ChatRole::Assistant,
+            _ => continue,
+        };
+        if role == ChatRole::User {
+            last_user_id = Some(row.id);
+        }
+        let content = serde_json::from_value(row.content).map_err(|_| {
+            crate::error::ApiError::invalid_args("stored message content was malformed")
+        })?;
+        chat_messages.push(ChatMessage {
+            role,
+            content,
+            reasoning_content: row.reasoning_content,
+        });
+    }
+    Ok((chat_messages, last_user_id))
 }
 
 fn synthetic_error_text(message: &str) -> String {
@@ -129,4 +143,46 @@ fn synthetic_error_text(message: &str) -> String {
         .replace("Bearer ", "")
         .replace("plexus-mock-key", "[redacted]");
     format!("[Plexus could not complete the LLM request: {safe}. Try again later.]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_chat_messages;
+    use crate::db::messages::Message;
+    use plexus_common::{ChatRole, ContentBlock};
+    use serde_json::json;
+    use time::OffsetDateTime;
+    use uuid::Uuid;
+
+    fn message(id: Uuid, role: &str, text: &str) -> Message {
+        Message {
+            id,
+            session_id: Uuid::now_v7(),
+            role: role.to_string(),
+            content: json!([{"type": "text", "text": text}]),
+            reasoning_content: None,
+            is_compaction_summary: false,
+            created_at: OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[test]
+    fn chat_messages_report_last_user_id_from_snapshot() {
+        let first_user_id = Uuid::now_v7();
+        let second_user_id = Uuid::now_v7();
+        let history = vec![
+            message(first_user_id, "user", "one"),
+            message(Uuid::now_v7(), "assistant", "answer"),
+            message(second_user_id, "user", "two"),
+        ];
+
+        let (chat_messages, last_user_id) =
+            build_chat_messages("system prompt".to_string(), history).unwrap();
+
+        assert_eq!(last_user_id, Some(second_user_id));
+        assert_eq!(chat_messages[0].role, ChatRole::System);
+        assert_eq!(chat_messages[1].role, ChatRole::User);
+        assert_eq!(chat_messages[3].role, ChatRole::User);
+        assert_eq!(chat_messages[3].content, vec![ContentBlock::text("two")]);
+    }
 }

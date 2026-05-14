@@ -197,3 +197,36 @@ async fn browser_post_to_non_web_owned_session_is_bad_request() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn browser_post_to_web_channel_with_internal_session_key_is_bad_request() {
+    let app = TestApp::spawn().await;
+    let (token, user_id) = register_user(&app, "alice@example.com").await;
+    let session_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO sessions (id, user_id, session_key, channel, chat_id, title)
+        VALUES ($1, $2, $3, 'web', $4, 'Internal')
+        "#,
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .bind("cron:heartbeat:12345")
+    .bind("12345")
+    .execute(&app.pool)
+    .await
+    .unwrap();
+
+    let (status, _) = json_request(
+        app.router.clone(),
+        Method::POST,
+        &format!("/api/sessions/{session_id}/messages"),
+        json!({
+            "content": [{"type": "text", "text": "hello"}],
+            "reasoning_effort": "medium"
+        }),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

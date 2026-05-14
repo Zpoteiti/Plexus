@@ -16,6 +16,7 @@ use axum::{
 use plexus_common::{ErrorCode, ReasoningEffort};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -129,7 +130,7 @@ pub async fn post_message(
     Json(body): Json<Map<String, Value>>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let session = owned_session_or_404(state.pool(), auth.user.id, session_id).await?;
-    if session.channel != sessions::WEB_CHANNEL {
+    if session.channel != sessions::WEB_CHANNEL || !session.session_key.starts_with("web:") {
         return Err(ApiError::invalid_args(
             "browser REST can only write to web sessions",
         ));
@@ -142,15 +143,17 @@ pub async fn post_message(
     let message = messages::insert_message(state.pool(), session.id, "user", content)
         .await
         .map_err(ApiError::from_sqlx)?;
-    state
-        .chat()
-        .set_reasoning_effort(session.id, reasoning_effort)
-        .await;
     sessions::touch_last_inbound(state.pool(), session.id)
         .await
         .map_err(ApiError::from_sqlx)?;
+    let should_spawn = state
+        .chat()
+        .enqueue_turn(session.id, reasoning_effort)
+        .await;
     state.chat().broker().broadcast(message.clone()).await;
-    crate::chat::worker::spawn_response_worker(state.clone(), session.id);
+    if should_spawn {
+        crate::chat::worker::spawn_response_worker(state.clone(), session.id);
+    }
 
     Ok((
         StatusCode::ACCEPTED,
@@ -184,6 +187,7 @@ pub async fn stream_session(
             .await
             .map_err(ApiError::from_sqlx)?
     };
+    let replayed_ids: HashSet<Uuid> = replay.iter().map(|message| message.id).collect();
 
     let stream = async_stream::stream! {
         for message in replay {
@@ -192,8 +196,12 @@ pub async fn stream_session(
         yield crate::chat::sse::history_end_event();
         loop {
             match receiver.recv().await {
-                Ok(message) => yield crate::chat::sse::message_event(&message),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Ok(message) => {
+                    if !replayed_ids.contains(&message.id) {
+                        yield crate::chat::sse::message_event(&message);
+                    }
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }

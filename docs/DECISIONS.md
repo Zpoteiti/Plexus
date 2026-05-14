@@ -1148,6 +1148,8 @@ User, assistant, and tool messages all use the same block schema.
 
 Each `event: message` carries an `id:` SSE header with the DB `message_id`, so the browser's EventSource can reconnect with `Last-Event-ID` and the server replays exactly what was missed.
 
+The server subscribes to live broadcasts before replaying history, then filters live messages whose ids were already sent during the replay phase. If the broadcast receiver reports lag, the server closes the stream instead of silently continuing with gaps; EventSource reconnect then uses `Last-Event-ID` to replay missed persisted rows.
+
 The `GET /api/sessions/{id}/messages` endpoint stays but narrows in purpose: it is now the **cursor-paginated scroll-up** entry point (`?before=<msg_id>&limit=50`), used only when the user scrolls past the window the stream replayed.
 
 **Consequences:**

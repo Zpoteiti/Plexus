@@ -298,3 +298,6 @@ validated admin `PATCH /api/admin/config` provider validation, browser session
 creation, `GET /api/sessions/{id}/stream` history cut-over, text message POST,
 live SSE user and assistant messages, persisted history containing both rows,
 SSE replay of persisted rows, and persisted assistant `reasoning_content`.
+Review hardening on 2026-05-14 additionally covered browser `web:` namespace
+writability, SSE replay/live de-duplication, SSE lag reconnect behavior, and
+serialized worker wake/progress races.

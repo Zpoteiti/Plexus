@@ -513,6 +513,10 @@ paths:
         Every `event: message` carries an `id:` SSE header with
         the DB `message_id`; EventSource uses it for
         `Last-Event-ID` on automatic reconnect.
+        Live messages whose ids were already emitted during replay are
+        skipped server-side. If the live broadcast receiver lags and drops
+        events, the server closes the stream so EventSource reconnect can
+        replay persisted rows from `Last-Event-ID`.
 
         **Event names (see `SseEvent*` schemas):**
 

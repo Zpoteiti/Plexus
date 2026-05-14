@@ -6,7 +6,10 @@ use axum::{
     response::Response,
 };
 use http_body_util::BodyExt;
+use plexus_common::ContentBlock;
+use plexus_server::db::messages;
 use serde_json::{Value, json};
+use std::time::Duration;
 use support::{TestApp, fake_openai::FakeOpenAi};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -148,11 +151,7 @@ async fn post_text(app: &TestApp, token: &str, session_id: Uuid, text: &str) -> 
     body["message_id"].as_str().unwrap().to_string()
 }
 
-async fn read_sse_until(
-    response: Response,
-    expected: &str,
-    timeout: std::time::Duration,
-) -> String {
+async fn read_sse_until(response: Response, expected: &str, timeout: Duration) -> String {
     let mut body = response.into_body();
     let deadline = std::time::Instant::now() + timeout;
     let mut out = String::new();
@@ -173,6 +172,16 @@ async fn read_sse_until(
         }
     }
     panic!("timed out waiting for SSE text {expected:?}; got {out}");
+}
+
+async fn next_sse_frame_text(body: &mut Body, timeout: Duration) -> Option<String> {
+    let frame = tokio::time::timeout(timeout, body.frame())
+        .await
+        .ok()??
+        .unwrap();
+    frame
+        .data_ref()
+        .map(|bytes| std::str::from_utf8(bytes).unwrap().to_string())
 }
 
 #[tokio::test]
@@ -318,4 +327,97 @@ async fn last_event_id_replays_only_newer_messages() {
     .await;
     assert!(text.contains("second marker"));
     assert!(!text.contains("first marker"));
+}
+
+#[tokio::test]
+async fn sse_skips_live_duplicate_for_message_already_replayed() {
+    let app = TestApp::spawn().await;
+    let token = register(&app, "alice@example.com", false).await;
+    let session_id = create_session(&app, &token).await;
+    let message = messages::insert_message(
+        &app.pool,
+        session_id,
+        "user",
+        vec![ContentBlock::text("duplicate marker")],
+    )
+    .await
+    .unwrap();
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}/stream?replay_limit=50"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    app.state.chat().broker().broadcast(message).await;
+    let mut body = response.into_body();
+
+    let replay = next_sse_frame_text(&mut body, Duration::from_secs(1))
+        .await
+        .expect("replayed message frame");
+    assert!(replay.contains("duplicate marker"));
+    let history_end = next_sse_frame_text(&mut body, Duration::from_secs(1))
+        .await
+        .expect("history_end frame");
+    assert!(history_end.contains("event: history_end"));
+
+    let duplicate = next_sse_frame_text(&mut body, Duration::from_millis(100)).await;
+    assert!(
+        duplicate.is_none(),
+        "message already sent in replay must not be emitted again as live SSE"
+    );
+}
+
+#[tokio::test]
+async fn sse_stream_closes_after_receiver_lag() {
+    let app = TestApp::spawn().await;
+    let token = register(&app, "alice@example.com", false).await;
+    let session_id = create_session(&app, &token).await;
+
+    let response = app
+        .router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/sessions/{session_id}/stream?replay_limit=0"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+
+    let history_end = next_sse_frame_text(&mut body, Duration::from_secs(1))
+        .await
+        .expect("history_end frame");
+    assert!(history_end.contains("event: history_end"));
+
+    for index in 0..260 {
+        let message = messages::insert_message(
+            &app.pool,
+            session_id,
+            "user",
+            vec![ContentBlock::text(format!("lag marker {index}"))],
+        )
+        .await
+        .unwrap();
+        app.state.chat().broker().broadcast(message).await;
+    }
+
+    let next = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("lagged stream should close promptly");
+    assert!(next.is_none(), "receiver lag must close the SSE stream");
 }

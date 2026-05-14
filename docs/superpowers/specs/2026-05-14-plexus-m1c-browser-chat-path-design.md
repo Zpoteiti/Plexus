@@ -224,12 +224,13 @@ The target session must:
 
 - exist;
 - belong to the authenticated user;
-- have `channel = "web"`.
+- have `channel = "web"`;
+- have `session_key` starting with `web:`.
 
 If the session does not exist or belongs to another user, return `404` to avoid
 leaking existence. If the session is owned by the caller but is not a web
-session, return `400 invalid_args`; non-web sessions are readable later, but
-not writable through browser REST.
+session or uses a non-`web:` internal namespace key, return `400 invalid_args`;
+non-web sessions are readable later, but not writable through browser REST.
 
 The route persists the user message, broadcasts it to active SSE subscribers,
 starts the M1c response worker if one is not already active for this session,
@@ -267,6 +268,11 @@ Each `message` event uses the message UUID as the SSE `id:` field. If
 `Last-Event-ID` is present, replay messages after that message id instead of
 using the normal replay window. `replay_limit=0` skips normal replay when
 `Last-Event-ID` is absent.
+
+Because the server subscribes before replay, any queued live event whose id was
+already emitted in replay is skipped. If the live receiver lags and drops
+messages, the stream closes so the browser reconnects and uses
+`Last-Event-ID` replay instead of continuing with a permanent gap.
 
 M1c does not implement `hint`, `session_update`, `kick`, or cancel events.
 
@@ -524,10 +530,15 @@ Behavior:
   `202` without waiting for the LLM.
 - Each session has at most one active M1c response worker.
 - If a user posts while a response is running, the new message is persisted and
-  broadcast immediately, but no parallel LLM worker starts for that session.
-- After the current assistant response or failure message is persisted, the
-  worker checks whether newer user messages arrived after the snapshot it just
-  answered. If so, it runs another response pass.
+  broadcast immediately. The active worker receives a wake flag, but no
+  parallel LLM worker starts for that session.
+- A response pass records the last user message id from the history snapshot it
+  actually sent to the provider. After the assistant response or failure
+  message is persisted, the worker checks the database again. If a newer user
+  message was not included in that snapshot, it runs another response pass.
+- Before each latest-user check, the worker clears any wake flag it is about to
+  observe through the database. At shutdown it only exits if no post arrived
+  after that final check; otherwise it keeps the worker alive for another pass.
 - Cross-session workers may run concurrently, subject to the M1b provider
   semaphore.
 
