@@ -1,4 +1,6 @@
 use crate::db::messages::Message;
+use axum::response::sse::Event;
+use std::convert::Infallible;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
@@ -25,4 +27,16 @@ impl SseBroker {
             .or_insert_with(|| broadcast::channel(256).0)
             .clone()
     }
+}
+
+pub fn message_event(message: &Message) -> Result<Event, Infallible> {
+    Ok(Event::default()
+        .event("message")
+        .id(message.id.to_string())
+        .json_data(message)
+        .expect("message serializes for SSE"))
+}
+
+pub fn history_end_event() -> Result<Event, Infallible> {
+    Ok(Event::default().event("history_end").data("{}"))
 }

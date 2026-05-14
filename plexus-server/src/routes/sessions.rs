@@ -8,6 +8,10 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    response::{
+        IntoResponse, Response,
+        sse::{KeepAlive, Sse},
+    },
 };
 use plexus_common::ErrorCode;
 use serde::Deserialize;
@@ -34,6 +38,11 @@ pub struct RenameSessionRequest {
 pub struct MessageHistoryQuery {
     before: Option<Uuid>,
     limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct StreamQuery {
+    replay_limit: Option<i64>,
 }
 
 pub async fn list_sessions(
@@ -141,6 +150,52 @@ pub async fn post_message(
         StatusCode::ACCEPTED,
         Json(json!({ "message_id": message.id })),
     ))
+}
+
+pub async fn stream_session(
+    auth: AuthUser,
+    State(state): State<crate::app::AppState>,
+    Path(session_id): Path<Uuid>,
+    Query(query): Query<StreamQuery>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, ApiError> {
+    let _session = owned_session_or_404(state.pool(), auth.user.id, session_id).await?;
+    let mut receiver = state.chat().broker().subscribe(session_id).await;
+    let replay_limit = query.replay_limit.unwrap_or(50).clamp(0, 200);
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok());
+
+    let replay = if let Some(last_event_id) = last_event_id {
+        messages::replay_after(state.pool(), session_id, last_event_id)
+            .await
+            .map_err(ApiError::from_sqlx)?
+    } else if replay_limit == 0 {
+        Vec::new()
+    } else {
+        messages::replay_recent(state.pool(), session_id, replay_limit)
+            .await
+            .map_err(ApiError::from_sqlx)?
+    };
+
+    let stream = async_stream::stream! {
+        for message in replay {
+            yield crate::chat::sse::message_event(&message);
+        }
+        yield crate::chat::sse::history_end_event();
+        loop {
+            match receiver.recv().await {
+                Ok(message) => yield crate::chat::sse::message_event(&message),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 
 pub async fn owned_session_or_404(

@@ -34,4 +34,5 @@ pub fn router() -> Router<AppState> {
             "/api/sessions/{id}/messages",
             get(sessions::list_messages).post(sessions::post_message),
         )
+        .route("/api/sessions/{id}/stream", get(sessions::stream_session))
 }
