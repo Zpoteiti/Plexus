@@ -145,6 +145,7 @@ pub async fn post_message(
         .await
         .map_err(ApiError::from_sqlx)?;
     state.chat().broker().broadcast(message.clone()).await;
+    crate::chat::worker::spawn_response_worker(state.clone(), session.id);
 
     Ok((
         StatusCode::ACCEPTED,

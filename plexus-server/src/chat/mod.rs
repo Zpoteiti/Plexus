@@ -5,6 +5,7 @@ use uuid::Uuid;
 pub mod content;
 pub mod prompt;
 pub mod sse;
+pub mod worker;
 
 #[derive(Clone, Default)]
 pub struct ChatRuntime {

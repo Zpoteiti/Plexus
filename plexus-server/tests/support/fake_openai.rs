@@ -248,12 +248,12 @@ async fn chat(
 
     let content = if matches!(state.mode, FakeMode::ImageUnsupportedThenValid) {
         "image stripped fallback"
+    } else if last_user.contains("hello") {
+        "hi"
+    } else if last_user.contains("ping") {
+        "pong"
     } else {
-        match last_user.as_str() {
-            "hello" => "hi",
-            "ping" => "pong",
-            _ => "I do not have a fixture for that.",
-        }
+        "I do not have a fixture for that."
     };
 
     (
