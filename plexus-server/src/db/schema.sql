@@ -34,15 +34,24 @@ CREATE TABLE IF NOT EXISTS telegram_configs (
 CREATE TABLE IF NOT EXISTS sessions (
     id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id           UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    session_key       TEXT         NOT NULL UNIQUE,
+    session_key       TEXT         NOT NULL,
     channel           TEXT         NOT NULL,
     chat_id           TEXT         NOT NULL,
+    title             TEXT         NOT NULL DEFAULT 'New chat',
     last_inbound_at   TIMESTAMPTZ,
     cancel_requested  BOOLEAN      NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE sessions
+    ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT 'New chat';
+
+ALTER TABLE sessions
+    DROP CONSTRAINT IF EXISTS sessions_session_key_key;
+
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_session_key
+    ON sessions(user_id, session_key);
 
 CREATE TABLE IF NOT EXISTS messages (
     id                       UUID         PRIMARY KEY DEFAULT gen_random_uuid(),

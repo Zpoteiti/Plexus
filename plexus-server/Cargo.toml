@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 plexus-common = { path = "../plexus-common" }
 axum.workspace = true
+async-stream.workspace = true
 cookie.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
