@@ -136,12 +136,12 @@ async fn unsupported_or_deferred_keys_reject_atomically() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    let stored: (serde_json::Value,) =
+    let stored: Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT value FROM system_config WHERE key = 'quota_bytes'")
-            .fetch_one(&app.pool)
+            .fetch_optional(&app.pool)
             .await
             .unwrap();
-    assert_ne!(stored.0, json!(999));
+    assert!(stored.is_none());
 
     let (status, _) = json_request(
         app.router.clone(),
@@ -169,6 +169,7 @@ async fn responses_do_not_leak_known_secrets() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({}));
     let text = body.to_string();
     assert!(!text.contains("test-admin-token"));
     assert!(!text.contains("test-jwt-secret-with-enough-entropy"));

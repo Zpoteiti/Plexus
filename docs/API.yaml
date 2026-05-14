@@ -598,7 +598,7 @@ paths:
                 quota_bytes:
                   type: integer
                   format: int64
-                  description: Requested quota. Server caps at `system_config.shared_workspace_quota_bytes` (default 25 GB).
+                  description: Requested quota. Later workspace slices cap this at configured `system_config.shared_workspace_quota_bytes`; if that key is missing, they must handle setup explicitly.
       responses:
         '201':
           description: Created.
@@ -1358,8 +1358,9 @@ paths:
       tags: [Admin]
       summary: Get system-wide config (admin only)
       description: |
-        Returns admin-visible `system_config` values. Secret-bearing values such
-        as a configured `llm_api_key` are redacted. Known keys:
+        Returns admin-visible `system_config` values. Bootstrap does not seed
+        default rows, so a fresh server may return `{}`. Secret-bearing values
+        such as a configured `llm_api_key` are redacted. Known keys:
 
           - `quota_bytes` (int) — per-user workspace quota (ADR-046).
           - `shared_workspace_quota_bytes` (int) — quota ceiling that any
@@ -1376,19 +1377,21 @@ paths:
           - `llm_max_context_tokens` (int) — LLM context window in tokens
             (e.g. `128000`). Counted with tiktoken-rs (ADR-025). ADR-101.
           - `llm_compaction_threshold_tokens` (int) — accepted/reserved
-            config for later compaction decisions (default `16000`). The
-            intended future trigger compares
+            config for later compaction decisions. Missing means not
+            configured; future compaction code must handle that explicitly.
+            The intended future trigger compares
             `llm_max_context_tokens − tiktoken_count(prompt)` with
             `llm_compaction_threshold_tokens`; summary `max_output_tokens`
             = `threshold − 4000`. M1b stores the value but does not perform
             compaction decisions. ADR-028, ADR-101.
           - `llm_max_concurrent_requests` (int) — optional
-            in-process semaphore in the shared LLM provider layer. Default
+            in-process semaphore in the shared LLM provider layer. A configured
             `0` means unlimited and creates no semaphore. A positive integer
             caps concurrent in-flight LLM calls. Applies to internal
             non-streaming chat-completion calls made through the shared LLM
             provider layer; later chat, cron, heartbeat, and compaction flows
-            will use the same layer. ADR-101.
+            will use the same layer. If missing at server startup, only the
+            runtime limiter treats it as `0`; no row is persisted. ADR-101.
           - `server_mcp` (array of `McpServerConfig`) — admin-configured
             shared-service MCPs, exposed as install site `server`.
             ADR-114. Reserved for the later MCP slice; not accepted by M1b.
@@ -1438,10 +1441,11 @@ paths:
         sending a new value and keep the existing key by omitting
         `llm_api_key`. Sending `"<redacted>"` as a new key is rejected.
 
-        M1b treats `llm_max_concurrent_requests=0` as unlimited/no semaphore
-        and positive integers as an in-process cap for outbound
-        chat-completion calls. Negative values and values above the server
-        maximum are invalid.
+        M1b treats configured `llm_max_concurrent_requests=0` as unlimited/no
+        semaphore and positive integers as an in-process cap for outbound
+        chat-completion calls. If the key is missing at startup, only the
+        runtime limiter treats it as `0`; no default row is persisted.
+        Negative values and values above the server maximum are invalid.
       security:
         - cookieAuth: [admin]
         - bearerAuth: [admin]

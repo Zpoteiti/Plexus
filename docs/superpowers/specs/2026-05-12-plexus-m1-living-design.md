@@ -132,9 +132,11 @@ Workspace transfer keeps explicit source/destination device fields:
 
 ### 4.5 LLM Provider
 
-All LLM requests go through the shared provider layer. The default concurrency
-mode is unlimited. Admins may configure a provider-level semaphore for weaker
-providers or installations without a gateway.
+All LLM requests go through the shared provider layer. Bootstrap does not seed a
+concurrency config row. If `llm_max_concurrent_requests` is missing at startup,
+only the runtime limiter treats it as `0` (unlimited); admins may configure a
+provider-level semaphore for weaker providers or installations without a
+gateway.
 
 When an admin changes LLM endpoint, API key, or model, the server validates the
 configuration before writing it to the database:

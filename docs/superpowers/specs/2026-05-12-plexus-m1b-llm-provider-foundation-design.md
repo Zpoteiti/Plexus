@@ -203,8 +203,9 @@ orchestrator/context layer, not in `openai.rs`.
 
 ## 6. Concurrency
 
-`llm_max_concurrent_requests` is an integer. M1b should seed the default value
-as `0`.
+`llm_max_concurrent_requests` is an integer. Bootstrap does not seed a default
+row. If the key is missing at startup, only the runtime limiter treats it as
+`0`.
 
 - `0` means unlimited and creates no semaphore.
 - A positive integer creates an in-process semaphore with that many permits.

@@ -23,14 +23,14 @@ unsupported keys return `400 Bad Request`):
 
 | Key | Type | ADR | Purpose |
 |---|---|---|---|
-| `quota_bytes` | int | ADR-046 | Per-user workspace quota (default 5 GB). |
-| `shared_workspace_quota_bytes` | int | ADR-108 | Quota ceiling that any single shared workspace may request at create or rename time. Default 25 GB. |
+| `quota_bytes` | int | ADR-046 | Per-user workspace quota. Missing means not configured; later workspace slices must handle that explicitly instead of assuming a fallback. |
+| `shared_workspace_quota_bytes` | int | ADR-108 | Quota ceiling that any single shared workspace may request at create or rename time. Missing means not configured; later shared-workspace slices must handle that explicitly. |
 | `llm_endpoint` | string | ADR-101 | OpenAI-compatible chat-completions base URL. |
 | `llm_api_key` | string | ADR-101 | Bearer credential for outbound LLM calls; redacted in admin API responses. |
 | `llm_model` | string | ADR-101 | Model name passed in request body. |
 | `llm_max_context_tokens` | int | ADR-101 | LLM context window in tokens (e.g. `128000` for gpt-4o). Counted with tiktoken-rs (ADR-025). |
-| `llm_compaction_threshold_tokens` | int | ADR-028, ADR-101 | Accepted/reserved config for later compaction decisions. Default `16000`; future summary `max_output_tokens` = `threshold − 4000`. M1b stores the value but does not perform compaction decisions. |
-| `llm_max_concurrent_requests` | int | ADR-101 | Optional in-process semaphore for outbound LLM calls. Default `0` means unlimited and creates no semaphore. A positive integer caps concurrent in-flight LLM calls; negative values and values above the server maximum are invalid. |
+| `llm_compaction_threshold_tokens` | int | ADR-028, ADR-101 | Accepted/reserved config for later compaction decisions. Missing means not configured; future compaction code must handle that explicitly. M1b stores the value but does not perform compaction decisions. |
+| `llm_max_concurrent_requests` | int | ADR-101 | Optional in-process semaphore for outbound LLM calls. A configured `0` means unlimited and creates no semaphore. A positive integer caps concurrent in-flight LLM calls; negative values and values above the server maximum are invalid. If missing at server startup, only the runtime limiter treats it as `0`; no row is persisted. |
 
 Reserved/future known keys (not PATCH-editable in M1b):
 
@@ -38,9 +38,11 @@ Reserved/future known keys (not PATCH-editable in M1b):
 |---|---|---|---|
 | `server_mcp` | array of `McpServerConfig` | ADR-114 | Admin-configured shared-service MCPs exposed as install site `server`; shared credentials, one runtime per MCP, bounded queue. |
 
-Deployments may carry additional opaque keys inserted outside the M1b admin
-API; Plexus reads only the ones it knows about. M1b `PATCH /api/admin/config`
-rejects keys outside the admin-editable table above.
+Bootstrap does not seed `system_config` rows. Fresh `GET /api/admin/config`
+therefore returns `{}` until an admin writes values. Deployments may carry
+additional opaque keys inserted outside the M1b admin API; Plexus reads only the
+ones it knows about. M1b `PATCH /api/admin/config` rejects keys outside the
+admin-editable table above.
 
 M1b accepts `llm_endpoint`, `llm_api_key`, and `llm_model` only after provider
 validation succeeds. First setup must provide all three identity values; later

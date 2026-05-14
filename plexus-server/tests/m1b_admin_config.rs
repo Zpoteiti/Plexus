@@ -191,12 +191,12 @@ async fn invalid_llm_identity_patch_is_atomic() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let quota: (serde_json::Value,) =
+    let quota: Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT value FROM system_config WHERE key = 'quota_bytes'")
-            .fetch_one(&app.pool)
+            .fetch_optional(&app.pool)
             .await
             .unwrap();
-    assert_ne!(quota.0, json!(999));
+    assert!(quota.is_none());
 }
 
 #[tokio::test]
@@ -220,12 +220,12 @@ async fn invalid_llm_endpoint_is_rejected_before_persistence() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let quota: (serde_json::Value,) =
+    let quota: Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT value FROM system_config WHERE key = 'quota_bytes'")
-            .fetch_one(&app.pool)
+            .fetch_optional(&app.pool)
             .await
             .unwrap();
-    assert_ne!(quota.0, json!(999));
+    assert!(quota.is_none());
 }
 
 #[tokio::test]
@@ -249,12 +249,12 @@ async fn llm_endpoint_with_allowed_scheme_but_missing_host_is_rejected_before_pe
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let quota: (serde_json::Value,) =
+    let quota: Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT value FROM system_config WHERE key = 'quota_bytes'")
-            .fetch_one(&app.pool)
+            .fetch_optional(&app.pool)
             .await
             .unwrap();
-    assert_ne!(quota.0, json!(999));
+    assert!(quota.is_none());
 }
 
 #[tokio::test]
@@ -398,12 +398,12 @@ async fn negative_concurrency_limit_is_rejected_before_persistence() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let stored: (serde_json::Value,) =
+    let stored: Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT value FROM system_config WHERE key = 'llm_max_concurrent_requests'")
-            .fetch_one(&app.pool)
+            .fetch_optional(&app.pool)
             .await
             .unwrap();
-    assert_eq!(stored.0, json!(0));
+    assert!(stored.is_none());
 }
 
 #[tokio::test]
@@ -421,10 +421,26 @@ async fn invalid_concurrency_limit_is_rejected_before_persistence() {
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let stored: (serde_json::Value,) =
+    let stored: Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT value FROM system_config WHERE key = 'llm_max_concurrent_requests'")
-            .fetch_one(&app.pool)
+            .fetch_optional(&app.pool)
             .await
             .unwrap();
-    assert_eq!(stored.0, json!(0));
+    assert!(stored.is_none());
+}
+
+#[tokio::test]
+async fn missing_concurrency_limit_is_runtime_unlimited() {
+    let app = TestApp::spawn().await;
+    let stored: Option<(serde_json::Value,)> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'llm_max_concurrent_requests'")
+            .fetch_optional(&app.pool)
+            .await
+            .unwrap();
+    assert!(stored.is_none());
+
+    let limit = plexus_server::db::system_config::current_concurrency_limit(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(limit, 0);
 }

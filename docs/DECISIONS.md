@@ -281,7 +281,7 @@ pub struct ContextInputs<'a> {
 **Status:** accepted
 **Decision:** Two admin-set keys in `system_config` (ADR-101) drive the trigger:
 - `llm_max_context_tokens` — the LLM's context-window size, counted with tiktoken-rs (ADR-025) against the full chat-completions prompt (system + tools + history + new turn).
-- `llm_compaction_threshold_tokens` — the headroom that triggers compaction. Default `16000`.
+- `llm_compaction_threshold_tokens` — the headroom that triggers compaction. Missing means compaction is not configured; the future compaction implementation must handle that explicitly.
 
 **Trigger:** when `llm_max_context_tokens − tiktoken_count(prompt) < llm_compaction_threshold_tokens`, fire compaction.
 
@@ -569,7 +569,7 @@ pub trait Tool: Send + Sync {
 **Status:** accepted
 **Context:** Plexus hosts user workspaces on disk. Without bounds, an agent or user can fill the volume and break the service for everyone. Prior Plexus had no quota at all. Nanobot runs single-user and didn't need one.
 **Decision:**
-- **One global quota value.** Stored in `system_config` under key `quota_bytes`. Admin-editable via admin UI; takes effect immediately for all users. No per-user override. Default: 5 GB.
+- **One global quota value.** Stored in `system_config` under key `quota_bytes`. Admin-editable via admin UI; takes effect immediately for all users. No per-user override. Bootstrap does not seed a default; setup/admin UI must guide the admin when it is missing.
 - **Usage authority.** `workspace_fs` is the only authority for server-side workspace usage. The schema does not require a `users.bytes_used` column. Implementations may compute usage on demand by walking `{workspace_root}/{user_id}/`, or maintain an internal cache/counter hidden behind `workspace_fs`; either way, API callers see the same result.
 - **Two-layer check before every write (enforced at the single workspace_fs choke point per ADR-045):**
   1. **Lock rule:** if current usage is greater than `quota_bytes`, all writes/edits/adds are rejected with `WorkspaceError::SoftLocked`. Only `delete_file` and `delete_folder` are allowed. Lock auto-lifts as soon as a delete pulls usage back under quota — no explicit unlock step.
@@ -1403,10 +1403,13 @@ The admin configures the LLM via the admin REST API — **not env vars**. Six ke
 | `llm_api_key` | string | Bearer credential the server uses on outbound requests. |
 | `llm_model` | string | Model name passed in the request body (e.g. `gpt-4o`, `gpt-5-codex`, `anthropic/claude-opus-4-7` if the gateway routes it). |
 | `llm_max_context_tokens` | integer | The LLM's hard context-window size in tokens (e.g. `128000` for gpt-4o, `200000` for gpt-5-class). Counted with `tiktoken-rs` (ADR-025) against the full chat-completions prompt — system + tools + history + new turn. |
-| `llm_compaction_threshold_tokens` | integer | Headroom that triggers compaction (default `16000`, ADR-028). When `llm_max_context_tokens − tiktoken_count(prompt) < llm_compaction_threshold_tokens`, the bus fires stage-1 compaction. The summary's `max_output_tokens` is `threshold − 4000` (= `12000` at the default), reserving 4k headroom for the next user turn. |
-| `llm_max_concurrent_requests` | integer | Optional in-process semaphore applied in the shared OpenAI-compatible provider layer. Default `0` means unlimited and creates no semaphore. A positive integer caps concurrent in-flight LLM calls. When set, all LLM calls share the same cap: normal chat, cron, heartbeat, compaction, and future autonomous flows. |
+| `llm_compaction_threshold_tokens` | integer | Headroom that triggers compaction (ADR-028). Missing means compaction is not configured; future compaction code must handle that explicitly. When `llm_max_context_tokens − tiktoken_count(prompt) < llm_compaction_threshold_tokens`, the bus fires stage-1 compaction. The summary's `max_output_tokens` is `threshold − 4000`, reserving 4k headroom for the next user turn. |
+| `llm_max_concurrent_requests` | integer | Optional in-process semaphore applied in the shared OpenAI-compatible provider layer. A configured `0` means unlimited and creates no semaphore. A positive integer caps concurrent in-flight LLM calls. When set, all LLM calls share the same cap: normal chat, cron, heartbeat, compaction, and future autonomous flows. If missing at server startup, only the runtime limiter treats it as `0`; no row is persisted. |
 
-Set via `PATCH /api/admin/config`. Read via `GET /api/admin/config`. No `LLM_*` env vars; the only env vars relevant to LLM behavior are `DATABASE_URL` (so the server can read these keys at startup) and the JWT/auth secrets.
+Bootstrap does not seed these rows. Set via `PATCH /api/admin/config`. Read via
+`GET /api/admin/config`; a fresh server may return `{}`. No `LLM_*` env vars;
+the only env vars relevant to LLM behavior are `DATABASE_URL` (so the server can
+read these keys at startup) and the JWT/auth secrets.
 
 When an admin changes `llm_endpoint`, `llm_api_key`, or `llm_model`, the server validates before writing to `system_config`: `GET {llm_endpoint}/models` must be reachable with the configured bearer credential, return a well-formed OpenAI-compatible models response, and include the configured `llm_model`. Failure rejects the admin request and leaves the existing DB config unchanged. Automated tests use a fake OpenAI-compatible HTTP server; real provider credentials are only needed for live smoke testing.
 

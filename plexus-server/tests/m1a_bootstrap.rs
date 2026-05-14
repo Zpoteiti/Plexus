@@ -39,6 +39,16 @@ async fn bootstrap_is_idempotent() {
 }
 
 #[tokio::test]
+async fn bootstrap_does_not_seed_system_config_defaults() {
+    let app = TestApp::spawn().await;
+    let count: (i64,) = sqlx::query_as("SELECT count(*) FROM system_config")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(count.0, 0);
+}
+
+#[tokio::test]
 async fn bootstrap_applies_m1c_session_shape() {
     let app = TestApp::spawn().await;
 

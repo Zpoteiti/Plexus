@@ -19,29 +19,7 @@ pub const SUPPORTED_CONFIG_KEYS: &[&str] = &[
 
 pub const LLM_IDENTITY_KEYS: &[&str] = &["llm_endpoint", "llm_api_key", "llm_model"];
 
-pub async fn seed_defaults(pool: &PgPool) -> Result<(), sqlx::Error> {
-    let defaults = [
-        ("quota_bytes", json!(5_i64 * 1024 * 1024 * 1024)),
-        (
-            "shared_workspace_quota_bytes",
-            json!(25_i64 * 1024 * 1024 * 1024),
-        ),
-        ("llm_max_context_tokens", json!(128000)),
-        ("llm_compaction_threshold_tokens", json!(16000)),
-        ("llm_max_concurrent_requests", json!(0)),
-    ];
-
-    for (key, value) in defaults {
-        sqlx::query(
-            "INSERT INTO system_config (key, value) VALUES ($1, $2)
-             ON CONFLICT (key) DO NOTHING",
-        )
-        .bind(key)
-        .bind(value)
-        .execute(pool)
-        .await?;
-    }
-
+pub async fn seed_defaults(_pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
