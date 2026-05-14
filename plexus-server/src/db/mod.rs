@@ -1,5 +1,6 @@
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
+pub mod sessions;
 pub mod system_config;
 pub mod users;
 

@@ -7,6 +7,7 @@ use axum::{
 pub mod admin;
 pub mod auth;
 pub mod me;
+pub mod sessions;
 mod validation;
 
 pub fn router() -> Router<AppState> {
@@ -18,5 +19,15 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/admin/config",
             get(admin::get_config).patch(admin::patch_config),
+        )
+        .route(
+            "/api/sessions",
+            get(sessions::list_sessions).post(sessions::create_session),
+        )
+        .route(
+            "/api/sessions/{id}",
+            get(sessions::get_session)
+                .patch(sessions::rename_session)
+                .delete(sessions::delete_session),
         )
 }
