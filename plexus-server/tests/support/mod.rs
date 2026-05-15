@@ -1,8 +1,15 @@
+use axum::{
+    body::Body,
+    http::{HeaderMap, Method, Request, StatusCode, header},
+};
+use http_body_util::BodyExt;
 use plexus_common::{AdminToken, JwtSecret};
 use plexus_server::{app, config::ServerConfig, db};
+use serde_json::Value;
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use std::{env, path::PathBuf};
 use tempfile::TempDir;
+use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
 
@@ -102,6 +109,47 @@ fn database_url_for_db(admin_url: &str, db_name: &str) -> String {
 #[allow(dead_code)]
 pub fn workspace_path(root: &TempDir, user_id: Uuid) -> PathBuf {
     root.path().join(user_id.to_string())
+}
+
+pub async fn json_request(
+    app: axum::Router,
+    method: Method,
+    path: &str,
+    body: Value,
+    auth: Option<&str>,
+) -> (StatusCode, Value) {
+    let (status, _, body) = json_request_with_headers(app, method, path, body, auth).await;
+    (status, body)
+}
+
+pub async fn json_request_with_headers(
+    app: axum::Router,
+    method: Method,
+    path: &str,
+    body: Value,
+    auth: Option<&str>,
+) -> (StatusCode, HeaderMap, Value) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(token) = auth {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let response = app
+        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, headers, body)
 }
 
 pub mod fake_openai;

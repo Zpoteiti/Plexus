@@ -10,37 +10,9 @@ use plexus_common::ContentBlock;
 use plexus_server::db::messages;
 use serde_json::{Value, json};
 use std::time::Duration;
-use support::{TestApp, fake_openai::FakeOpenAi};
+use support::{TestApp, fake_openai::FakeOpenAi, json_request};
 use tower::ServiceExt;
 use uuid::Uuid;
-
-async fn json_request(
-    app: axum::Router,
-    method: Method,
-    path: &str,
-    body: Value,
-    auth: Option<&str>,
-) -> (StatusCode, Value) {
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(path)
-        .header(header::CONTENT_TYPE, "application/json");
-    if let Some(token) = auth {
-        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
-    }
-    let response = app
-        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap()
-    };
-    (status, json)
-}
 
 async fn register_create_and_post(app: &TestApp, text: &str) -> (String, String) {
     let (status, body) = json_request(

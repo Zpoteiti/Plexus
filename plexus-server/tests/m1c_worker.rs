@@ -1,10 +1,6 @@
 mod support;
 
-use axum::{
-    body::Body,
-    http::{Method, Request, StatusCode, header},
-};
-use http_body_util::BodyExt;
+use axum::http::{Method, StatusCode};
 use plexus_common::{ContentBlock, ErrorCode, ReasoningEffort};
 use plexus_server::{
     chat::prompt,
@@ -12,37 +8,8 @@ use plexus_server::{
 };
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
-use support::{TestApp, fake_openai::FakeOpenAi};
-use tower::ServiceExt;
+use support::{TestApp, fake_openai::FakeOpenAi, json_request};
 use uuid::Uuid;
-
-async fn json_request(
-    app: axum::Router,
-    method: Method,
-    path: &str,
-    body: Value,
-    auth: Option<&str>,
-) -> (StatusCode, Value) {
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(path)
-        .header(header::CONTENT_TYPE, "application/json");
-    if let Some(token) = auth {
-        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
-    }
-    let response = app
-        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap()
-    };
-    (status, json)
-}
 
 async fn register(app: axum::Router, email: &str, admin: bool) -> String {
     let mut body = json!({

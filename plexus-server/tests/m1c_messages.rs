@@ -1,42 +1,9 @@
 mod support;
 
-use axum::{
-    body::Body,
-    http::{Method, Request, StatusCode, header},
-};
-use http_body_util::BodyExt;
+use axum::http::{Method, StatusCode};
 use serde_json::{Value, json};
-use support::TestApp;
-use tower::ServiceExt;
+use support::{TestApp, json_request};
 use uuid::Uuid;
-
-async fn json_request(
-    app: axum::Router,
-    method: Method,
-    path: &str,
-    body: Value,
-    auth: Option<&str>,
-) -> (StatusCode, Value) {
-    let mut builder = Request::builder()
-        .method(method)
-        .uri(path)
-        .header(header::CONTENT_TYPE, "application/json");
-    if let Some(token) = auth {
-        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
-    }
-    let response = app
-        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let json = if bytes.is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_slice(&bytes).unwrap()
-    };
-    (status, json)
-}
 
 async fn register_and_create_session(app: &TestApp) -> (String, String) {
     let (status, body) = json_request(
