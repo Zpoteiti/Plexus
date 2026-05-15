@@ -12,24 +12,25 @@ pub struct PendingMessage {
     pub user_id: Uuid,
     pub session_key: String,
     pub content: Value,
-    pub reasoning_effort: String,
+    pub reasoning_effort: Option<String>,
     pub received_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct PendingSession {
     pub session_id: Uuid,
-    pub reasoning_effort: String,
+    pub reasoning_effort: Option<String>,
 }
 
 pub async fn insert_pending(
     pool: &PgPool,
     session: &Session,
     content: Vec<ContentBlock>,
-    reasoning_effort: ReasoningEffort,
+    reasoning_effort: Option<ReasoningEffort>,
 ) -> Result<PendingMessage, sqlx::Error> {
     let id = Uuid::now_v7();
     let content = serde_json::to_value(content).expect("content blocks serialize");
+    let reasoning_effort = reasoning_effort.map(|effort| effort.as_str().to_string());
     sqlx::query_as::<_, PendingMessage>(
         r#"
         INSERT INTO pending_messages (id, session_id, user_id, session_key, content, reasoning_effort)
@@ -42,7 +43,7 @@ pub async fn insert_pending(
     .bind(session.user_id)
     .bind(&session.session_key)
     .bind(content)
-    .bind(reasoning_effort.as_str())
+    .bind(reasoning_effort)
     .fetch_one(pool)
     .await
 }
@@ -50,7 +51,7 @@ pub async fn insert_pending(
 pub async fn drain_for_session(
     pool: &PgPool,
     session_id: Uuid,
-) -> Result<Vec<(Message, ReasoningEffort)>, sqlx::Error> {
+) -> Result<Vec<(Message, Option<ReasoningEffort>)>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let pending = pending_for_update(&mut tx, session_id).await?;
     let mut drained = Vec::with_capacity(pending.len());
@@ -68,10 +69,11 @@ pub async fn drain_for_session(
         .bind(row.content.clone())
         .fetch_one(&mut *tx)
         .await?;
-        let effort = row
-            .reasoning_effort
-            .parse::<ReasoningEffort>()
-            .expect("pending reasoning_effort constrained by schema");
+        let effort = row.reasoning_effort.as_deref().map(|value| {
+            value
+                .parse::<ReasoningEffort>()
+                .expect("pending reasoning_effort constrained by schema")
+        });
         drained.push((message, effort));
     }
 

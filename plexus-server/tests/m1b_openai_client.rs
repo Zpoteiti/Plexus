@@ -75,7 +75,7 @@ async fn chat_completion_sends_non_streaming_request_and_returns_content() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::None,
+                reasoning_effort: Some(ReasoningEffort::None),
             },
         )
         .await
@@ -96,7 +96,7 @@ async fn chat_completion_sends_reasoning_controls_for_none() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::None,
+                reasoning_effort: Some(ReasoningEffort::None),
             },
         )
         .await
@@ -105,6 +105,27 @@ async fn chat_completion_sends_reasoning_controls_for_none() {
     let body = fake.last_chat_body();
     assert_eq!(body["reasoning_effort"], "none");
     assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+}
+
+#[tokio::test]
+async fn chat_completion_omits_reasoning_controls_when_unspecified() {
+    let fake = FakeOpenAi::valid().await;
+    OpenAiClient::new()
+        .chat_completion(
+            &config(&fake),
+            ChatCompletionRequest {
+                messages: vec![user_message("hello")],
+                max_tokens: None,
+                temperature: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .expect("chat response");
+
+    let body = fake.last_chat_body();
+    assert!(body.get("reasoning_effort").is_none());
+    assert!(body.get("chat_template_kwargs").is_none());
 }
 
 #[tokio::test]
@@ -117,7 +138,7 @@ async fn chat_completion_sends_reasoning_controls_for_high() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::High,
+                reasoning_effort: Some(ReasoningEffort::High),
             },
         )
         .await
@@ -142,7 +163,7 @@ async fn assistant_history_sends_empty_reasoning_content() {
                 }],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::Medium,
+                reasoning_effort: Some(ReasoningEffort::Medium),
             },
         )
         .await
@@ -167,7 +188,7 @@ async fn assistant_history_sends_stored_reasoning_content() {
                 }],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::Medium,
+                reasoning_effort: Some(ReasoningEffort::Medium),
             },
         )
         .await
@@ -188,7 +209,7 @@ async fn chat_completion_normalizes_native_reasoning_content() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::Medium,
+                reasoning_effort: Some(ReasoningEffort::Medium),
             },
         )
         .await
@@ -211,7 +232,7 @@ async fn chat_completion_extracts_leading_think_block() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::Medium,
+                reasoning_effort: Some(ReasoningEffort::Medium),
             },
         )
         .await
@@ -237,7 +258,7 @@ async fn chat_completion_does_not_retry_non_transient_request_errors() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::Medium,
+                reasoning_effort: Some(ReasoningEffort::Medium),
             },
         ),
     )
@@ -260,7 +281,7 @@ async fn chat_completion_accepts_endpoint_with_trailing_slash() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::Medium,
+                reasoning_effort: Some(ReasoningEffort::Medium),
             },
         )
         .await
@@ -278,7 +299,7 @@ async fn runtime_concurrency_limit_caps_in_flight_chat_requests() {
         messages: vec![user_message("ping")],
         max_tokens: None,
         temperature: None,
-        reasoning_effort: ReasoningEffort::Medium,
+        reasoning_effort: Some(ReasoningEffort::Medium),
     };
 
     let started = Instant::now();
@@ -303,7 +324,7 @@ async fn chat_completion_sends_content_arrays() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::Medium,
+                reasoning_effort: Some(ReasoningEffort::Medium),
             },
         )
         .await
@@ -332,7 +353,7 @@ async fn image_payload_error_retries_with_images_stripped() {
                 }],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::Medium,
+                reasoning_effort: Some(ReasoningEffort::Medium),
             },
         )
         .await
@@ -353,7 +374,7 @@ async fn auth_error_does_not_retry_or_strip_images() {
                 messages: vec![user_message("hello")],
                 max_tokens: None,
                 temperature: None,
-                reasoning_effort: ReasoningEffort::Medium,
+                reasoning_effort: Some(ReasoningEffort::Medium),
             },
         )
         .await

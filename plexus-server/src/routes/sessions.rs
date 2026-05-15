@@ -136,7 +136,7 @@ pub async fn post_message(
         ));
     }
 
-    let reasoning_effort = required_reasoning_effort(&body)?;
+    let reasoning_effort = optional_reasoning_effort(&body)?;
     let mut content = vec![runtime_block(&session)];
     content.extend(normalize_user_content(body.get("content").cloned())?);
     sessions::touch_last_inbound(state.pool(), session.id)
@@ -243,12 +243,19 @@ fn not_found() -> ApiError {
     )
 }
 
-fn required_reasoning_effort(body: &Map<String, Value>) -> Result<ReasoningEffort, ApiError> {
-    let value = body
-        .get("reasoning_effort")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::invalid_args("reasoning_effort is required"))?;
-    value.parse::<ReasoningEffort>().map_err(|_| {
+fn optional_reasoning_effort(
+    body: &Map<String, Value>,
+) -> Result<Option<ReasoningEffort>, ApiError> {
+    let Some(value) = body.get("reasoning_effort") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = value
+        .as_str()
+        .ok_or_else(|| ApiError::invalid_args("reasoning_effort must be a string or null"))?;
+    value.parse::<ReasoningEffort>().map(Some).map_err(|_| {
         ApiError::invalid_args(format!(
             "reasoning_effort must be one of: {}",
             ReasoningEffort::ALLOWED_VALUES

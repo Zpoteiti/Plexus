@@ -75,9 +75,12 @@ CREATE TABLE IF NOT EXISTS pending_messages (
     user_id           UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     session_key       TEXT         NOT NULL,
     content           JSONB        NOT NULL,
-    reasoning_effort  TEXT         NOT NULL CHECK (reasoning_effort IN ('none', 'minimal', 'low', 'medium', 'high', 'xhigh')),
+    reasoning_effort  TEXT         CHECK (reasoning_effort IN ('none', 'minimal', 'low', 'medium', 'high', 'xhigh')),
     received_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE pending_messages
+    ALTER COLUMN reasoning_effort DROP NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_pending_messages_session_received
     ON pending_messages(session_id, received_at, id);

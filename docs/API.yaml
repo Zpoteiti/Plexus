@@ -450,17 +450,20 @@ paths:
           application/json:
             schema:
               type: object
-              required: [reasoning_effort]
               properties:
                 reasoning_effort:
-                  $ref: '#/components/schemas/ReasoningEffort'
+                  allOf:
+                    - $ref: '#/components/schemas/ReasoningEffort'
+                  nullable: true
                   description: |
-                    Required per-turn reasoning setting selected by the
-                    frontend. Plexus forwards this value as
-                    `reasoning_effort` and also sends
+                    Optional per-turn reasoning setting selected by the
+                    caller. If omitted or `null`, Plexus omits both
+                    `reasoning_effort` and `chat_template_kwargs` from the
+                    provider request. If set to an explicit value, Plexus
+                    forwards `reasoning_effort` and sends
                     `chat_template_kwargs.enable_thinking`, set to `false`
-                    only when the value is `none`; provider incompatibility
-                    is surfaced as a persisted synthetic assistant error.
+                    only when the value is `none`; provider incompatibility is
+                    surfaced as a persisted synthetic assistant error.
                 content:
                   description: OpenAI chat-completions content blocks (text + image_url). Strings are accepted as shorthand for a single text block. Omitted content or an empty string/array is a valid empty user message. M1c accepts only inline base64 `data:image/...;base64,...` image URLs; external image URLs and multipart uploads are deferred to M1d.
                   oneOf:
@@ -1722,7 +1725,7 @@ components:
       type: string
       enum: [none, minimal, low, medium, high, xhigh]
       description: |
-        Required browser-selected per-turn reasoning setting. Frontend labels
+        Optional browser-selected per-turn reasoning setting. Frontend labels
         may render `none` as "off"; the wire value remains `none`.
 
     ContentBlock:

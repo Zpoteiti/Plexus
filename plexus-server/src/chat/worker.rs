@@ -4,6 +4,7 @@ use crate::{
     openai::{ChatCompletionRequest, ChatMessage},
 };
 use plexus_common::{ChatRole, ContentBlock};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 pub async fn spawn_pending_workers(
@@ -12,12 +13,33 @@ pub async fn spawn_pending_workers(
     let pending = pending_messages::pending_sessions(state.pool())
         .await
         .map_err(crate::error::ApiError::from_sqlx)?;
+    let mut recovered_sessions = HashSet::new();
     for row in pending {
-        let effort = row.reasoning_effort.parse().map_err(|_| {
-            crate::error::ApiError::invalid_args("stored pending reasoning_effort was malformed")
-        })?;
+        let effort = row
+            .reasoning_effort
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(|_| {
+                crate::error::ApiError::invalid_args(
+                    "stored pending reasoning_effort was malformed",
+                )
+            })?;
+        recovered_sessions.insert(row.session_id);
         if state.chat().enqueue_turn(row.session_id, effort).await {
             spawn_response_worker(state.clone(), row.session_id);
+        }
+    }
+
+    let visible_unanswered = messages::sessions_with_latest_user_message(state.pool())
+        .await
+        .map_err(crate::error::ApiError::from_sqlx)?;
+    for session_id in visible_unanswered {
+        if recovered_sessions.contains(&session_id) {
+            continue;
+        }
+        if state.chat().enqueue_turn(session_id, None).await {
+            spawn_response_worker(state.clone(), session_id);
         }
     }
     Ok(())
@@ -100,7 +122,7 @@ async fn respond_once(
         .await
         .ok_or_else(|| {
             crate::error::ApiError::invalid_args(
-                "reasoning_effort is required for pending chat turn",
+                "reasoning_effort state missing for active chat worker",
             )
         })?;
     let system_prompt =

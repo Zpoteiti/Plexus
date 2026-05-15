@@ -157,6 +157,23 @@ pub async fn latest_user_message(
     .await
 }
 
+pub async fn sessions_with_latest_user_message(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT session_id
+        FROM (
+            SELECT DISTINCT ON (session_id) session_id, role, created_at, id
+            FROM messages
+            ORDER BY session_id, created_at DESC, id DESC
+        ) latest
+        WHERE role = 'user'
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(session_id,)| session_id).collect())
+}
+
 pub async fn history_chronological(
     pool: &PgPool,
     session_id: Uuid,

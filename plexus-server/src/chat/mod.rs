@@ -18,7 +18,7 @@ pub struct ChatRuntime {
 struct SessionWorkState {
     active: bool,
     wake_requested: bool,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<Option<ReasoningEffort>>,
 }
 
 impl ChatRuntime {
@@ -26,7 +26,7 @@ impl ChatRuntime {
         &self.broker
     }
 
-    pub async fn enqueue_turn(&self, session_id: Uuid, effort: ReasoningEffort) -> bool {
+    pub async fn enqueue_turn(&self, session_id: Uuid, effort: Option<ReasoningEffort>) -> bool {
         let mut workers = self.workers.lock().await;
         let worker = workers.entry(session_id).or_default();
         worker.reasoning_effort = Some(effort);
@@ -70,13 +70,13 @@ impl ChatRuntime {
         }
     }
 
-    pub async fn update_reasoning_effort(&self, session_id: Uuid, effort: ReasoningEffort) {
+    pub async fn update_reasoning_effort(&self, session_id: Uuid, effort: Option<ReasoningEffort>) {
         if let Some(worker) = self.workers.lock().await.get_mut(&session_id) {
             worker.reasoning_effort = Some(effort);
         }
     }
 
-    pub async fn reasoning_effort(&self, session_id: Uuid) -> Option<ReasoningEffort> {
+    pub async fn reasoning_effort(&self, session_id: Uuid) -> Option<Option<ReasoningEffort>> {
         self.workers
             .lock()
             .await
@@ -98,32 +98,36 @@ mod tests {
 
         assert!(
             runtime
-                .enqueue_turn(session_id, ReasoningEffort::Medium)
+                .enqueue_turn(session_id, Some(ReasoningEffort::Medium))
                 .await
         );
         assert_eq!(
             runtime.reasoning_effort(session_id).await,
-            Some(ReasoningEffort::Medium)
+            Some(Some(ReasoningEffort::Medium))
         );
 
         assert!(
             !runtime
-                .enqueue_turn(session_id, ReasoningEffort::High)
+                .enqueue_turn(session_id, Some(ReasoningEffort::High))
                 .await
         );
         assert_eq!(
             runtime.reasoning_effort(session_id).await,
-            Some(ReasoningEffort::High)
+            Some(Some(ReasoningEffort::High))
         );
 
         assert!(runtime.finish_or_continue_worker(session_id).await);
         assert_eq!(
             runtime.reasoning_effort(session_id).await,
-            Some(ReasoningEffort::High)
+            Some(Some(ReasoningEffort::High))
         );
 
         assert!(!runtime.finish_or_continue_worker(session_id).await);
         assert_eq!(runtime.reasoning_effort(session_id).await, None);
-        assert!(runtime.enqueue_turn(session_id, ReasoningEffort::Low).await);
+        assert!(
+            runtime
+                .enqueue_turn(session_id, Some(ReasoningEffort::Low))
+                .await
+        );
     }
 }

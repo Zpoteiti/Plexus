@@ -81,7 +81,7 @@ fn chat_request() -> ChatCompletionRequest {
         }],
         max_tokens: None,
         temperature: None,
-        reasoning_effort: ReasoningEffort::Medium,
+        reasoning_effort: Some(ReasoningEffort::Medium),
     }
 }
 

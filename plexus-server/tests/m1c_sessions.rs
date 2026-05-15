@@ -194,7 +194,7 @@ async fn session_ownership_returns_404_for_other_users() {
 }
 
 #[tokio::test]
-async fn post_message_requires_reasoning_effort() {
+async fn post_message_accepts_unspecified_reasoning_effort() {
     let app = TestApp::spawn().await;
     let token = register(app.router.clone(), "alice@example.com").await;
     let (status, _, body) = json_request(
@@ -217,13 +217,39 @@ async fn post_message_requires_reasoning_effort() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .contains("reasoning_effort is required")
-    );
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body["message_id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn post_message_accepts_null_reasoning_effort() {
+    let app = TestApp::spawn().await;
+    let token = register(app.router.clone(), "alice-null@example.com").await;
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        "/api/sessions",
+        json!({}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = body["id"].as_str().unwrap();
+
+    let (status, _, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        &format!("/api/sessions/{id}/messages"),
+        json!({
+            "content": [{"type": "text", "text": "hello"}],
+            "reasoning_effort": null
+        }),
+        Some(&token),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body["message_id"].as_str().is_some());
 }
 
 #[tokio::test]

@@ -1400,13 +1400,14 @@ One client process talks to exactly one Plexus server. `PLEXUS_DEVICE_TOKEN` is 
 **Decision:** **OpenAI chat completions API ONLY.** Plexus speaks one request shape, one response shape, one tool-call format. If an admin wants Anthropic / Bedrock / Gemini / a local model, they put a gateway in front (LiteLLM, an OpenAI-compatible proxy, or the provider's own OpenAI-compat endpoint) and configure Plexus to talk to it. Format translation lives in the gateway, not in Plexus.
 
 M1c treats reasoning controls as part of that OpenAI-compatible dialect. Browser
-message writes must provide a per-turn `reasoning_effort` value
-(`none`, `minimal`, `low`, `medium`, `high`, or `xhigh`). Outbound provider
-requests always include both `reasoning_effort` and
+message writes may omit `reasoning_effort` or set it to `null`; in that case
+Plexus omits both `reasoning_effort` and `chat_template_kwargs` from the
+provider request. If the caller explicitly sends `none`, `minimal`, `low`,
+`medium`, `high`, or `xhigh`, Plexus forwards `reasoning_effort` and sends
 `chat_template_kwargs.enable_thinking`, with `enable_thinking = false` only for
-`none`. Providers that reject those fields surface a normal persisted assistant
-error; Plexus does not maintain an admin-side reasoning style switch. Provider
-reasoning is normalized into `messages.reasoning_content` from either native
+`none`. Providers that reject those explicit fields surface a normal persisted
+assistant error; Plexus does not maintain an admin-side reasoning style switch.
+Provider reasoning is normalized into `messages.reasoning_content` from either native
 `message.reasoning_content` or leading `<think>...</think>` content. The visible
 assistant answer remains in `messages.content`.
 

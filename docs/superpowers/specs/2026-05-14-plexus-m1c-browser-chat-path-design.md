@@ -236,10 +236,10 @@ The route persists the user message, broadcasts it to active SSE subscribers,
 starts the M1c response worker if one is not already active for this session,
 and returns `202 Accepted`.
 
-The request body must include `reasoning_effort` with one of:
-`none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. This is a required
-per-turn browser choice rather than an admin default. The frontend may render
-`none` as "off", but the wire value remains `none`.
+The request body may omit `reasoning_effort` or set it to `null`; in that case
+Plexus sends no reasoning controls to the provider. If present, it must be one
+of `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`. The frontend may
+render `none` as "off", but the wire value remains `none`.
 
 ### 5.5 Message History
 
@@ -467,9 +467,12 @@ into durable `messages.reasoning_content`. Assistant history is replayed with
 that stored reasoning value, or with `reasoning_content: ""` when no reasoning
 was stored for the assistant row.
 
-`stream` remains `false`. The provider request always includes both
-`reasoning_effort` and `chat_template_kwargs.enable_thinking`; the latter is
-`false` only when `reasoning_effort = "none"`.
+`stream` remains `false`. If the browser omits `reasoning_effort` or sends
+`null`, the provider request omits both `reasoning_effort` and
+`chat_template_kwargs`. If the browser sends an explicit reasoning value, the
+provider request includes `reasoning_effort` and
+`chat_template_kwargs.enable_thinking`; the latter is `false` only when
+`reasoning_effort = "none"`.
 
 ---
 
@@ -533,8 +536,8 @@ Behavior:
   provider-visible `messages`, broadcast over SSE, and a worker starts.
 - If a user posts while a response is running, the new message is inserted into
   durable `pending_messages` with `session_id`, `user_id`, `session_key`,
-  content, reasoning effort, and receive time. It is not included in provider
-  history until a safe boundary.
+  content, optional reasoning effort, and receive time. It is not included in
+  provider history until a safe boundary.
 - The M1c safe boundary is immediately after an assistant response or synthetic
   failure message is persisted. At that point the worker drains pending rows for
   the session in receive order, inserts them into `messages` using the same ids,
@@ -542,8 +545,11 @@ Behavior:
   another provider pass.
 - This preserves logical order for concurrent posts: `U1`, `A1`, `U2`, `U3`,
   rather than physical receive order `U1`, `U2`, `U3`, `A1`.
-- Server startup scans `pending_messages` and starts recovery workers so queued
-  rows are not stranded after a restart.
+- Server startup scans `pending_messages` and visible transcript tails. It
+  starts recovery workers for queued rows and for sessions whose latest visible
+  message is an unanswered user row. Visible-tail recovery uses unspecified
+  reasoning controls because direct `messages` rows do not store the original
+  per-turn setting in M1c.
 - Cross-session workers may run concurrently, subject to the M1b provider
   semaphore.
 

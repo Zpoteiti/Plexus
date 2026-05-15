@@ -184,7 +184,7 @@ CREATE TABLE IF NOT EXISTS pending_messages (
     user_id           UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     session_key       TEXT         NOT NULL,
     content           JSONB        NOT NULL,
-    reasoning_effort  TEXT         NOT NULL CHECK (reasoning_effort IN ('none', 'minimal', 'low', 'medium', 'high', 'xhigh')),
+    reasoning_effort  TEXT         CHECK (reasoning_effort IN ('none', 'minimal', 'low', 'medium', 'high', 'xhigh')),
     received_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
@@ -194,10 +194,10 @@ CREATE INDEX IF NOT EXISTS idx_pending_messages_session_key_received
     ON pending_messages(session_key, received_at, id);
 ```
 
-- `pending_messages` stores inbound user messages that arrive while a session worker is active. These rows are durable but not provider-visible history yet.
+- `pending_messages` stores inbound user messages that arrive while a session worker is active. These rows are durable but not provider-visible history yet. `reasoning_effort` is nullable because callers may omit reasoning controls for provider portability.
 - `session_key` is stored alongside `session_id` so channel/session routing can recover pending work without recomputing the key.
 - At each safe boundary (ADR-034), the worker drains rows for the session in `(received_at, id)` order, inserts them into `messages` with the same `id`, broadcasts the resulting user messages, and deletes the pending rows. When no session is in flight, this table should normally be empty.
-- Server startup scans this table and starts recovery workers for affected sessions.
+- Server startup scans this table and starts recovery workers for affected sessions. It also recovers sessions whose visible transcript tail is an unanswered user message.
 
 ---
 

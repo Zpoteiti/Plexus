@@ -469,6 +469,39 @@ async fn post_while_provider_in_flight_is_durable_pending_until_safe_boundary() 
 }
 
 #[tokio::test]
+async fn pending_message_with_unspecified_reasoning_drains_without_provider_reasoning_controls() {
+    let app = TestApp::spawn().await;
+    let token = register(
+        app.router.clone(),
+        "admin-pending-unspecified@example.com",
+        true,
+    )
+    .await;
+    let fake = FakeOpenAi::delayed(Duration::from_millis(150)).await;
+    configure_llm(&app, &token, &fake).await;
+    let session_id = create_session(&app, &token).await;
+
+    post_text(&app, &token, session_id, "hello").await;
+    wait_for_chat_calls(&fake, 1).await;
+    let (status, _) = json_request(
+        app.router.clone(),
+        Method::POST,
+        &format!("/api/sessions/{session_id}/messages"),
+        json!({"content": [{"type": "text", "text": "ping"}]}),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    wait_for_chat_calls(&fake, 2).await;
+    wait_for_assistant_count(&app, session_id, 2).await;
+    let body = fake.last_chat_body();
+    assert!(body.to_string().contains("ping"));
+    assert!(body.get("reasoning_effort").is_none());
+    assert!(body.get("chat_template_kwargs").is_none());
+}
+
+#[tokio::test]
 async fn startup_recovery_drains_pending_messages_before_provider_call() {
     let app = TestApp::spawn().await;
     let token = register(app.router.clone(), "admin-recovery@example.com", true).await;
@@ -491,7 +524,7 @@ async fn startup_recovery_drains_pending_messages_before_provider_call() {
         &app.pool,
         &session,
         vec![ContentBlock::text("ping")],
-        ReasoningEffort::Medium,
+        Some(ReasoningEffort::Medium),
     )
     .await
     .unwrap();
@@ -520,6 +553,38 @@ async fn startup_recovery_drains_pending_messages_before_provider_call() {
             .to_string()
             .contains("ping")
     );
+}
+
+#[tokio::test]
+async fn startup_recovery_answers_visible_unanswered_user_message_without_reasoning_controls() {
+    let app = TestApp::spawn().await;
+    let token = register(
+        app.router.clone(),
+        "admin-visible-recovery@example.com",
+        true,
+    )
+    .await;
+    let fake = FakeOpenAi::valid().await;
+    configure_llm(&app, &token, &fake).await;
+    let session_id = create_session(&app, &token).await;
+    messages::insert_message(
+        &app.pool,
+        session_id,
+        "user",
+        vec![ContentBlock::text("hello")],
+    )
+    .await
+    .unwrap();
+
+    plexus_server::chat::worker::spawn_pending_workers(app.state.clone())
+        .await
+        .unwrap();
+
+    wait_for_chat_calls(&fake, 1).await;
+    wait_for_assistant_count(&app, session_id, 1).await;
+    let body = fake.last_chat_body();
+    assert!(body.get("reasoning_effort").is_none());
+    assert!(body.get("chat_template_kwargs").is_none());
 }
 
 #[tokio::test]

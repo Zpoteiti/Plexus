@@ -117,9 +117,9 @@ impl OpenAiClient {
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             reasoning_effort: request.reasoning_effort,
-            chat_template_kwargs: ChatTemplateKwargs {
-                enable_thinking: request.reasoning_effort.enables_thinking(),
-            },
+            chat_template_kwargs: request.reasoning_effort.map(|effort| ChatTemplateKwargs {
+                enable_thinking: effort.enables_thinking(),
+            }),
         };
 
         let mut last_error: Option<ApiError> = None;
@@ -328,7 +328,7 @@ pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
-    pub reasoning_effort: ReasoningEffort,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -357,8 +357,10 @@ struct ChatRequestBody<'a> {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
-    reasoning_effort: ReasoningEffort,
-    chat_template_kwargs: ChatTemplateKwargs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<ChatTemplateKwargs>,
 }
 
 #[derive(Serialize)]
