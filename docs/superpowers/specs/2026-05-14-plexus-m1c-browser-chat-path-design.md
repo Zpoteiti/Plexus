@@ -681,6 +681,11 @@ Expected smoke path:
     image-strip fallback produces a safe response or diagnostic;
 11. confirm persisted history replays after reconnect.
 
+`scripts/m1c-smoke.py` automates steps 3-11 against an already-running Plexus
+server and database. It loads provider credentials from local ignored env files,
+including `scripts/.env`, but deliberately does not start services, reset
+databases, or manage Docker containers.
+
 Actual smoke evidence:
 
 - temporary Plexus server on an isolated PostgreSQL database;
