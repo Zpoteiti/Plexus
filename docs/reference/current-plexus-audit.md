@@ -125,7 +125,7 @@ Event bus — InboundEvent (user-to-agent), OutboundEvent (agent-to-channel). Ev
 - **db/cron.rs**: Cron job lifecycle — claim_due_jobs (atomic UPDATE), reschedule_after_completion, recover_stuck_jobs (30-min timeout recovery).
 - **db/discord.rs**: Discord config storage — create, find, list_enabled (for bot startup).
 - **db/telegram.rs**: Telegram config storage.
-- **db/system_config.rs**: Key-value store — get, set, seed_defaults_if_missing (LLM config, rate limit, prompts, MCP, workspace quota, etc.).
+- **db/system_config.rs**: Key-value store — get, set, validate, redact (LLM config, concurrency limit, workspace quota, etc.).
 
 #### workspace/ subdirectory (5 files, ~700 lines total):
 - **workspace/mod.rs**: Public exports (WorkspaceFs, QuotaCache, paths, registration).

@@ -19,10 +19,6 @@ pub const SUPPORTED_CONFIG_KEYS: &[&str] = &[
 
 pub const LLM_IDENTITY_KEYS: &[&str] = &["llm_endpoint", "llm_api_key", "llm_model"];
 
-pub async fn seed_defaults(_pool: &PgPool) -> Result<(), sqlx::Error> {
-    Ok(())
-}
-
 pub async fn get_all(pool: &PgPool) -> Result<BTreeMap<String, Value>, sqlx::Error> {
     let rows: Vec<(String, Value)> =
         sqlx::query_as("SELECT key, value FROM system_config ORDER BY key")

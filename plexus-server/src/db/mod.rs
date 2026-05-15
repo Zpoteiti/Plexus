@@ -17,6 +17,5 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(include_str!("schema.sql"))
         .execute(pool)
         .await?;
-    system_config::seed_defaults(pool).await?;
     Ok(())
 }
