@@ -430,9 +430,13 @@ paths:
       tags: [Sessions]
       summary: Target route — send a user message and spawn agent work (ADR-013; M1c)
       description: |
-        Returns `202 Accepted` immediately after persisting the user message
-        and spawning agent work. Subscribe to `GET /api/sessions/{id}/stream`
-        to receive the agent's reply events.
+        Returns `202 Accepted` immediately after durably accepting the user
+        message. If no worker is active for the session, the message is written
+        directly to provider-visible `messages` and a worker is spawned. If a
+        worker is active, the message is written to `pending_messages` and is
+        drained into `messages` at the next safe boundary after the in-flight
+        LLM request or tool call completes. Subscribe to
+        `GET /api/sessions/{id}/stream` to receive visible transcript events.
 
         **Browser write allow-list (ADR-098).** `{id}` is `sessions.id`, not
         `session_key`. The server loads the session, verifies ownership, and
@@ -465,7 +469,7 @@ paths:
                       items: { $ref: '#/components/schemas/ContentBlock' }
       responses:
         '202':
-          description: Message persisted, agent task spawned.
+          description: Message accepted. `message_id` is stable; queued pending rows keep the same id when drained into visible history.
           content:
             application/json:
               schema:

@@ -5,10 +5,10 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use plexus_common::ErrorCode;
+use plexus_common::{ContentBlock, ErrorCode, ReasoningEffort};
 use plexus_server::{
     chat::prompt,
-    db::{sessions, system_config, users},
+    db::{messages, pending_messages, sessions, system_config, users},
 };
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -103,6 +103,22 @@ async fn post_text(app: &TestApp, token: &str, session_id: Uuid, text: &str) {
     assert_eq!(status, StatusCode::ACCEPTED);
 }
 
+async fn post_text_id(app: &TestApp, token: &str, session_id: Uuid, text: &str) -> Uuid {
+    let (status, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        &format!("/api/sessions/{session_id}/messages"),
+        json!({
+            "content": [{"type": "text", "text": text}],
+            "reasoning_effort": "medium"
+        }),
+        Some(token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    Uuid::parse_str(body["message_id"].as_str().unwrap()).unwrap()
+}
+
 async fn wait_for_assistant(app: &TestApp, session_id: Uuid) -> Value {
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -156,8 +172,32 @@ async fn wait_for_chat_calls(fake: &FakeOpenAi, min_calls: usize) {
     }
 }
 
+async fn wait_for_assistant_count(app: &TestApp, session_id: Uuid, count: i64) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let (current_count,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM messages WHERE session_id = $1 AND role = 'assistant'",
+        )
+        .bind(session_id)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+        if current_count >= count {
+            return;
+        }
+        assert!(Instant::now() < deadline, "assistant count timed out");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 fn first_text(content: &Value) -> &str {
     content[0]["text"].as_str().unwrap()
+}
+
+fn last_text(content: &Value) -> &str {
+    content.as_array().unwrap().last().unwrap()["text"]
+        .as_str()
+        .unwrap()
 }
 
 #[tokio::test]
@@ -341,6 +381,145 @@ async fn post_while_provider_in_flight_runs_one_serial_followup_pass() {
     assert_eq!(fake.max_in_flight(), 1);
     assert_eq!(fake.chat_call_count(), 2);
     assert!(fake.last_chat_body().to_string().contains("ping"));
+}
+
+#[tokio::test]
+async fn post_while_provider_in_flight_is_durable_pending_until_safe_boundary() {
+    let app = TestApp::spawn().await;
+    let token = register(app.router.clone(), "admin-pending@example.com", true).await;
+    let fake = FakeOpenAi::delayed(Duration::from_millis(150)).await;
+    configure_llm(&app, &token, &fake).await;
+    let session_id = create_session(&app, &token).await;
+
+    post_text(&app, &token, session_id, "hello").await;
+    wait_for_chat_calls(&fake, 1).await;
+    let pending_id = post_text_id(&app, &token, session_id, "ping").await;
+
+    let pending: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM pending_messages WHERE session_id = $1")
+            .bind(session_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(pending.0, 1);
+    let visible_ping: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM messages
+         WHERE session_id = $1 AND id = $2",
+    )
+    .bind(session_id)
+    .bind(pending_id)
+    .fetch_optional(&app.pool)
+    .await
+    .unwrap();
+    assert!(visible_ping.is_none());
+
+    wait_for_chat_calls(&fake, 2).await;
+    wait_for_assistant_count(&app, session_id, 2).await;
+
+    let pending: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM pending_messages WHERE session_id = $1")
+            .bind(session_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(pending.0, 0);
+
+    let rows: Vec<(Uuid, String, Value)> = sqlx::query_as(
+        "SELECT id, role, content FROM messages
+         WHERE session_id = $1
+         ORDER BY created_at ASC, id ASC",
+    )
+    .bind(session_id)
+    .fetch_all(&app.pool)
+    .await
+    .unwrap();
+    let visible: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|(_, role, content)| {
+            let text = if role == "user" {
+                last_text(content)
+            } else {
+                first_text(content)
+            };
+            (role.as_str(), text)
+        })
+        .collect();
+    assert_eq!(
+        visible,
+        vec![
+            ("user", "hello"),
+            ("assistant", "hi"),
+            ("user", "ping"),
+            ("assistant", "pong"),
+        ]
+    );
+    assert_eq!(rows[2].0, pending_id);
+
+    let body = fake.last_chat_body();
+    let provider_messages = body["messages"].as_array().unwrap();
+    assert_eq!(provider_messages.last().unwrap()["role"], "user");
+    assert!(
+        provider_messages
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("ping")
+    );
+    assert!(body.to_string().contains("hi"));
+}
+
+#[tokio::test]
+async fn startup_recovery_drains_pending_messages_before_provider_call() {
+    let app = TestApp::spawn().await;
+    let token = register(app.router.clone(), "admin-recovery@example.com", true).await;
+    let fake = FakeOpenAi::valid().await;
+    configure_llm(&app, &token, &fake).await;
+    let session_id = create_session(&app, &token).await;
+    let session = sessions::find_by_id(&app.pool, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    messages::insert_message(
+        &app.pool,
+        session_id,
+        "user",
+        vec![ContentBlock::text("hello")],
+    )
+    .await
+    .unwrap();
+    pending_messages::insert_pending(
+        &app.pool,
+        &session,
+        vec![ContentBlock::text("ping")],
+        ReasoningEffort::Medium,
+    )
+    .await
+    .unwrap();
+
+    plexus_server::chat::worker::spawn_pending_workers(app.state.clone())
+        .await
+        .unwrap();
+
+    wait_for_chat_calls(&fake, 1).await;
+    wait_for_assistant_count(&app, session_id, 1).await;
+
+    let pending: (i64,) =
+        sqlx::query_as("SELECT count(*) FROM pending_messages WHERE session_id = $1")
+            .bind(session_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(pending.0, 0);
+    let body = fake.last_chat_body();
+    let provider_messages = body["messages"].as_array().unwrap();
+    assert_eq!(provider_messages.last().unwrap()["role"], "user");
+    assert!(
+        provider_messages
+            .last()
+            .unwrap()
+            .to_string()
+            .contains("ping")
+    );
 }
 
 #[tokio::test]

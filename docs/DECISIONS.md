@@ -110,10 +110,12 @@ pub struct InboundMessage {
 ### ADR-011 · Per-session async lock + pending queue for mid-turn follow-ups
 
 **Status:** accepted
-**Decision:** `publish_inbound` maintains `DashMap<session_key, Arc<Mutex<()>>>` and `DashMap<session_key, mpsc::Sender<InboundMessage>>`. When a new InboundMessage arrives:
-- If a pending queue exists for this session, enqueue it and return (a prior message is still processing).
-- Otherwise, spawn a task that: acquires the session lock, creates the pending queue, ensures DB session row exists, and runs the agent turn. Safe-boundary pending drains are defined in ADR-034; any pending input left after the turn ends is re-fed into `publish_inbound`.
-**Consequences:** Per-session serial, cross-session concurrent. Mid-turn follow-ups from the same user naturally queue (no parallel agent tasks on the same session). The loop may observe the pending queue before starting the next external action, so a user can redirect the agent before an as-yet-undispatched tool runs (ADR-034). No long-lived actor tasks — sessions are DB rows + transient lock entries. Race-free via `DashMap::entry().or_insert_with()`.
+**Decision:** `publish_inbound` maintains one active worker reservation per session key. When a new InboundMessage arrives:
+- If no worker is active, persist the message directly into `messages`, reserve the worker, and run the agent turn.
+- If a worker is active, persist the message into durable `pending_messages` keyed by `session_id`, `user_id`, and `session_key`; do not append it to provider-visible `messages` yet.
+
+Safe-boundary pending drains are defined in ADR-034. Drained rows are inserted into `messages` in pending receive order and then deleted from `pending_messages`.
+**Consequences:** Per-session serial, cross-session concurrent. Mid-turn follow-ups are durable without corrupting provider-visible chat order. When all workers are idle, `pending_messages` should be empty. If the server restarts with pending rows, startup recovery spawns workers for affected sessions so those rows are drained before the next provider call.
 
 ### ADR-012 · Three external ingress sources + two internal synthesizers
 
@@ -333,14 +335,14 @@ Otherwise the loop continues.
 ### ADR-034 · Mid-turn inbound queues; drains at iteration boundary
 
 **Status:** accepted
-**Decision:** When a new InboundMessage arrives for a session that is currently processing, `publish_inbound` enqueues into the session's pending queue (created at agent-loop spawn).
+**Decision:** When a new InboundMessage arrives for a session that is currently processing, `publish_inbound` writes it to `pending_messages` instead of `messages`.
 
 The active turn never interrupts an in-flight LLM request or an in-flight tool call. It checks the pending queue only at safe boundaries:
 - after an LLM response has been persisted and before dispatching any newly requested tool;
 - after each tool result has been persisted and before dispatching the next tool;
 - after a terminal assistant response has been persisted.
 
-If pending user messages exist before the next tool dispatch, the loop does not start that tool. Instead, it preserves the OpenAI chat-completions pairing invariant by inserting a synthetic error `tool_result` for each unrun `tool_use` from the just-persisted assistant message. The synthetic content is a concise interruption note such as `[user interrupt: tool was not run because a newer user message arrived]`, with the matching `tool_use_id`. The loop then drains the pending queue and persists each queued item as a role="user" message. The next iteration's LLM call sees the assistant tool request, the paired interruption tool result, and the user's newer message in chronological order.
+If pending user messages exist before the next tool dispatch, the loop does not start that tool. Instead, it preserves the OpenAI chat-completions pairing invariant by inserting a synthetic error `tool_result` for each unrun `tool_use` from the just-persisted assistant message. The synthetic content is a concise interruption note such as `[user interrupt: tool was not run because a newer user message arrived]`, with the matching `tool_use_id`. The loop then drains `pending_messages`, inserts each queued item as a role="user" message, and deletes the drained pending rows. The next iteration's LLM call sees the assistant tool request, the paired interruption tool result, and the user's newer message in chronological order.
 
 If pending input arrives while a tool is already executing, the active tool is allowed to finish. Its real `tool_result` is persisted first; any remaining unrun tools from the same assistant message receive synthetic interruption `tool_result` rows before queued user messages are persisted.
 

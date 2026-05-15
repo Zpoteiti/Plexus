@@ -1,10 +1,27 @@
 use crate::{
     chat::prompt,
-    db::{messages, sessions, system_config},
+    db::{messages, pending_messages, sessions, system_config},
     openai::{ChatCompletionRequest, ChatMessage},
 };
 use plexus_common::{ChatRole, ContentBlock};
 use uuid::Uuid;
+
+pub async fn spawn_pending_workers(
+    state: crate::app::AppState,
+) -> Result<(), crate::error::ApiError> {
+    let pending = pending_messages::pending_sessions(state.pool())
+        .await
+        .map_err(crate::error::ApiError::from_sqlx)?;
+    for row in pending {
+        let effort = row.reasoning_effort.parse().map_err(|_| {
+            crate::error::ApiError::invalid_args("stored pending reasoning_effort was malformed")
+        })?;
+        if state.chat().enqueue_turn(row.session_id, effort).await {
+            spawn_response_worker(state.clone(), row.session_id);
+        }
+    }
+    Ok(())
+}
 
 pub fn spawn_response_worker(state: crate::app::AppState, session_id: Uuid) {
     tokio::spawn(async move {
@@ -32,6 +49,7 @@ async fn run_worker_loop(
     let mut last_answered_user_id = None;
     loop {
         state.chat().clear_observed_wake(session_id).await;
+        drain_pending_at_safe_boundary(state.clone(), session_id).await?;
         let Some(latest) = messages::latest_user_message(state.pool(), session_id)
             .await
             .map_err(crate::error::ApiError::from_sqlx)?
@@ -44,6 +62,23 @@ async fn run_worker_loop(
 
         last_answered_user_id = Some(respond_once(state.clone(), session_id).await?);
     }
+}
+
+async fn drain_pending_at_safe_boundary(
+    state: crate::app::AppState,
+    session_id: Uuid,
+) -> Result<(), crate::error::ApiError> {
+    let drained = pending_messages::drain_for_session(state.pool(), session_id)
+        .await
+        .map_err(crate::error::ApiError::from_sqlx)?;
+    for (message, effort) in drained {
+        state
+            .chat()
+            .update_reasoning_effort(session_id, effort)
+            .await;
+        state.chat().broker().broadcast(message).await;
+    }
+    Ok(())
 }
 
 async fn respond_once(

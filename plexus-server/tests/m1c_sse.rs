@@ -184,6 +184,26 @@ async fn next_sse_frame_text(body: &mut Body, timeout: Duration) -> Option<Strin
         .map(|bytes| std::str::from_utf8(bytes).unwrap().to_string())
 }
 
+async fn wait_for_visible_message(app: &TestApp, message_id: &str) {
+    let message_id = Uuid::parse_str(message_id).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM messages WHERE id = $1")
+            .bind(message_id)
+            .fetch_optional(&app.pool)
+            .await
+            .unwrap();
+        if exists.is_some() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "message did not become visible"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[tokio::test]
 async fn sse_replays_messages_then_history_end() {
     let app = TestApp::spawn().await;
@@ -301,7 +321,8 @@ async fn last_event_id_replays_only_newer_messages() {
     let token = register(&app, "alice@example.com", false).await;
     let session_id = create_session(&app, &token).await;
     let first_id = post_text(&app, &token, session_id, "first marker").await;
-    post_text(&app, &token, session_id, "second marker").await;
+    let second_id = post_text(&app, &token, session_id, "second marker").await;
+    wait_for_visible_message(&app, &second_id).await;
 
     let response = app
         .router

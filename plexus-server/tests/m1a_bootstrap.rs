@@ -18,6 +18,7 @@ async fn bootstrap_creates_all_m1a_tables() {
         "devices",
         "discord_configs",
         "messages",
+        "pending_messages",
         "sessions",
         "system_config",
         "telegram_configs",
@@ -29,6 +30,46 @@ async fn bootstrap_creates_all_m1a_tables() {
             names.contains(&expected.to_string()),
             "missing table {expected}"
         );
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_applies_pending_messages_shape() {
+    let app = TestApp::spawn().await;
+
+    for column in [
+        "id",
+        "session_id",
+        "user_id",
+        "session_key",
+        "content",
+        "reasoning_effort",
+        "received_at",
+    ] {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT column_name FROM information_schema.columns
+             WHERE table_name = 'pending_messages' AND column_name = $1",
+        )
+        .bind(column)
+        .fetch_optional(&app.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.unwrap().0, column);
+    }
+
+    for index in [
+        "idx_pending_messages_session_received",
+        "idx_pending_messages_session_key_received",
+    ] {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT indexname FROM pg_indexes
+             WHERE tablename = 'pending_messages' AND indexname = $1",
+        )
+        .bind(index)
+        .fetch_optional(&app.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.unwrap().0, index);
     }
 }
 

@@ -69,6 +69,21 @@ ALTER TABLE messages
 CREATE INDEX IF NOT EXISTS idx_messages_session_created
     ON messages(session_id, created_at);
 
+CREATE TABLE IF NOT EXISTS pending_messages (
+    id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id        UUID         NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    user_id           UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_key       TEXT         NOT NULL,
+    content           JSONB        NOT NULL,
+    reasoning_effort  TEXT         NOT NULL CHECK (reasoning_effort IN ('none', 'minimal', 'low', 'medium', 'high', 'xhigh')),
+    received_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_messages_session_received
+    ON pending_messages(session_id, received_at, id);
+CREATE INDEX IF NOT EXISTS idx_pending_messages_session_key_received
+    ON pending_messages(session_key, received_at, id);
+
 CREATE TABLE IF NOT EXISTS devices (
     token              TEXT         PRIMARY KEY,
     user_id            UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,

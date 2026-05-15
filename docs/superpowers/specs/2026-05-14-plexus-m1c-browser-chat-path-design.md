@@ -526,19 +526,24 @@ M1c has no tool loop, but it still needs per-session serialization.
 
 Behavior:
 
-- `POST /api/sessions/{id}/messages` persists the user message and returns
-  `202` without waiting for the LLM.
+- `POST /api/sessions/{id}/messages` durably accepts the user message and
+  returns `202` without waiting for the LLM.
 - Each session has at most one active M1c response worker.
-- If a user posts while a response is running, the new message is persisted and
-  broadcast immediately. The active worker receives a wake flag, but no
-  parallel LLM worker starts for that session.
-- A response pass records the last user message id from the history snapshot it
-  actually sent to the provider. After the assistant response or failure
-  message is persisted, the worker checks the database again. If a newer user
-  message was not included in that snapshot, it runs another response pass.
-- Before each latest-user check, the worker clears any wake flag it is about to
-  observe through the database. At shutdown it only exits if no post arrived
-  after that final check; otherwise it keeps the worker alive for another pass.
+- If no worker is active, the user message is inserted directly into
+  provider-visible `messages`, broadcast over SSE, and a worker starts.
+- If a user posts while a response is running, the new message is inserted into
+  durable `pending_messages` with `session_id`, `user_id`, `session_key`,
+  content, reasoning effort, and receive time. It is not included in provider
+  history until a safe boundary.
+- The M1c safe boundary is immediately after an assistant response or synthetic
+  failure message is persisted. At that point the worker drains pending rows for
+  the session in receive order, inserts them into `messages` using the same ids,
+  deletes the drained pending rows, broadcasts the visible user rows, and runs
+  another provider pass.
+- This preserves logical order for concurrent posts: `U1`, `A1`, `U2`, `U3`,
+  rather than physical receive order `U1`, `U2`, `U3`, `A1`.
+- Server startup scans `pending_messages` and starts recovery workers so queued
+  rows are not stranded after a restart.
 - Cross-session workers may run concurrently, subject to the M1b provider
   semaphore.
 

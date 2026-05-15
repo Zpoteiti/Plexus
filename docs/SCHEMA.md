@@ -175,7 +175,33 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_created
 
 ---
 
-## 7. `devices` — per-user client devices
+## 7. `pending_messages` — durable inbound waiting for safe boundary
+
+```sql
+CREATE TABLE IF NOT EXISTS pending_messages (
+    id                UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id        UUID         NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    user_id           UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_key       TEXT         NOT NULL,
+    content           JSONB        NOT NULL,
+    reasoning_effort  TEXT         NOT NULL CHECK (reasoning_effort IN ('none', 'minimal', 'low', 'medium', 'high', 'xhigh')),
+    received_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_messages_session_received
+    ON pending_messages(session_id, received_at, id);
+CREATE INDEX IF NOT EXISTS idx_pending_messages_session_key_received
+    ON pending_messages(session_key, received_at, id);
+```
+
+- `pending_messages` stores inbound user messages that arrive while a session worker is active. These rows are durable but not provider-visible history yet.
+- `session_key` is stored alongside `session_id` so channel/session routing can recover pending work without recomputing the key.
+- At each safe boundary (ADR-034), the worker drains rows for the session in `(received_at, id)` order, inserts them into `messages` with the same `id`, broadcasts the resulting user messages, and deletes the pending rows. When no session is in flight, this table should normally be empty.
+- Server startup scans this table and starts recovery workers for affected sessions.
+
+---
+
+## 8. `devices` — per-user client devices
 
 ```sql
 CREATE TABLE IF NOT EXISTS devices (
@@ -205,7 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
 
 ---
 
-## 8. `workspaces` — shared workspace registry (ADR-108)
+## 9. `workspaces` — shared workspace registry (ADR-108)
 
 ```sql
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -225,7 +251,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 
 ---
 
-## 9. `workspace_members` — shared workspace allow-list (ADR-108)
+## 10. `workspace_members` — shared workspace allow-list (ADR-108)
 
 ```sql
 CREATE TABLE IF NOT EXISTS workspace_members (
@@ -244,7 +270,7 @@ CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_
 
 ---
 
-## 10. `cron_jobs` — scheduled agent invocations
+## 11. `cron_jobs` — scheduled agent invocations
 
 ```sql
 CREATE TABLE IF NOT EXISTS cron_jobs (
@@ -297,6 +323,8 @@ CREATE INDEX IF NOT EXISTS idx_cron_jobs_next_fire  ON cron_jobs(next_fire_at)
 | `idx_sessions_user_id` | sessions | List user's sessions. |
 | `idx_sessions_user_session_key` | sessions (UNIQUE on `(user_id, session_key)`) | Per-user channel-message → session lookup. |
 | `idx_messages_session_created` | messages (`session_id, created_at`) | History replay + cursor scan. |
+| `idx_pending_messages_session_received` | pending_messages (`session_id, received_at, id`) | Safe-boundary drain order. |
+| `idx_pending_messages_session_key_received` | pending_messages (`session_key, received_at, id`) | Recovery and channel-key lookup for queued inbound. |
 | `idx_devices_user_id` | devices | List user's devices. |
 | `devices_user_id_name_key` | devices (UNIQUE on `(user_id, name)`) | URL resolution `/api/devices/{name}`. |
 | `workspace_members_pkey` | workspace_members (PK on `(workspace_id, user_id)`) | Membership lookup at workspace-fs entry. |

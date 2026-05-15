@@ -11,11 +11,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let openai = OpenAiRuntime::new(llm_limit)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err.message))?;
 
-    let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
-    axum::serve(
-        listener,
-        app::router(app::AppState::new_with_openai_runtime(pool, cfg, openai)),
-    )
-    .await?;
+    let state = app::AppState::new_with_openai_runtime(pool, cfg, openai);
+    plexus_server::chat::worker::spawn_pending_workers(state.clone())
+        .await
+        .map_err(|err| io::Error::other(err.message))?;
+
+    let listener = tokio::net::TcpListener::bind(state.config().bind).await?;
+    axum::serve(listener, app::router(state)).await?;
     Ok(())
 }

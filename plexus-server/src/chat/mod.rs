@@ -54,9 +54,25 @@ impl ChatRuntime {
         }
     }
 
+    pub async fn abort_worker_start(&self, session_id: Uuid) {
+        let mut workers = self.workers.lock().await;
+        if workers
+            .get(&session_id)
+            .is_some_and(|worker| worker.active && !worker.wake_requested)
+        {
+            workers.remove(&session_id);
+        }
+    }
+
     pub async fn clear_observed_wake(&self, session_id: Uuid) {
         if let Some(worker) = self.workers.lock().await.get_mut(&session_id) {
             worker.wake_requested = false;
+        }
+    }
+
+    pub async fn update_reasoning_effort(&self, session_id: Uuid, effort: ReasoningEffort) {
+        if let Some(worker) = self.workers.lock().await.get_mut(&session_id) {
+            worker.reasoning_effort = Some(effort);
         }
     }
 

@@ -1,7 +1,7 @@
 use crate::{
     auth::AuthUser,
     chat::content::{ContentBlock, normalize_user_content},
-    db::{messages, sessions},
+    db::{messages, pending_messages, sessions},
     error::ApiError,
 };
 use axum::{
@@ -139,10 +139,6 @@ pub async fn post_message(
     let reasoning_effort = required_reasoning_effort(&body)?;
     let mut content = vec![runtime_block(&session)];
     content.extend(normalize_user_content(body.get("content").cloned())?);
-
-    let message = messages::insert_message(state.pool(), session.id, "user", content)
-        .await
-        .map_err(ApiError::from_sqlx)?;
     sessions::touch_last_inbound(state.pool(), session.id)
         .await
         .map_err(ApiError::from_sqlx)?;
@@ -150,14 +146,30 @@ pub async fn post_message(
         .chat()
         .enqueue_turn(session.id, reasoning_effort)
         .await;
-    state.chat().broker().broadcast(message.clone()).await;
-    if should_spawn {
-        crate::chat::worker::spawn_response_worker(state.clone(), session.id);
-    }
+
+    let message_id = if should_spawn {
+        match messages::insert_message(state.pool(), session.id, "user", content).await {
+            Ok(message) => {
+                let message_id = message.id;
+                state.chat().broker().broadcast(message).await;
+                crate::chat::worker::spawn_response_worker(state.clone(), session.id);
+                message_id
+            }
+            Err(err) => {
+                state.chat().abort_worker_start(session.id).await;
+                return Err(ApiError::from_sqlx(err));
+            }
+        }
+    } else {
+        pending_messages::insert_pending(state.pool(), &session, content, reasoning_effort)
+            .await
+            .map_err(ApiError::from_sqlx)?
+            .id
+    };
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({ "message_id": message.id })),
+        Json(json!({ "message_id": message_id })),
     ))
 }
 

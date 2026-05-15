@@ -300,4 +300,6 @@ live SSE user and assistant messages, persisted history containing both rows,
 SSE replay of persisted rows, and persisted assistant `reasoning_content`.
 Review hardening on 2026-05-14 additionally covered browser `web:` namespace
 writability, SSE replay/live de-duplication, SSE lag reconnect behavior, and
-serialized worker wake/progress races.
+serialized worker wake/progress races. Follow-up hardening on 2026-05-15 moved
+mid-response browser posts into durable `pending_messages`, drained them at
+safe boundaries, and added startup recovery for queued rows.

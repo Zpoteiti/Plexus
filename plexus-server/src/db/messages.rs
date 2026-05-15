@@ -66,8 +66,10 @@ pub async fn list_before(
             SELECT m.id, m.session_id, m.role, m.content, m.reasoning_content, m.is_compaction_summary, m.created_at
             FROM messages m
             JOIN messages anchor ON anchor.id = $2 AND anchor.session_id = $1
-            WHERE m.session_id = $1 AND m.created_at < anchor.created_at
-            ORDER BY m.created_at DESC
+            WHERE m.session_id = $1
+              AND (m.created_at < anchor.created_at
+                   OR (m.created_at = anchor.created_at AND m.id < anchor.id))
+            ORDER BY m.created_at DESC, m.id DESC
             LIMIT $3
             "#,
         )
@@ -82,7 +84,7 @@ pub async fn list_before(
             SELECT id, session_id, role, content, reasoning_content, is_compaction_summary, created_at
             FROM messages
             WHERE session_id = $1
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT $2
             "#,
         )
@@ -103,7 +105,7 @@ pub async fn replay_recent(
         SELECT id, session_id, role, content, reasoning_content, is_compaction_summary, created_at
         FROM messages
         WHERE session_id = $1
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT $2
         "#,
     )
@@ -125,8 +127,10 @@ pub async fn replay_after(
         SELECT m.id, m.session_id, m.role, m.content, m.reasoning_content, m.is_compaction_summary, m.created_at
         FROM messages m
         JOIN messages anchor ON anchor.id = $2 AND anchor.session_id = $1
-        WHERE m.session_id = $1 AND m.created_at > anchor.created_at
-        ORDER BY m.created_at ASC
+        WHERE m.session_id = $1
+          AND (m.created_at > anchor.created_at
+               OR (m.created_at = anchor.created_at AND m.id > anchor.id))
+        ORDER BY m.created_at ASC, m.id ASC
         "#,
     )
     .bind(session_id)
@@ -144,7 +148,7 @@ pub async fn latest_user_message(
         SELECT id, created_at
         FROM messages
         WHERE session_id = $1 AND role = 'user'
-        ORDER BY created_at DESC
+        ORDER BY created_at DESC, id DESC
         LIMIT 1
         "#,
     )
@@ -162,7 +166,7 @@ pub async fn history_chronological(
         SELECT id, session_id, role, content, reasoning_content, is_compaction_summary, created_at
         FROM messages
         WHERE session_id = $1
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, id ASC
         "#,
     )
     .bind(session_id)
