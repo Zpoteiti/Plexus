@@ -6,12 +6,16 @@ use serde_json::json;
 use support::TestApp;
 
 async fn set_quota(app: &TestApp, quota: i64) {
+    set_quota_value(app, json!(quota)).await;
+}
+
+async fn set_quota_value(app: &TestApp, value: serde_json::Value) {
     sqlx::query(
         "INSERT INTO system_config (key, value, updated_at)
          VALUES ('quota_bytes', $1, NOW())
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
     )
-    .bind(json!(quota))
+    .bind(value)
     .execute(&app.pool)
     .await
     .unwrap();
@@ -112,6 +116,30 @@ async fn symlink_parent_escape_does_not_create_external_parent() {
     assert!(!outside.path().join("nested/file.txt").exists());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn quota_ignores_workspace_symlinks_to_external_content() {
+    use std::os::unix::fs::symlink;
+
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 100).await;
+
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("large.bin"), vec![b'x'; 1_000]).unwrap();
+    let user_root = app.workspace_root.path().join(user_id.to_string());
+    symlink(
+        outside.path().join("large.bin"),
+        user_root.join("linked.bin"),
+    )
+    .unwrap();
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    let quota = fs.quota(user_id).await.unwrap();
+    assert_eq!(quota.bytes_used, 0);
+    assert!(!quota.locked);
+}
+
 #[tokio::test]
 async fn path_traversal_is_rejected() {
     let app = TestApp::spawn().await;
@@ -140,6 +168,22 @@ async fn missing_quota_blocks_writes() {
 }
 
 #[tokio::test]
+async fn invalid_quota_values_block_writes() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+
+    for value in [json!(0), json!(-1), json!("1000")] {
+        set_quota_value(&app, value).await;
+        let err = fs
+            .write_file(user_id, "invalid-quota.txt", b"x".to_vec())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WorkspaceError::QuotaNotConfigured));
+    }
+}
+
+#[tokio::test]
 async fn upload_too_large_uses_single_op_cap() {
     let app = TestApp::spawn().await;
     let (_, user_id) = support::register_user(&app, "alice@example.com").await;
@@ -151,6 +195,68 @@ async fn upload_too_large_uses_single_op_cap() {
         .await
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::UploadTooLarge { .. }));
+}
+
+#[tokio::test]
+async fn cumulative_quota_rejects_writes_that_would_exceed_quota() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 1_000).await;
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    fs.write_file(user_id, "existing.bin", vec![b'x'; 600])
+        .await
+        .unwrap();
+    fs.write_file(user_id, "allowed.bin", vec![b'x'; 300])
+        .await
+        .unwrap();
+
+    let err = fs
+        .write_file(user_id, "rejected.bin", vec![b'x'; 300])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, WorkspaceError::SoftLocked));
+}
+
+#[tokio::test]
+async fn overwrite_quota_accounting_subtracts_existing_target_size() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 1_000).await;
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    fs.write_file(user_id, "existing.bin", vec![b'x'; 600])
+        .await
+        .unwrap();
+    fs.write_file(user_id, "existing.bin", vec![b'x'; 300])
+        .await
+        .unwrap();
+
+    let quota = fs.quota(user_id).await.unwrap();
+    assert_eq!(quota.bytes_used, 300);
+}
+
+#[tokio::test]
+async fn write_file_rejects_existing_directory_target() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    tokio::fs::create_dir_all(
+        app.workspace_root
+            .path()
+            .join(user_id.to_string())
+            .join("dir"),
+    )
+    .await
+    .unwrap();
+
+    let err = fs
+        .write_file(user_id, "dir", b"not a dir".to_vec())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, WorkspaceError::PathOutsideWorkspace(_)));
 }
 
 #[tokio::test]

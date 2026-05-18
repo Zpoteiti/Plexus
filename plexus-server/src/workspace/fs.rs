@@ -57,8 +57,9 @@ impl WorkspaceFs {
         path: &str,
         bytes: Vec<u8>,
     ) -> Result<(), WorkspaceError> {
-        self.ensure_can_add(user_id, bytes.len() as u64).await?;
         let full = self.resolve_for_write(user_id, path).await?;
+        self.ensure_can_write(user_id, &full, bytes.len() as u64)
+            .await?;
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -93,16 +94,30 @@ impl WorkspaceFs {
             .ok_or(WorkspaceError::QuotaNotConfigured)
     }
 
-    async fn ensure_can_add(&self, user_id: Uuid, added_bytes: u64) -> Result<(), WorkspaceError> {
+    async fn ensure_can_write(
+        &self,
+        user_id: Uuid,
+        target: &Path,
+        new_bytes: u64,
+    ) -> Result<(), WorkspaceError> {
         let quota = self.quota(user_id).await?;
         if quota.locked {
             return Err(WorkspaceError::SoftLocked);
         }
-        if added_bytes > quota.quota_bytes.saturating_mul(80) / 100 {
+        if new_bytes > quota.quota_bytes.saturating_mul(80) / 100 {
             return Err(WorkspaceError::UploadTooLarge {
-                actual_bytes: added_bytes,
+                actual_bytes: new_bytes,
                 quota_bytes: quota.quota_bytes,
             });
+        }
+        let existing_bytes = existing_file_size(target).await?;
+        if quota
+            .bytes_used
+            .saturating_sub(existing_bytes)
+            .saturating_add(new_bytes)
+            > quota.quota_bytes
+        {
+            return Err(WorkspaceError::SoftLocked);
         }
         Ok(())
     }
@@ -166,13 +181,26 @@ async fn metadata_or_not_found(path: &Path) -> Result<std::fs::Metadata, Workspa
     })
 }
 
+async fn existing_file_size(path: &Path) -> Result<u64, WorkspaceError> {
+    match fs::symlink_metadata(path).await {
+        Ok(meta) if meta.is_dir() => Err(WorkspaceError::PathOutsideWorkspace(path.to_path_buf())),
+        Ok(meta) if meta.is_file() => Ok(meta.len()),
+        Ok(_) => Ok(0),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(err) => Err(WorkspaceError::IoError(err)),
+    }
+}
+
 async fn dir_size(root: &Path) -> Result<u64, WorkspaceError> {
     let mut total = 0;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let mut entries = fs::read_dir(&dir).await?;
         while let Some(entry) = entries.next_entry().await? {
-            let meta = entry.metadata().await?;
+            let meta = fs::symlink_metadata(entry.path()).await?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
             if meta.is_dir() {
                 stack.push(entry.path());
             } else if meta.is_file() {
