@@ -7,7 +7,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use plexus_common::{ContentBlock, ImageUrlBlock};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -34,10 +34,15 @@ pub async fn assemble_user_content(
                 "attachment plexus_device must be 'server'",
             ));
         }
+        if Path::new(&attachment.path).is_absolute() {
+            return Err(ApiError::invalid_args(
+                "attachment path must be relative to the workspace",
+            ));
+        }
 
         let bytes = workspace.read_file(user_id, &attachment.path).await?;
         let marker = ContentBlock::text(format!(
-            "User uploaded file to device='server', path='{}'",
+            "User uploaded file to device='server', path={:?}",
             attachment.path
         ));
 

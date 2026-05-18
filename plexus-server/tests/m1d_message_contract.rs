@@ -78,6 +78,18 @@ fn png_bytes() -> Vec<u8> {
     ]
 }
 
+fn jpeg_bytes() -> Vec<u8> {
+    vec![0xff, 0xd8, 0xff, b'p', b'l', b'x']
+}
+
+fn gif_bytes() -> Vec<u8> {
+    b"GIF89aplx".to_vec()
+}
+
+fn webp_bytes() -> Vec<u8> {
+    b"RIFF0000WEBPplx".to_vec()
+}
+
 fn data_image_url(mime: &str, bytes: &[u8]) -> String {
     format!("data:{mime};base64,{}", STANDARD.encode(bytes))
 }
@@ -224,6 +236,38 @@ async fn missing_attachment_device_or_file_rejects_whole_message() {
             json!({
                 "reasoning_effort": null,
                 "content": [{"type": "text", "text": "hello"}],
+                "attachments": [{"plexus_device": "server", "path": ".attachments/uploads/a/cat.png", "extra": true}]
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "reasoning_effort": null,
+                "content": [{"type": "text", "text": "hello"}],
+                "attachments": [{"plexus_device": 123, "path": ".attachments/uploads/a/cat.png"}]
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "reasoning_effort": null,
+                "content": [{"type": "text", "text": "hello"}],
+                "attachments": [{"plexus_device": "server", "path": 123}]
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "reasoning_effort": null,
+                "content": [{"type": "text", "text": "hello"}],
+                "attachments": [{"plexus_device": "server", "path": "/tmp/cat.png"}]
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "reasoning_effort": null,
+                "content": [{"type": "text", "text": "hello"}],
                 "attachments": [{"plexus_device": "devbox", "path": ".attachments/uploads/a/cat.png"}]
             }),
             StatusCode::BAD_REQUEST,
@@ -279,7 +323,7 @@ async fn non_image_attachment_adds_marker_only_before_user_content() {
     assert!(blocks[0]["text"].as_str().unwrap().contains("<runtime>"));
     assert_eq!(
         blocks[1],
-        json!({"type": "text", "text": "User uploaded file to device='server', path='.attachments/uploads/a/readme.txt'"})
+        json!({"type": "text", "text": "User uploaded file to device='server', path=\".attachments/uploads/a/readme.txt\""})
     );
     assert_eq!(blocks[2], json!({"type": "text", "text": "hello"}));
     assert!(blocks.iter().all(|block| block["type"] != "image_url"));
@@ -316,7 +360,7 @@ async fn image_attachment_adds_marker_then_generated_image_before_user_content()
     assert!(blocks[0]["text"].as_str().unwrap().contains("<runtime>"));
     assert_eq!(
         blocks[1],
-        json!({"type": "text", "text": "User uploaded file to device='server', path='.attachments/uploads/a/cat.png'"})
+        json!({"type": "text", "text": "User uploaded file to device='server', path=\".attachments/uploads/a/cat.png\""})
     );
     assert_eq!(
         blocks[2],
@@ -360,7 +404,7 @@ async fn duplicate_direct_image_gets_marker_inserted_before_existing_image() {
     assert_eq!(blocks[1], json!({"type": "text", "text": "描述这张图"}));
     assert_eq!(
         blocks[2],
-        json!({"type": "text", "text": "User uploaded file to device='server', path='.attachments/uploads/a/cat.png'"})
+        json!({"type": "text", "text": "User uploaded file to device='server', path=\".attachments/uploads/a/cat.png\""})
     );
     assert_eq!(
         blocks[3],
@@ -413,7 +457,7 @@ async fn non_duplicate_direct_image_keeps_attachment_image_and_user_image() {
     let blocks = stored.as_array().unwrap();
     assert_eq!(
         blocks[1],
-        json!({"type": "text", "text": "User uploaded file to device='server', path='.attachments/uploads/a/cat.png'"})
+        json!({"type": "text", "text": "User uploaded file to device='server', path=\".attachments/uploads/a/cat.png\""})
     );
     assert_eq!(
         blocks[2],
@@ -427,4 +471,83 @@ async fn non_duplicate_direct_image_keeps_attachment_image_and_user_image() {
             .count(),
         2
     );
+}
+
+#[tokio::test]
+async fn attachment_marker_escapes_path_text() {
+    let app = TestApp::spawn().await;
+    let (token, user_id) = register_user(&app, "alice@example.com").await;
+    let session_id = create_session(&app, &token).await;
+    set_workspace_quota(&app).await;
+    let path = ".attachments/uploads/a/quote'\"\n.txt";
+    app.state
+        .workspace_fs()
+        .write_file(user_id, path, b"not an image".to_vec())
+        .await
+        .unwrap();
+
+    let (status, body) = post_message(
+        &app,
+        &token,
+        &session_id,
+        json!({
+            "reasoning_effort": null,
+            "content": [{"type": "text", "text": "hello"}],
+            "attachments": [{"plexus_device": "server", "path": path}]
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let stored = stored_message_content(&app, body["message_id"].as_str().unwrap()).await;
+    let blocks = stored.as_array().unwrap();
+    assert_eq!(
+        blocks[1],
+        json!({"type": "text", "text": "User uploaded file to device='server', path=\".attachments/uploads/a/quote'\\\"\\n.txt\""})
+    );
+}
+
+#[tokio::test]
+async fn non_png_image_attachments_use_sniffed_mime_type() {
+    let cases = [
+        (".attachments/uploads/a/cat.jpg", "image/jpeg", jpeg_bytes()),
+        (".attachments/uploads/a/cat.gif", "image/gif", gif_bytes()),
+        (
+            ".attachments/uploads/a/cat.webp",
+            "image/webp",
+            webp_bytes(),
+        ),
+    ];
+
+    for (path, mime, bytes) in cases {
+        let app = TestApp::spawn().await;
+        let (token, user_id) = register_user(&app, "alice@example.com").await;
+        let session_id = create_session(&app, &token).await;
+        set_workspace_quota(&app).await;
+        app.state
+            .workspace_fs()
+            .write_file(user_id, path, bytes.clone())
+            .await
+            .unwrap();
+
+        let (status, body) = post_message(
+            &app,
+            &token,
+            &session_id,
+            json!({
+                "reasoning_effort": null,
+                "content": [{"type": "text", "text": "hello"}],
+                "attachments": [{"plexus_device": "server", "path": path}]
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let stored = stored_message_content(&app, body["message_id"].as_str().unwrap()).await;
+        let blocks = stored.as_array().unwrap();
+        assert_eq!(
+            blocks[2],
+            json!({"type": "image_url", "image_url": {"url": data_image_url(mime, &bytes)}})
+        );
+    }
 }
