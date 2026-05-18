@@ -1,6 +1,9 @@
 use crate::{
     auth::AuthUser,
-    chat::content::{ContentBlock, parse_content_array},
+    chat::{
+        attachments::assemble_user_content,
+        content::{ContentBlock, parse_content_array},
+    },
     db::{messages, pending_messages, sessions},
     error::ApiError,
 };
@@ -148,8 +151,16 @@ pub async fn post_message(
         ));
     }
 
+    let assembled = assemble_user_content(
+        state.workspace_fs(),
+        auth.user.id,
+        user_content,
+        attachments_value,
+    )
+    .await?;
+
     let mut content = vec![runtime_block(&session)];
-    content.extend(user_content);
+    content.extend(assembled);
     sessions::touch_last_inbound(state.pool(), session.id)
         .await
         .map_err(ApiError::from_sqlx)?;

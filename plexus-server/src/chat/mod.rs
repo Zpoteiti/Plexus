@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+pub mod attachments;
 pub mod content;
 pub mod prompt;
 pub mod sse;
