@@ -9,6 +9,7 @@ pub mod auth;
 pub mod me;
 pub mod sessions;
 mod validation;
+pub mod workspace;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -35,4 +36,11 @@ pub fn router() -> Router<AppState> {
             get(sessions::list_messages).post(sessions::post_message),
         )
         .route("/api/sessions/{id}/stream", get(sessions::stream_session))
+        .route("/api/workspace/quota", get(workspace::quota))
+        .route(
+            "/api/workspace/files/{*path}",
+            get(workspace::get_file)
+                .put(workspace::put_file)
+                .delete(workspace::delete_file),
+        )
 }

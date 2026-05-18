@@ -1,5 +1,5 @@
 use axum::{Json, http::StatusCode, response::IntoResponse};
-use plexus_common::ErrorCode;
+use plexus_common::{Code, ErrorCode, WorkspaceError};
 use serde::Serialize;
 
 #[derive(Debug)]
@@ -47,5 +47,20 @@ impl IntoResponse for ApiError {
             }),
         )
             .into_response()
+    }
+}
+
+impl From<WorkspaceError> for ApiError {
+    fn from(err: WorkspaceError) -> Self {
+        let status = match &err {
+            WorkspaceError::NotFound(_) => StatusCode::NOT_FOUND,
+            WorkspaceError::PathOutsideWorkspace(_) => StatusCode::FORBIDDEN,
+            WorkspaceError::SoftLocked | WorkspaceError::UploadTooLarge { .. } => {
+                StatusCode::CONFLICT
+            }
+            WorkspaceError::QuotaNotConfigured => StatusCode::BAD_REQUEST,
+            WorkspaceError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self::new(status, err.code(), err.to_string())
     }
 }

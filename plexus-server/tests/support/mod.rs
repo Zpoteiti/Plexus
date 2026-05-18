@@ -152,6 +152,64 @@ pub async fn json_request_with_headers(
     (status, headers, body)
 }
 
+pub async fn bytes_request(
+    app: axum::Router,
+    method: Method,
+    path: &str,
+    bytes: impl Into<Vec<u8>>,
+    content_type: &str,
+    auth: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::CONTENT_TYPE, content_type);
+    if let Some(token) = auth {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let response = app
+        .oneshot(builder.body(Body::from(bytes.into())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+pub async fn empty_request(
+    app: axum::Router,
+    method: Method,
+    path: &str,
+    auth: Option<&str>,
+) -> (StatusCode, Vec<u8>) {
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(token) = auth {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let response = app
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, bytes)
+}
+
 pub async fn register_user(app: &TestApp, email: &str) -> (String, Uuid) {
     let (status, body) = json_request(
         app.router.clone(),
