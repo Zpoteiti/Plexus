@@ -1,7 +1,7 @@
 mod support;
 
 use axum::http::{Method, StatusCode, header};
-use serde_json::json;
+use serde_json::{Value, json};
 use support::TestApp;
 
 async fn set_quota(app: &TestApp, quota: i64) {
@@ -16,12 +16,16 @@ async fn set_quota(app: &TestApp, quota: i64) {
     .unwrap();
 }
 
+fn error_body(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).unwrap()
+}
+
 #[tokio::test]
 async fn file_routes_require_explicit_server_device() {
     let app = TestApp::spawn().await;
     let (jwt, _) = support::register_user(&app, "alice@example.com").await;
 
-    let (status, _) = support::empty_request(
+    let (status, body) = support::empty_request(
         app.router.clone(),
         Method::GET,
         "/api/workspace/files/notes.txt",
@@ -29,8 +33,9 @@ async fn file_routes_require_explicit_server_device() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_body(&body)["code"], "invalid_args");
 
-    let (status, _) = support::empty_request(
+    let (status, body) = support::empty_request(
         app.router.clone(),
         Method::GET,
         "/api/workspace/files/notes.txt?plexus_device=devbox",
@@ -38,6 +43,7 @@ async fn file_routes_require_explicit_server_device() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_body(&body)["code"], "invalid_args");
 }
 
 #[tokio::test]
@@ -96,4 +102,83 @@ async fn quota_route_reports_server_workspace_usage() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["quota_bytes"], 10_000);
     assert_eq!(body["locked"], false);
+}
+
+#[tokio::test]
+async fn missing_file_returns_not_found_code_without_server_path() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+
+    let (status, body) = support::empty_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/workspace/files/notes.txt?plexus_device=server",
+        Some(&jwt),
+    )
+    .await;
+    let body = error_body(&body);
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+    assert!(
+        !body["message"]
+            .as_str()
+            .unwrap()
+            .contains(app.db_name.as_str())
+    );
+    assert!(!body["message"].as_str().unwrap().contains("/"));
+}
+
+#[tokio::test]
+async fn quota_route_returns_quota_not_configured_code() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+
+    let (status, body) = support::empty_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/workspace/quota",
+        Some(&jwt),
+    )
+    .await;
+    let body = error_body(&body);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "quota_not_configured");
+}
+
+#[tokio::test]
+async fn oversized_upload_returns_upload_too_large_code() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let (status, _, body) = support::bytes_request(
+        app.router.clone(),
+        Method::PUT,
+        "/api/workspace/files/large.bin?plexus_device=server",
+        vec![b'x'; 8_001],
+        "application/octet-stream",
+        Some(&jwt),
+    )
+    .await;
+    let body = error_body(&body);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "upload_too_large");
+}
+
+#[tokio::test]
+async fn upload_above_axum_default_body_limit_can_succeed() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 4_000_000).await;
+
+    let (status, _, _) = support::bytes_request(
+        app.router.clone(),
+        Method::PUT,
+        "/api/workspace/files/big.bin?plexus_device=server",
+        vec![b'x'; 2_200_000],
+        "application/octet-stream",
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }

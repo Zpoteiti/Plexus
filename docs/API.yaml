@@ -23,7 +23,7 @@ info:
 
     | Agent tool | REST equivalent | Notes |
     |---|---|---|
-    | `read_file` | `GET /api/workspace/files/{path}` | Query: `plexus_device` (default `server`) |
+    | `read_file` | `GET /api/workspace/files/{path}` | Query: explicit `plexus_device=server` in M1d |
     | `write_file` | `PUT /api/workspace/files/{path}` | Query: `plexus_device`; implicit mkdir -p |
     | `edit_file` | `PATCH /api/workspace/files/{path}` | Query: `plexus_device`; body: old_text/new_text/replace_all |
     | `delete_file` | `DELETE /api/workspace/files/{path}` | Query: `plexus_device`; always allowed for quota release |
@@ -786,67 +786,51 @@ paths:
   # Implementation choice — the OpenAPI shape is the same either way.
   #
   /api/workspace/files/{path}:
-    description: Target M1 workspace file route; not implemented in M1b.
+    description: |
+      M1d implements GET/PUT/DELETE for explicit `plexus_device=server`.
+      Dynamic user-device routing is future M1f.
     parameters:
       - name: path
         in: path
         required: true
         description: |
-          Path on the target `plexus_device`. With `plexus_device=server`,
-          relative paths resolve to the caller's personal workspace and
-          absolute paths may name the user's UUID workspace or a shared
-          `name@suffix` workspace (ADR-043, ADR-108). With
-          `plexus_device=<device-name>`, paths are resolved by that client
-          against its configured `workspace_path` and `fs_policy`, exactly
-          like shared file tool calls.
+          Path on the target `plexus_device`. In M1d, callers must pass
+          explicit `plexus_device=server`; relative paths resolve to the
+          caller's personal workspace, and absolute paths may name the user's
+          UUID workspace or a shared `name@suffix` workspace (ADR-043,
+          ADR-108). Future M1f `plexus_device=<device-name>` routes will
+          resolve paths by that client against its configured `workspace_path`
+          and `fs_policy`, exactly like shared file tool calls.
         schema: { type: string }
       - $ref: '#/components/parameters/PlexusDevice'
     get:
       tags: [Workspace Files]
-      summary: Target route — read file contents (mirrors `read_file` tool; not M1b)
-      parameters:
-        - { name: start_line, in: query, schema: { type: integer, minimum: 1 } }
-        - { name: end_line,   in: query, schema: { type: integer, minimum: 1 } }
+      summary: Read server workspace file contents
       responses:
         '200':
-          description: OK — returns file bytes. Content-Type per detected file type (text/plain, application/json, image/*, application/octet-stream).
+          description: OK — returns raw file bytes as `application/octet-stream`.
           content:
-            '*/*':
+            application/octet-stream:
               schema: { type: string, format: binary }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: Target device is offline or unreachable.
-          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     put:
       tags: [Workspace Files]
-      summary: Target route — write file contents (mirrors `write_file` tool; not M1b)
+      summary: Write server workspace file contents
       description: |
-        Target M1 workspace file route. Not implemented in M1b.
-
-        Full-content replace. Accepts `application/octet-stream` for raw
-        bytes or `application/json` with `{content: string}` for text.
-        Implicit `mkdir -p` on the parent path (ADR-088). Runs through
-        workspace_fs — quota check + SKILL.md validation (ADR-082) apply.
+        Full-content replace. M1d accepts raw `application/octet-stream`
+        bytes. Implicit `mkdir -p` on the parent path (ADR-088). Runs through
+        workspace_fs quota checks.
       requestBody:
         required: true
         content:
           application/octet-stream:
             schema: { type: string, format: binary }
-          application/json:
-            schema:
-              type: object
-              required: [content]
-              properties:
-                content: { type: string }
       responses:
         '204': { description: Written. }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Quota lock (SoftLocked), operation exceeds 80% single-op cap (UploadTooLarge), or target device is offline/unreachable.
-          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
-        '422':
-          description: Invalid SKILL.md format.
+          description: Quota lock (SoftLocked) or operation exceeds 80% single-op cap (UploadTooLarge).
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     patch:
       tags: [Workspace Files]
@@ -879,16 +863,14 @@ paths:
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     delete:
       tags: [Workspace Files]
-      summary: Target route — delete a single file (mirrors `delete_file`; not M1b)
+      summary: Delete a single server workspace file
       description: |
-        Target M1 workspace file route. Not implemented in M1b.
-
-        Always allowed regardless of quota lock state. Refunds quota.
+        Deletes a file from the caller's server workspace. Always allowed
+        regardless of quota lock state.
       responses:
         '204': { description: Deleted. }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: Path is a directory — use `DELETE /api/workspace/folders/{path}` — or target device is offline/unreachable.
 
   /api/workspace/folders/{path}:
     description: Target M1 workspace folder route; not implemented in M1b.
@@ -1633,13 +1615,14 @@ components:
     PlexusDevice:
       name: plexus_device
       in: query
+      required: true
       description: |
-        Install site for file operations. Defaults to `server`, Plexus's
-        built-in server workspace. A user device name routes the operation
-        over `/ws/device`; the client applies its `workspace_path` and
-        `fs_policy`. Offline devices return an error with code
-        `device_unreachable`.
-      schema: { type: string, default: server }
+        Install site for file operations. M1d requires explicit
+        `plexus_device=server`, Plexus's built-in server workspace. Dynamic
+        user-device routing over `/ws/device` is future M1f; then the client
+        will apply its `workspace_path` and `fs_policy`, and offline devices
+        will return an error with code `device_unreachable`.
+      schema: { type: string }
 
   responses:
     BadRequest:

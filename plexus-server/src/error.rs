@@ -61,6 +61,14 @@ impl From<WorkspaceError> for ApiError {
             WorkspaceError::QuotaNotConfigured => StatusCode::BAD_REQUEST,
             WorkspaceError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        Self::new(status, err.code(), err.to_string())
+        let message = match &err {
+            WorkspaceError::NotFound(_) => "workspace path not found".to_string(),
+            WorkspaceError::PathOutsideWorkspace(_) => {
+                "path resolves outside the workspace root".to_string()
+            }
+            WorkspaceError::IoError(_) => "workspace I/O error".to_string(),
+            _ => err.to_string(),
+        };
+        Self::new(status, err.code(), message)
     }
 }
