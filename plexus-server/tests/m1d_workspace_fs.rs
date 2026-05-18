@@ -140,6 +140,35 @@ async fn quota_ignores_workspace_symlinks_to_external_content() {
     assert!(!quota.locked);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn file_operations_reject_final_symlink_targets() {
+    use std::os::unix::fs::symlink;
+
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let user_root = app.workspace_root.path().join(user_id.to_string());
+    std::fs::write(user_root.join("real.txt"), b"real").unwrap();
+    symlink(user_root.join("real.txt"), user_root.join("link.txt")).unwrap();
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    let err = fs.read_file(user_id, "link.txt").await.unwrap_err();
+    assert!(matches!(err, WorkspaceError::PathOutsideWorkspace(_)));
+
+    let err = fs
+        .write_file(user_id, "link.txt", b"overwrite".to_vec())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, WorkspaceError::PathOutsideWorkspace(_)));
+
+    let err = fs.delete_file(user_id, "link.txt").await.unwrap_err();
+    assert!(matches!(err, WorkspaceError::PathOutsideWorkspace(_)));
+    assert!(user_root.join("link.txt").exists());
+    assert_eq!(std::fs::read(user_root.join("real.txt")).unwrap(), b"real");
+}
+
 #[tokio::test]
 async fn path_traversal_is_rejected() {
     let app = TestApp::spawn().await;
@@ -257,6 +286,34 @@ async fn write_file_rejects_existing_directory_target() {
         .await
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::PathOutsideWorkspace(_)));
+}
+
+#[tokio::test]
+async fn concurrent_writes_are_serialized_for_quota_accounting() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 1_000).await;
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    let mut handles = Vec::new();
+    for idx in 0..4 {
+        let fs = fs.clone();
+        handles.push(tokio::spawn(async move {
+            fs.write_file(user_id, &format!("concurrent/{idx}.bin"), vec![b'x'; 300])
+                .await
+        }));
+    }
+
+    let mut failures = 0;
+    for handle in handles {
+        if handle.await.unwrap().is_err() {
+            failures += 1;
+        }
+    }
+
+    let quota = fs.quota(user_id).await.unwrap();
+    assert!(failures >= 1);
+    assert!(quota.bytes_used <= quota.quota_bytes);
 }
 
 #[tokio::test]

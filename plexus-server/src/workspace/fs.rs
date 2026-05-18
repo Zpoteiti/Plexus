@@ -1,13 +1,19 @@
 use plexus_common::WorkspaceError;
 use sqlx::PgPool;
-use std::path::{Component, Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 use tokio::fs;
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct WorkspaceFs {
     root: PathBuf,
     pool: PgPool,
+    user_locks: Arc<Mutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -27,7 +33,11 @@ pub struct DirEntry {
 
 impl WorkspaceFs {
     pub fn new(root: PathBuf, pool: PgPool) -> Self {
-        Self { root, pool }
+        Self {
+            root,
+            pool,
+            user_locks: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub async fn quota(&self, user_id: Uuid) -> Result<QuotaState, WorkspaceError> {
@@ -44,8 +54,8 @@ impl WorkspaceFs {
 
     pub async fn read_file(&self, user_id: Uuid, path: &str) -> Result<Vec<u8>, WorkspaceError> {
         let full = self.resolve_existing(user_id, path).await?;
-        let meta = metadata_or_not_found(&full).await?;
-        if meta.is_dir() {
+        let meta = final_target_metadata_or_not_found(path, &self.personal_root(user_id)).await?;
+        if !meta.is_file() {
             return Err(WorkspaceError::PathOutsideWorkspace(full));
         }
         Ok(fs::read(full).await?)
@@ -57,8 +67,10 @@ impl WorkspaceFs {
         path: &str,
         bytes: Vec<u8>,
     ) -> Result<(), WorkspaceError> {
+        let user_lock = self.user_lock(user_id);
+        let _guard = user_lock.lock().await;
         let full = self.resolve_for_write(user_id, path).await?;
-        self.ensure_can_write(user_id, &full, bytes.len() as u64)
+        self.ensure_can_write(user_id, path, bytes.len() as u64)
             .await?;
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent).await?;
@@ -68,9 +80,11 @@ impl WorkspaceFs {
     }
 
     pub async fn delete_file(&self, user_id: Uuid, path: &str) -> Result<(), WorkspaceError> {
+        let user_lock = self.user_lock(user_id);
+        let _guard = user_lock.lock().await;
         let full = self.resolve_existing(user_id, path).await?;
-        let meta = metadata_or_not_found(&full).await?;
-        if meta.is_dir() {
+        let meta = final_target_metadata_or_not_found(path, &self.personal_root(user_id)).await?;
+        if !meta.is_file() {
             return Err(WorkspaceError::PathOutsideWorkspace(full));
         }
         fs::remove_file(full).await?;
@@ -79,6 +93,14 @@ impl WorkspaceFs {
 
     fn personal_root(&self, user_id: Uuid) -> PathBuf {
         self.root.join(user_id.to_string())
+    }
+
+    fn user_lock(&self, user_id: Uuid) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.user_locks.lock().unwrap();
+        locks
+            .entry(user_id)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
     }
 
     async fn quota_bytes(&self) -> Result<u64, WorkspaceError> {
@@ -97,7 +119,7 @@ impl WorkspaceFs {
     async fn ensure_can_write(
         &self,
         user_id: Uuid,
-        target: &Path,
+        path: &str,
         new_bytes: u64,
     ) -> Result<(), WorkspaceError> {
         let quota = self.quota(user_id).await?;
@@ -110,7 +132,7 @@ impl WorkspaceFs {
                 quota_bytes: quota.quota_bytes,
             });
         }
-        let existing_bytes = existing_file_size(target).await?;
+        let existing_bytes = existing_file_size(path, &self.personal_root(user_id)).await?;
         if quota
             .bytes_used
             .saturating_sub(existing_bytes)
@@ -171,23 +193,38 @@ impl WorkspaceFs {
     }
 }
 
-async fn metadata_or_not_found(path: &Path) -> Result<std::fs::Metadata, WorkspaceError> {
-    fs::metadata(path).await.map_err(|err| {
+async fn final_target_metadata_or_not_found(
+    path: &str,
+    root: &Path,
+) -> Result<std::fs::Metadata, WorkspaceError> {
+    let requested = requested_path(path, root).await?;
+    fs::symlink_metadata(&requested).await.map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
-            WorkspaceError::NotFound(path.to_path_buf())
+            WorkspaceError::NotFound(requested)
         } else {
             WorkspaceError::IoError(err)
         }
     })
 }
 
-async fn existing_file_size(path: &Path) -> Result<u64, WorkspaceError> {
-    match fs::symlink_metadata(path).await {
-        Ok(meta) if meta.is_dir() => Err(WorkspaceError::PathOutsideWorkspace(path.to_path_buf())),
+async fn existing_file_size(path: &str, root: &Path) -> Result<u64, WorkspaceError> {
+    let requested = requested_path(path, root).await?;
+    match fs::symlink_metadata(&requested).await {
+        Ok(meta) if meta.is_dir() => Err(WorkspaceError::PathOutsideWorkspace(requested)),
         Ok(meta) if meta.is_file() => Ok(meta.len()),
-        Ok(_) => Ok(0),
+        Ok(_) => Err(WorkspaceError::PathOutsideWorkspace(requested)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(err) => Err(WorkspaceError::IoError(err)),
+    }
+}
+
+async fn requested_path(path: &str, root: &Path) -> Result<PathBuf, WorkspaceError> {
+    let requested = Path::new(path);
+    if requested.is_absolute() {
+        Ok(requested.to_path_buf())
+    } else {
+        fs::create_dir_all(root).await?;
+        Ok(root.join(requested))
     }
 }
 
