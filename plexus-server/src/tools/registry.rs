@@ -1,8 +1,13 @@
-use plexus_common::tools::schemas::{
-    DELETE_FILE_SCHEMA, DELETE_FOLDER_SCHEMA, EDIT_FILE_SCHEMA, GLOB_SCHEMA, GREP_SCHEMA,
-    LIST_DIR_SCHEMA, READ_FILE_SCHEMA, WRITE_FILE_SCHEMA,
+use crate::{tools::file_ops, workspace::WorkspaceFs};
+use plexus_common::{
+    ToolError,
+    tools::schemas::{
+        DELETE_FILE_SCHEMA, DELETE_FOLDER_SCHEMA, EDIT_FILE_SCHEMA, GLOB_SCHEMA, GREP_SCHEMA,
+        LIST_DIR_SCHEMA, READ_FILE_SCHEMA, WRITE_FILE_SCHEMA,
+    },
 };
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 pub const SERVER_DEVICE: &str = "server";
 
@@ -20,6 +25,21 @@ pub fn merged_file_tool_schemas() -> Vec<Value> {
     .into_iter()
     .map(inject_server_device)
     .collect()
+}
+
+#[derive(Clone)]
+pub struct FileToolRegistry {
+    fs: WorkspaceFs,
+}
+
+impl FileToolRegistry {
+    pub fn new(fs: WorkspaceFs) -> Self {
+        Self { fs }
+    }
+
+    pub async fn call(&self, user_id: Uuid, name: &str, args: Value) -> Result<String, ToolError> {
+        file_ops::call_file_tool(&self.fs, user_id, name, args).await
+    }
 }
 
 fn inject_server_device(schema: &Value) -> Value {
