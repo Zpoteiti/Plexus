@@ -87,6 +87,107 @@ async fn put_get_delete_file_round_trip() {
 }
 
 #[tokio::test]
+async fn edit_list_glob_grep_and_folder_delete_work() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let (status, _, _) = support::bytes_request(
+        app.router.clone(),
+        Method::PUT,
+        "/api/workspace/files/docs/a.txt?plexus_device=server",
+        b"hello world".to_vec(),
+        "application/octet-stream",
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = support::json_request(
+        app.router.clone(),
+        Method::PATCH,
+        "/api/workspace/files/docs/a.txt?plexus_device=server",
+        json!({
+            "old_text": "world",
+            "new_text": "plexus",
+            "replace_all": false,
+        }),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["replacements"], 1);
+
+    let (status, body) = support::json_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/workspace/list/docs?plexus_device=server",
+        json!({}),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.as_array().unwrap().iter().any(|entry| {
+        entry["name"] == "a.txt"
+            && entry["path"] == "docs/a.txt"
+            && entry["kind"] == "file"
+            && entry["size"] == 12
+    }));
+
+    let (status, body) = support::json_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/workspace/glob?plexus_device=server&pattern=docs/*.txt",
+        json!({}),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!(["docs/a.txt"]));
+
+    let (status, body) = support::json_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/workspace/grep?plexus_device=server&pattern=plexus&path=docs",
+        json!({}),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line == "docs/a.txt:1:hello plexus")
+    );
+
+    let (status, _) = support::empty_request(
+        app.router.clone(),
+        Method::DELETE,
+        "/api/workspace/folders/docs?plexus_device=server",
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn glob_route_requires_explicit_server_device() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+
+    let (status, body) = support::empty_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/workspace/glob?pattern=docs/*.txt",
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error_body(&body)["code"], "invalid_args");
+}
+
+#[tokio::test]
 async fn quota_route_reports_server_workspace_usage() {
     let app = TestApp::spawn().await;
     let (jwt, _) = support::register_user(&app, "alice@example.com").await;

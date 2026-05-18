@@ -2,6 +2,7 @@ use plexus_common::WorkspaceError;
 use sqlx::PgPool;
 use std::{
     collections::HashMap,
+    io::{Error, ErrorKind},
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -89,6 +90,147 @@ impl WorkspaceFs {
         }
         fs::remove_file(full).await?;
         Ok(())
+    }
+
+    pub async fn edit_file(
+        &self,
+        user_id: Uuid,
+        path: &str,
+        old_text: &str,
+        new_text: &str,
+        replace_all: bool,
+    ) -> Result<usize, WorkspaceError> {
+        let bytes = self.read_file(user_id, path).await?;
+        let mut text =
+            String::from_utf8(bytes).map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+
+        let replacements = if replace_all {
+            let replacements = text.matches(old_text).count();
+            if replacements == 0 {
+                return Err(WorkspaceError::NotFound(PathBuf::from(path)));
+            }
+            text = text.replace(old_text, new_text);
+            replacements
+        } else {
+            let Some(start) = text.find(old_text) else {
+                return Err(WorkspaceError::NotFound(PathBuf::from(path)));
+            };
+            text.replace_range(start..start + old_text.len(), new_text);
+            1
+        };
+
+        self.write_file(user_id, path, text.into_bytes()).await?;
+        Ok(replacements)
+    }
+
+    pub async fn delete_folder(&self, user_id: Uuid, path: &str) -> Result<(), WorkspaceError> {
+        let user_lock = self.user_lock(user_id);
+        let _guard = user_lock.lock().await;
+        let full = self.resolve_existing(user_id, path).await?;
+        let meta = final_target_metadata_or_not_found(path, &self.personal_root(user_id)).await?;
+        if !meta.is_dir() {
+            return Err(WorkspaceError::PathOutsideWorkspace(full));
+        }
+        fs::remove_dir_all(full).await?;
+        Ok(())
+    }
+
+    pub async fn list_dir(
+        &self,
+        user_id: Uuid,
+        path: &str,
+    ) -> Result<Vec<DirEntry>, WorkspaceError> {
+        let full = self.resolve_existing(user_id, path).await?;
+        let root = self.personal_root(user_id);
+        let meta = final_target_metadata_or_not_found(path, &root).await?;
+        if !meta.is_dir() {
+            return Err(WorkspaceError::PathOutsideWorkspace(full));
+        }
+
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|_| WorkspaceError::NotFound(root.clone()))?;
+        let mut entries = Vec::new();
+        let mut dir = fs::read_dir(&full).await?;
+        while let Some(entry) = dir.next_entry().await? {
+            let meta = fs::symlink_metadata(entry.path()).await?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = relative_workspace_path(&canonical_root, &entry.path())?;
+            let kind = if meta.file_type().is_symlink() {
+                "symlink"
+            } else if meta.is_dir() {
+                "directory"
+            } else if meta.is_file() {
+                "file"
+            } else {
+                "other"
+            };
+            entries.push(DirEntry {
+                name,
+                path,
+                kind: kind.to_string(),
+                size: if meta.is_file() { meta.len() } else { 0 },
+            });
+        }
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(entries)
+    }
+
+    pub async fn glob(&self, user_id: Uuid, pattern: &str) -> Result<Vec<String>, WorkspaceError> {
+        let glob = globset::Glob::new(pattern)
+            .map_err(|err| Error::new(ErrorKind::InvalidInput, err))?
+            .compile_matcher();
+        let root = self.personal_root(user_id);
+        fs::create_dir_all(&root).await?;
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|_| WorkspaceError::NotFound(root.clone()))?;
+
+        let mut matches = Vec::new();
+        for file in collect_regular_files(&canonical_root).await? {
+            let relative = relative_workspace_path(&canonical_root, &file)?;
+            if glob.is_match(&relative) {
+                matches.push(relative);
+            }
+        }
+        matches.sort();
+        Ok(matches)
+    }
+
+    pub async fn grep(
+        &self,
+        user_id: Uuid,
+        pattern: &str,
+        path: Option<&str>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        let regex =
+            regex::Regex::new(pattern).map_err(|err| Error::new(ErrorKind::InvalidInput, err))?;
+        let root = self.personal_root(user_id);
+        fs::create_dir_all(&root).await?;
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|_| WorkspaceError::NotFound(root.clone()))?;
+
+        let files = if let Some(path) = path {
+            let full = self.resolve_existing(user_id, path).await?;
+            let meta = final_target_metadata_or_not_found(path, &root).await?;
+            if meta.is_file() {
+                vec![full]
+            } else if meta.is_dir() {
+                collect_regular_files(&full).await?
+            } else {
+                Vec::new()
+            }
+        } else {
+            collect_regular_files(&canonical_root).await?
+        };
+
+        let mut matches = Vec::new();
+        for file in files {
+            grep_file(&canonical_root, &file, &regex, &mut matches).await?;
+        }
+        matches.sort();
+        Ok(matches)
     }
 
     fn personal_root(&self, user_id: Uuid) -> PathBuf {
@@ -246,4 +388,53 @@ async fn dir_size(root: &Path) -> Result<u64, WorkspaceError> {
         }
     }
     Ok(total)
+}
+
+async fn collect_regular_files(root: &Path) -> Result<Vec<PathBuf>, WorkspaceError> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let meta = fs::symlink_metadata(entry.path()).await?;
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else if meta.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    Ok(files)
+}
+
+async fn grep_file(
+    root: &Path,
+    file: &Path,
+    regex: &regex::Regex,
+    matches: &mut Vec<String>,
+) -> Result<(), WorkspaceError> {
+    let Ok(contents) = fs::read_to_string(file).await else {
+        return Ok(());
+    };
+    let relative = relative_workspace_path(root, file)?;
+    for (line_index, line) in contents.lines().enumerate() {
+        if regex.is_match(line) {
+            matches.push(format!("{}:{}:{}", relative, line_index + 1, line));
+        }
+    }
+    Ok(())
+}
+
+fn relative_workspace_path(root: &Path, path: &Path) -> Result<String, WorkspaceError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| WorkspaceError::PathOutsideWorkspace(path.to_path_buf()))?;
+    Ok(relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
 }

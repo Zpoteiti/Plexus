@@ -1,7 +1,7 @@
 use crate::app::AppState;
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 
 pub mod admin;
@@ -41,6 +41,14 @@ pub fn router() -> Router<AppState> {
             "/api/workspace/files/{*path}",
             get(workspace::get_file)
                 .put(workspace::put_file)
+                .patch(workspace::patch_file)
                 .delete(workspace::delete_file),
         )
+        .route(
+            "/api/workspace/folders/{*path}",
+            delete(workspace::delete_folder),
+        )
+        .route("/api/workspace/list/{*path}", get(workspace::list_dir))
+        .route("/api/workspace/glob", get(workspace::glob))
+        .route("/api/workspace/grep", get(workspace::grep))
 }
