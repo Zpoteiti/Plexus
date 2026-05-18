@@ -25,9 +25,9 @@ info:
     | Agent tool | REST equivalent | Notes |
     |---|---|---|
     | `read_file` | `GET /api/workspace/files/{path}` | Query: explicit `plexus_device=server` in M1d |
-    | `write_file` | `PUT /api/workspace/files/{path}` | Query: `plexus_device`; implicit mkdir -p |
+    | `write_file` | `PUT /api/workspace/files/{path}` | Query: explicit `plexus_device=server` in M1d; implicit mkdir -p |
     | `edit_file` | `PATCH /api/workspace/files/{path}` | Query: `plexus_device`; body: old_text/new_text/replace_all |
-    | `delete_file` | `DELETE /api/workspace/files/{path}` | Query: `plexus_device`; always allowed for quota release |
+    | `delete_file` | `DELETE /api/workspace/files/{path}` | Query: explicit `plexus_device=server` in M1d; always allowed for quota release |
     | `delete_folder` | `DELETE /api/workspace/folders/{path}` | Query: `plexus_device`; recursive, no flag |
     | `list_dir` | `GET /api/workspace/list/{path}` | Query: `plexus_device`, recursive, max_entries |
     | `glob` | `GET /api/workspace/glob` | Query: `plexus_device`, pattern, path, head_limit, offset, entry_type |

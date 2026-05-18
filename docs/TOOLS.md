@@ -63,16 +63,16 @@ Schemas below are the **source** schemas (what gets written in code). The agent 
 
 All shared tools accept a `plexus_device` argument (injected at merge time per ADR-071) selecting which workspace tree the operation targets:
 
-- `plexus_device="server"` → routes to `workspace_fs` on the server. The leading path segment is either the user's `{user_id}` UUID (personal) or the `name@suffix` form (shared, ADR-108). Relative paths default to personal.
-- `plexus_device="<client_name>"` → dispatched over WebSocket to the named device, where the client-side implementation runs against the local filesystem inside `fs_policy` bounds.
+- M1d: merge v0 injects required `plexus_device` with enum `["server"]`. The server implementation routes to `workspace_fs` for the authenticated user's personal server workspace. Relative paths resolve inside that personal workspace.
+- M1f target: the enum is detected from connected install sites. `plexus_device="<client_name>"` dispatches over WebSocket to the named device, and server-side shared workspaces use the `name@suffix` form (ADR-108).
 
-The Workspace Files REST API mirrors this routing with a `plexus_device`
-query parameter that defaults to `server`. When a REST caller targets a
-client device, the server routes the operation over the device WebSocket and
-the client applies the same `workspace_path` and `fs_policy` checks used for
-agent tool calls. Offline devices fail with `device_unreachable`. The
-`file_transfer` REST endpoint keeps its intrinsic fields
-`plexus_src_device` and `plexus_dst_device`, matching the tool schema.
+The M1d Workspace Files REST API uses the same explicit-device contract:
+callers must pass `plexus_device=server`, and the route targets the
+authenticated user's personal server workspace. There is no REST default and
+no client-device or shared-workspace REST routing in M1d; those are M1f
+dynamic-routing work. The future `file_transfer` REST endpoint keeps its
+intrinsic fields `plexus_src_device` and `plexus_dst_device`, matching the
+tool schema.
 
 ### `read_file`
 
