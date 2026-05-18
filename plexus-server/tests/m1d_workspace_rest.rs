@@ -188,6 +188,38 @@ async fn glob_route_requires_explicit_server_device() {
 }
 
 #[tokio::test]
+async fn edit_rejects_empty_old_text() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let (status, _, _) = support::bytes_request(
+        app.router.clone(),
+        Method::PUT,
+        "/api/workspace/files/docs/a.txt?plexus_device=server",
+        b"hello".to_vec(),
+        "application/octet-stream",
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = support::json_request(
+        app.router.clone(),
+        Method::PATCH,
+        "/api/workspace/files/docs/a.txt?plexus_device=server",
+        json!({
+            "old_text": "",
+            "new_text": "prefix",
+        }),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_args");
+}
+
+#[tokio::test]
 async fn quota_route_reports_server_workspace_usage() {
     let app = TestApp::spawn().await;
     let (jwt, _) = support::register_user(&app, "alice@example.com").await;

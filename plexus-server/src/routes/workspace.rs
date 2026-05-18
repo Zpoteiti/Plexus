@@ -101,6 +101,9 @@ pub async fn patch_file(
     Json(request): Json<EditRequest>,
 ) -> Result<Json<EditResponse>, ApiError> {
     require_server_device(query.plexus_device.as_deref())?;
+    if request.old_text.is_empty() {
+        return Err(ApiError::invalid_args("old_text must not be empty"));
+    }
     let replacements = state
         .workspace_fs()
         .edit_file(
