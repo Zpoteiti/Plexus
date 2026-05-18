@@ -6,12 +6,13 @@ info:
     Target M1 REST + SSE contract for `plexus-server`. Pairs with
     [DECISIONS.md](DECISIONS.md) and [TOOLS.md](TOOLS.md).
 
-    **M1b implementation status:** the current `rebuild-m1-M1b` server
-    implements the auth/me/admin-config foundation, including validated LLM
-    provider identity config. Chat sessions, message ingress, per-session SSE,
-    per-user SSE events, workspace/file/device/channel/cron APIs, agent task
-    spawning, and compaction decisions are target M1 routes for later slices;
-    their paths remain in this spec so the future contract stays visible.
+    **Current implementation status:** the current `rebuild-m1-M1d` server
+    implements the auth/me/admin-config foundation, chat sessions/message
+    ingress/per-session SSE, and M1d server workspace quota + file
+    GET/PUT/DELETE routes. User-device workspace routing, channel/cron APIs,
+    agent task spawning, and compaction decisions are target M1 routes for
+    later slices; their paths remain in this spec so the future contract stays
+    visible.
 
     **Target design principle:** every user-meaningful agent capability has a
     matching REST endpoint over the same underlying abstractions (workspace_fs,
@@ -820,7 +821,9 @@ paths:
       description: |
         Full-content replace. M1d accepts raw `application/octet-stream`
         bytes. Implicit `mkdir -p` on the parent path (ADR-088). Runs through
-        workspace_fs quota checks.
+        workspace_fs quota checks. The REST route also applies a 64 MiB
+        operational in-memory upload ceiling before workspace_fs receives the
+        bytes.
       requestBody:
         required: true
         content:
@@ -830,7 +833,7 @@ paths:
         '204': { description: Written. }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Quota lock (SoftLocked) or operation exceeds 80% single-op cap (UploadTooLarge).
+          description: Quota lock (SoftLocked), operation exceeds 80% single-op cap, or operation exceeds the 64 MiB REST memory cap (UploadTooLarge).
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     patch:
       tags: [Workspace Files]

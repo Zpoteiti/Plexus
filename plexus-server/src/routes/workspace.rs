@@ -9,6 +9,8 @@ use axum::{
 use plexus_common::WorkspaceError;
 use serde::Deserialize;
 
+pub const WORKSPACE_REST_UPLOAD_MEMORY_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Deserialize)]
 pub struct WorkspaceDeviceQuery {
     plexus_device: Option<String>,
@@ -42,10 +44,11 @@ pub async fn put_file(
     require_server_device(&query)?;
     let quota = state.workspace_fs().quota(auth.user.id).await?;
     let single_op_limit = quota.quota_bytes.saturating_mul(80) / 100;
-    let body = to_bytes(body, usize::try_from(single_op_limit).unwrap_or(usize::MAX))
+    let collection_limit = single_op_limit.min(WORKSPACE_REST_UPLOAD_MEMORY_LIMIT_BYTES);
+    let body = to_bytes(body, collection_limit as usize)
         .await
         .map_err(|_| WorkspaceError::UploadTooLarge {
-            actual_bytes: single_op_limit.saturating_add(1),
+            actual_bytes: collection_limit.saturating_add(1),
             quota_bytes: quota.quota_bytes,
         })?;
 

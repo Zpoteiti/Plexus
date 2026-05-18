@@ -1,6 +1,7 @@
 mod support;
 
 use axum::http::{Method, StatusCode, header};
+use plexus_server::routes::workspace::WORKSPACE_REST_UPLOAD_MEMORY_LIMIT_BYTES;
 use serde_json::{Value, json};
 use support::TestApp;
 
@@ -129,6 +130,24 @@ async fn missing_file_returns_not_found_code_without_server_path() {
 }
 
 #[tokio::test]
+async fn path_traversal_returns_forbidden_code_without_server_path() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+
+    let (status, body) = support::empty_request(
+        app.router.clone(),
+        Method::GET,
+        "/api/workspace/files/%2E%2E/secret.txt?plexus_device=server",
+        Some(&jwt),
+    )
+    .await;
+    let body = error_body(&body);
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "path_outside_workspace");
+    assert!(!body["message"].as_str().unwrap().contains("/"));
+}
+
+#[tokio::test]
 async fn quota_route_returns_quota_not_configured_code() {
     let app = TestApp::spawn().await;
     let (jwt, _) = support::register_user(&app, "alice@example.com").await;
@@ -181,4 +200,24 @@ async fn upload_above_axum_default_body_limit_can_succeed() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn upload_above_rest_memory_limit_returns_upload_too_large_code() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 100_000_000).await;
+
+    let (status, _, body) = support::bytes_request(
+        app.router.clone(),
+        Method::PUT,
+        "/api/workspace/files/too-large-for-rest.bin?plexus_device=server",
+        vec![b'x'; WORKSPACE_REST_UPLOAD_MEMORY_LIMIT_BYTES as usize + 1],
+        "application/octet-stream",
+        Some(&jwt),
+    )
+    .await;
+    let body = error_body(&body);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "upload_too_large");
 }
