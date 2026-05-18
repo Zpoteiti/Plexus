@@ -1,6 +1,6 @@
 # Plexus M1d Workspace Files and Attachments Sub-Spec
 
-**Status:** Approved
+**Status:** Implemented; full runtime verification pending local PostgreSQL availability
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1-M1d`
 **Base:** `rebuild-m1`
@@ -52,7 +52,7 @@ M1d does not include:
 - client-device attachment reads;
 - base64 encoding of images that live on client devices;
 - file transfer between devices;
-- external HTTP(S) URL download or ingestion;
+- remote URL download or ingestion;
 - moving, copying, renaming, or garbage-collecting files during message send;
 - server-side `.attachments/` sweeper;
 - full ReAct tool-loop implementation beyond the server file tool surface needed
@@ -544,9 +544,9 @@ reasoning level.
 
 ---
 
-## 15. Docs To Update During Implementation
+## 15. Docs Updated During Implementation
 
-Implementation should update these docs to match the M1d contract:
+Implementation updated these docs to match the M1d contract:
 
 - `docs/API.yaml`
   - remove string shorthand from browser message writes;
@@ -560,8 +560,8 @@ Implementation should update these docs to match the M1d contract:
   - clarify that full dynamic merger lands in M1f;
   - ensure shared file tool source schemas remain device-free.
 - `docs/DECISIONS.md`
-  - correct ADR-044 for M1d browser attachments staying at their existing
-    workspace path instead of being moved to `.attachments/{msg_id}`;
+  - corrected ADR-044 for M1d browser attachments staying at their existing
+    workspace path instead of being moved into adapter-owned `.attachments/`;
   - scope ADR-080 graceful degradation to ingress adapters that write bytes
     during message receive, not M1d browser attachment refs;
   - record explicit `plexus_device` for REST and message attachments.

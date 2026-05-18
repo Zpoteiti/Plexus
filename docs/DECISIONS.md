@@ -271,10 +271,10 @@ pub struct ContextInputs<'a> {
 ### ADR-027 · Path-text markers accompany every chat attachment
 
 **Status:** accepted
-**Decision:** When a channel adapter receives an inbound message with one or more attachments, it adds a text block per attachment: `"User has uploaded a file to device='server', path='.attachments/{msg_id}/{filename}'"`. This fires for **every** attachment regardless of MIME type:
+**Decision:** When a channel adapter receives an inbound message with one or more attachment byte payloads, it writes those bytes to the server workspace and adds a text block per attachment: `"User uploaded file to device='server', path=\"<workspace path>\""`. This fires for **every** attachment regardless of MIME type:
 - **Images** — adapter adds the path-text block AND an `image_url` block (base64 inline per ADR-059). After vision-strip retry, the path-text block remains so a non-VLM agent still knows the file exists.
 - **Non-image files** (PDFs, CSVs, audio, archives, anything else) — adapter adds the path-text block ONLY. There is no `file_url` content block in OpenAI chat completions (ADR-101), so non-image bytes never live inline in `messages.content`. The agent reaches them via `read_file` against the workspace path.
-- **M1c browser inline-image exception** — before `.attachments/` writing lands in M1d, browser messages may store only an inline base64 `image_url` block with no path-text marker. Image stripping therefore removes only the image block and keeps whatever user text blocks remain, possibly empty.
+- **Browser path correction** — M1c browser inline-image messages may store only an inline base64 `image_url` block with no path-text marker. M1d browser message attachments are refs to existing workspace files: the message API does not write or move bytes, but it still adds the marker for the referenced path and, for image refs, the base64 `image_url` block.
 
 **Consequences:** Non-VLM agents can still reason about uploaded files structurally. VLM agents have redundancy on images (path + base64), which is fine. Non-image files have a single path of access (workspace `.attachments/`) — uniform model regardless of whether the LLM supports vision.
 
@@ -459,7 +459,7 @@ Dispatch:
 
 **Status:** accepted
 **Context:** Prior Plexus had `/api/files` (ephemeral upload cache, 24h TTL) running parallel to `/api/workspace/files/` (durable user tree). Two storage systems for files caused drift across message-send, context-load, and channel delivery.
-**Decision:** Workspace is canonical for files the agent operates on. No `/api/files`, no `file_store.rs`. Chat-drop attachments land at `workspace/.attachments/{msg_id}/{filename}` (server-side workspace, `{PLEXUS_WORKSPACE_ROOT}/{user_id}/.attachments/...`) — a reserved directory that counts toward quota like any other workspace content. **Note:** this `.attachments/` concept exists only on the server. Client devices have no equivalent — bytes that flow to a client via `file_transfer` or `write_file` land directly in `device.workspace_path` with no special media subdir.
+**Decision:** Workspace is canonical for files the agent operates on. No `/api/files`, no `file_store.rs`. Channel adapters that receive raw attachment bytes may place those bytes under `workspace/.attachments/{inbound_id}/{filename}` (server-side workspace, `{PLEXUS_WORKSPACE_ROOT}/{user_id}/.attachments/...`) — a reserved directory that counts toward quota like any other workspace content. **M1d browser correction:** browser uploads first write bytes through `PUT /api/workspace/files/{path}?plexus_device=server`; `POST /api/sessions/{id}/messages` then references that existing path and does not move, copy, or rename the file into `.attachments/`. **Note:** this `.attachments/` concept exists only on the server. Client devices have no equivalent — bytes that flow to a client via `file_transfer` or `write_file` land directly in `device.workspace_path` with no special media subdir.
 **Consequences:** One file model for agent-accessible files. All inbound/outbound media the agent reads/writes flows through workspace paths. Discord/Telegram adapters read workspace files directly for delivery (no staging cache). Device-origin files: the agent uses `file_transfer` to stage to server first, or the server relays via `GET /api/device-stream/{name}/{path}` (SSE-compatible for browser display).
 
 **Storage by attachment type:**
@@ -588,11 +588,11 @@ pub trait Tool: Send + Sync {
 **Decision:** v1 exposes `bytes_used` through the workspace/quota APIs, but storage is an implementation detail of `workspace_fs`. The simplest correct implementation is on-demand disk usage calculation. If performance later requires it, `workspace_fs` may add an internal counter/cache plus reconciliation without changing the public API or `users` schema.
 **Consequences:** No background reconciliation task is required for M1. There is no DB drift between filesystem mtimes and a public `users.bytes_used` column because that column does not exist. Quota reads remain user-visible through `GET /api/workspace/quota`.
 
-### ADR-080 · Chat-drop attachments degrade gracefully under quota lock
+### ADR-080 · Byte-ingress attachments degrade gracefully under quota lock
 
 **Status:** accepted
 **Context:** A user can hit their quota mid-conversation, then send a Discord/Telegram message with an image attachment. The attachment write would hit `SoftLocked`. Dropping the entire message would lose the user's text and make the agent miss the turn.
-**Decision:** When a channel adapter receives an inbound message with attachments while the user is over quota:
+**Decision:** When a channel adapter receives an inbound message with attachment bytes while the user is over quota:
 - The text portion of the message is delivered normally to the session.
 - Each attachment is dropped entirely — no workspace file is written AND no base64 `image_url` block is inserted into `messages.content` (the DB-side of ADR-059 is also skipped). The agent sees no image at all for that message.
 - A system note is appended to the user's text block: `[attachment skipped: workspace over quota]`.
@@ -600,10 +600,12 @@ pub trait Tool: Send + Sync {
 The agent sees the note in context, can reference it in its reply, and the user can delete files and resend.
 **Consequences:** Messages are never lost wholesale. The "you are over quota" signal surfaces through the conversation itself, not as an out-of-band error. Identical note format across channels.
 
+**M1d browser correction:** Browser message attachments are not byte-ingress writes. They are refs to existing workspace files after a prior upload/write has completed. If any M1d browser attachment ref is missing, unreadable, outside the workspace, or targets a non-server device, the whole message is rejected before persistence.
+
 ### ADR-081 · No server-side `.attachments/` sweeper — users manage their own quota
 
 **Status:** rejected (initially proposed as a 30-day TTL sweeper; withdrawn)
-**Context:** Chat-drop images land in `{workspace_root}/{user_id}/.attachments/{msg_id}/{filename}` (ADR-044). Without cleanup, these accumulate monotonically and consume quota. A tokio background sweeper (every 6 hours, 30-day mtime threshold) was proposed.
+**Context:** Channel-adapter chat-drop images may land in `{workspace_root}/{user_id}/.attachments/{inbound_id}/{filename}` (ADR-044). Browser-uploaded files can also accumulate anywhere the frontend writes them, including `.attachments/uploads/...`. Without cleanup, these accumulate monotonically and consume quota. A tokio background sweeper (every 6 hours, 30-day mtime threshold) was proposed.
 **Decision:** No server-side sweeper. The user is responsible for managing their own workspace usage. If `.attachments/` fills their quota, the soft-lock behavior from ADR-078 surfaces the problem through the UI (`GET /api/workspace/quota` shows `locked: true`) and through agent tool errors (`WorkspaceError::SoftLocked`). From there the user — or the agent, on the user's behalf — deletes old attachments via the workspace browser or `delete_file` / `delete_folder` tools.
 **Consequences:**
 - Zero server-side auto-deletion. Every byte on a user's workspace is there because the user or their agent put it there and hasn't removed it.
@@ -1076,7 +1078,7 @@ All three live in `plexus-client/src/mcp/`. The worker stitches them together fo
 
 Canonical block types:
 - **text:** `{"type": "text", "text": "..."}`
-- **image:** `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` — bytes inline as base64 data URL, not a path. The target workspace copy at `.attachments/` (ADR-044) is for the agent's file tools; the DB copy is for durable conversation replay. M1c browser inline-image messages may store only the DB copy until M1d adds `.attachments/` writing.
+- **image:** `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` — bytes inline as base64 data URL, not a path. A separate workspace copy, when one exists, is for the agent's file tools; the DB copy is for durable conversation replay. M1c browser inline-image messages may store only the DB copy. M1d browser attachment refs point at existing workspace files and expand image refs into marker + base64 content blocks without moving or copying the file.
 - **tool_use / tool_result:** per the provider's tool spec.
 
 User, assistant, and tool messages all use the same block schema.
@@ -1903,7 +1905,7 @@ The client expansion happens once, at startup, in plexus-client (ADR-104's "work
 ### ADR-115 · M1d explicit file targets and workspace attachment contract
 
 **Status:** accepted
-**Context:** M1c allowed a narrow browser chat path with inline base64 images and no server workspace integration. M1d introduces server workspace file APIs, file tools, quota, and message attachments. Earlier docs had conflicting assumptions: REST defaulted `plexus_device` to `server`, browser message `content` accepted string shorthand, chat attachments were described as being moved into `.attachments/{msg_id}`, and external image URL ingestion was treated as part of M1d. During M1d design, these assumptions were simplified into one explicit contract.
+**Context:** M1c allowed a narrow browser chat path with inline base64 images and no server workspace integration. M1d introduces server workspace file APIs, file tools, quota, and message attachments. Earlier docs had conflicting assumptions: REST had an implicit server target, browser message `content` accepted legacy text shorthand, chat attachments were described as being moved into a message-id `.attachments/` directory, and remote image URL ingestion was treated as part of M1d. During M1d design, these assumptions were simplified into one explicit contract.
 
 **Decision:** M1d requires an explicit `plexus_device` everywhere a file target is named. Workspace REST file routes require `?plexus_device=server`; browser message attachments require `"plexus_device": "server"`; agent-visible shared file tools receive required `plexus_device` through merge-v0 schema injection. There is no default. M1d accepts only `server`; non-server values fail clearly until M1f.
 

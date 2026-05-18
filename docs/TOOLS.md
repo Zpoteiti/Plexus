@@ -63,7 +63,7 @@ Schemas below are the **source** schemas (what gets written in code). The agent 
 
 All shared tools accept a `plexus_device` argument (injected at merge time per ADR-071) selecting which workspace tree the operation targets:
 
-- M1d: merge v0 injects required `plexus_device` with enum `["server"]`. The server implementation routes to `workspace_fs` for the authenticated user's personal server workspace. Relative paths resolve inside that personal workspace.
+- **M1d implementation note:** M1d implements merge v0 only. It injects required `plexus_device` with enum `["server"]` into the agent-visible shared file tool schemas. The source schemas remain device-free, and the server implementation routes to `workspace_fs` for the authenticated user's personal server workspace. Relative paths resolve inside that personal workspace.
 - M1f target: the enum is detected from connected install sites. `plexus_device="<client_name>"` dispatches over WebSocket to the named device, and server-side shared workspaces use the `name@suffix` form (ADR-108).
 
 The M1d Workspace Files REST API uses the same explicit-device contract:
