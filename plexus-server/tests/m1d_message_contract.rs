@@ -18,7 +18,7 @@ async fn create_session(app: &TestApp, token: &str) -> String {
         Method::POST,
         "/api/sessions",
         json!({}),
-        Some(&token),
+        Some(token),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);

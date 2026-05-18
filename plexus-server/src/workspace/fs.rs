@@ -328,6 +328,9 @@ impl WorkspaceFs {
             let suffix = candidate
                 .strip_prefix(ancestor)
                 .map_err(|_| WorkspaceError::PathOutsideWorkspace(candidate.clone()))?;
+            if suffix.as_os_str().is_empty() {
+                return Ok(canonical_ancestor);
+            }
             return Ok(canonical_ancestor.join(suffix));
         }
 

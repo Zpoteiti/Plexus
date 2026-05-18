@@ -1,7 +1,7 @@
 mod support;
 
 use axum::http::{Method, StatusCode};
-use serde_json::{Value, json};
+use serde_json::json;
 use support::{TestApp, json_request};
 use uuid::Uuid;
 

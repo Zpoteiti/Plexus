@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use axum::{
     body::Body,
     http::{HeaderMap, Method, Request, StatusCode, header},

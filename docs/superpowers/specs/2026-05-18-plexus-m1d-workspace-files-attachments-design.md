@@ -1,6 +1,6 @@
 # Plexus M1d Workspace Files and Attachments Sub-Spec
 
-**Status:** Implemented; full runtime verification pending local PostgreSQL availability
+**Status:** Verified
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1-M1d`
 **Base:** `rebuild-m1`
@@ -572,7 +572,7 @@ Implementation updated these docs to match the M1d contract:
 
 ## 16. Verification
 
-M1d is not verified until automated tests cover:
+M1d automated verification covers:
 
 - message request rejects missing `content`;
 - message request rejects missing `attachments`;
@@ -610,3 +610,14 @@ Manual smoke should prove:
   is not duplicated in the persisted message content;
 - upload and reference a non-image file, then ask the agent to read it through
   the server file tool path once tool use is available in the milestone.
+
+Verification completed on 2026-05-18 using the existing local PostgreSQL test
+container `plexus`:
+
+- `rtk cargo fmt --check`
+- `rtk cargo clippy -p plexus-common -p plexus-server --all-targets -- -D warnings`
+- `rtk env PLEXUS_TEST_DATABASE_URL=postgres://plexus:plexus@127.0.0.1:5432/plexus cargo test --workspace --all-targets`
+- `rtk conda run -n Plexus python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('docs/API.yaml').read_text()); print('API.yaml ok')"`
+- targeted stale M1d wording scan over `docs/API.yaml`, `docs/TOOLS.md`,
+  `docs/DECISIONS.md`, and the M1/M1d specs
+- `rtk git diff --check`

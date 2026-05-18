@@ -182,7 +182,7 @@ async fn post_message_accepts_unspecified_reasoning_effort() {
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{id}/messages"),
-        json!({"content": [{"type": "text", "text": "hello"}]}),
+        json!({"content": [{"type": "text", "text": "hello"}], "attachments": []}),
         Some(&token),
     )
     .await;
@@ -212,6 +212,7 @@ async fn post_message_accepts_null_reasoning_effort() {
         &format!("/api/sessions/{id}/messages"),
         json!({
             "content": [{"type": "text", "text": "hello"}],
+            "attachments": [],
             "reasoning_effort": null
         }),
         Some(&token),
@@ -243,6 +244,7 @@ async fn post_message_rejects_invalid_reasoning_effort() {
         &format!("/api/sessions/{id}/messages"),
         json!({
             "content": [{"type": "text", "text": "hello"}],
+            "attachments": [],
             "reasoning_effort": "off"
         }),
         Some(&token),
