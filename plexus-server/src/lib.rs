@@ -6,3 +6,4 @@ pub mod db;
 pub mod error;
 pub mod openai;
 pub mod routes;
+pub mod workspace;

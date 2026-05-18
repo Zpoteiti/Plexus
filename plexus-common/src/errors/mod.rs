@@ -30,6 +30,7 @@ pub enum ErrorCode {
     NotFound,
     SoftLocked,
     UploadTooLarge,
+    QuotaNotConfigured,
     PathOutsideWorkspace,
     IoError,
 
@@ -99,6 +100,7 @@ mod tests {
             ErrorCode::NotFound,
             ErrorCode::SoftLocked,
             ErrorCode::UploadTooLarge,
+            ErrorCode::QuotaNotConfigured,
             ErrorCode::PathOutsideWorkspace,
             ErrorCode::IoError,
             ErrorCode::ExecTimeout,

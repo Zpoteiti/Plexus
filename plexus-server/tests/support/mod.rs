@@ -152,4 +152,24 @@ pub async fn json_request_with_headers(
     (status, headers, body)
 }
 
+pub async fn register_user(app: &TestApp, email: &str) -> (String, Uuid) {
+    let (status, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        "/api/auth/register",
+        serde_json::json!({
+            "email": email,
+            "password": "correct horse battery staple",
+            "name": "Alice"
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    (
+        body["jwt"].as_str().unwrap().to_string(),
+        Uuid::parse_str(body["user"]["id"].as_str().unwrap()).unwrap(),
+    )
+}
+
 pub mod fake_openai;

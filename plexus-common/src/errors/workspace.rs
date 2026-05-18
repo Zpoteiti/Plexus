@@ -16,6 +16,9 @@ pub enum WorkspaceError {
     #[error("upload size {actual_bytes} exceeds 80% of quota ({quota_bytes} bytes)")]
     UploadTooLarge { actual_bytes: u64, quota_bytes: u64 },
 
+    #[error("workspace quota_bytes is not configured")]
+    QuotaNotConfigured,
+
     #[error("path {0} resolves outside the workspace root")]
     PathOutsideWorkspace(PathBuf),
 
@@ -29,6 +32,7 @@ impl Code for WorkspaceError {
             WorkspaceError::NotFound(_) => ErrorCode::NotFound,
             WorkspaceError::SoftLocked => ErrorCode::SoftLocked,
             WorkspaceError::UploadTooLarge { .. } => ErrorCode::UploadTooLarge,
+            WorkspaceError::QuotaNotConfigured => ErrorCode::QuotaNotConfigured,
             WorkspaceError::PathOutsideWorkspace(_) => ErrorCode::PathOutsideWorkspace,
             WorkspaceError::IoError(_) => ErrorCode::IoError,
         }
@@ -57,6 +61,14 @@ mod tests {
             quota_bytes: 800,
         };
         assert_eq!(e.code(), ErrorCode::UploadTooLarge);
+    }
+
+    #[test]
+    fn quota_not_configured_maps() {
+        assert_eq!(
+            WorkspaceError::QuotaNotConfigured.code(),
+            ErrorCode::QuotaNotConfigured
+        );
     }
 
     #[test]
