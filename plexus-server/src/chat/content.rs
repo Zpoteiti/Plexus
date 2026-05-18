@@ -1,36 +1,29 @@
 use crate::error::ApiError;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 pub use plexus_common::{ContentBlock, ImageUrlBlock};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-pub fn normalize_user_content(raw: Option<Value>) -> Result<Vec<ContentBlock>, ApiError> {
-    match raw {
-        None => Ok(Vec::new()),
-        Some(Value::String(text)) if text.is_empty() => Ok(Vec::new()),
-        Some(Value::String(text)) => Ok(vec![ContentBlock::text(text)]),
-        Some(Value::Array(values)) => values.into_iter().map(parse_block).collect(),
-        Some(Value::Null) => Err(ApiError::invalid_args("content must not be null")),
-        Some(_) => Err(ApiError::invalid_args("content must be a string or array")),
-    }
+pub fn parse_content_array(raw: &Value) -> Result<Vec<ContentBlock>, ApiError> {
+    let Value::Array(values) = raw else {
+        return Err(ApiError::invalid_args("content must be an array"));
+    };
+    values.iter().cloned().map(parse_block).collect()
 }
 
 fn parse_block(value: Value) -> Result<ContentBlock, ApiError> {
     let block: ContentBlock = serde_json::from_value(value)
         .map_err(|_| ApiError::invalid_args("content block is malformed"))?;
-    validate_block(&block)?;
+    if let ContentBlock::ImageUrl { image_url } = &block {
+        decode_data_image_url(&image_url.url)?;
+    }
     Ok(block)
 }
 
-fn validate_block(block: &ContentBlock) -> Result<(), ApiError> {
-    if let ContentBlock::ImageUrl { image_url } = block {
-        validate_data_image_url(&image_url.url)?;
-    }
-    Ok(())
-}
-
-fn validate_data_image_url(url: &str) -> Result<(), ApiError> {
+pub fn decode_data_image_url(url: &str) -> Result<(String, Vec<u8>), ApiError> {
     let Some(rest) = url.strip_prefix("data:image/") else {
         return Err(ApiError::invalid_args(
-            "M1c only accepts inline data:image/...;base64 image URLs",
+            "image_url.url must be an inline data:image/...;base64 URL",
         ));
     };
     let Some((mime_tail, data)) = rest.split_once(";base64,") else {
@@ -42,14 +35,18 @@ fn validate_data_image_url(url: &str) -> Result<(), ApiError> {
         || !mime_tail
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
-        || data.is_empty()
-        || !data
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '='))
     {
         return Err(ApiError::invalid_args(
             "image_url.url must be a valid data:image/...;base64 URL",
         ));
     }
-    Ok(())
+    let bytes = STANDARD
+        .decode(data)
+        .map_err(|_| ApiError::invalid_args("image_url.url base64 is invalid"))?;
+    Ok((format!("image/{mime_tail}"), bytes))
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }

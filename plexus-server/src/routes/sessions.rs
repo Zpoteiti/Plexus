@@ -1,6 +1,6 @@
 use crate::{
     auth::AuthUser,
-    chat::content::{ContentBlock, normalize_user_content},
+    chat::content::{ContentBlock, parse_content_array},
     db::{messages, pending_messages, sessions},
     error::ApiError,
 };
@@ -136,9 +136,20 @@ pub async fn post_message(
         ));
     }
 
+    reject_unknown_message_fields(&body)?;
     let reasoning_effort = optional_reasoning_effort(&body)?;
+    let content_value = required_array(&body, "content")?;
+    let attachments_value = required_array(&body, "attachments")?;
+    let user_content = parse_content_array(content_value)?;
+    let attachments_len = attachments_value.as_array().unwrap().len();
+    if user_content.is_empty() && attachments_len == 0 {
+        return Err(ApiError::invalid_args(
+            "content and attachments cannot both be empty",
+        ));
+    }
+
     let mut content = vec![runtime_block(&session)];
-    content.extend(normalize_user_content(body.get("content").cloned())?);
+    content.extend(user_content);
     sessions::touch_last_inbound(state.pool(), session.id)
         .await
         .map_err(ApiError::from_sqlx)?;
@@ -261,6 +272,29 @@ fn optional_reasoning_effort(
             ReasoningEffort::ALLOWED_VALUES
         ))
     })
+}
+
+fn required_array<'a>(body: &'a Map<String, Value>, key: &str) -> Result<&'a Value, ApiError> {
+    body.get(key)
+        .ok_or_else(|| ApiError::invalid_args(format!("{key} is required")))
+        .and_then(|value| {
+            if value.is_array() {
+                Ok(value)
+            } else {
+                Err(ApiError::invalid_args(format!("{key} must be an array")))
+            }
+        })
+}
+
+fn reject_unknown_message_fields(body: &Map<String, Value>) -> Result<(), ApiError> {
+    for key in body.keys() {
+        if !matches!(key.as_str(), "reasoning_effort" | "content" | "attachments") {
+            return Err(ApiError::invalid_args(format!(
+                "unsupported message field: {key}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn runtime_block(session: &sessions::Session) -> ContentBlock {
