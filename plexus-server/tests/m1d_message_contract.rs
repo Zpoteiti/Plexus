@@ -72,6 +72,26 @@ async fn rejects_message_when_both_arrays_are_empty() {
 }
 
 #[tokio::test]
+async fn rejects_non_array_attachments() {
+    let app = TestApp::spawn().await;
+    let (token, session_id) = register_and_create_session(&app).await;
+
+    let (status, _) = post_message(
+        &app,
+        &token,
+        &session_id,
+        json!({
+            "reasoning_effort": null,
+            "content": [{"type": "text", "text": "hello"}],
+            "attachments": "nope"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn accepts_text_and_direct_inline_image_with_empty_attachments() {
     let app = TestApp::spawn().await;
     let (token, session_id) = register_and_create_session(&app).await;
@@ -108,6 +128,28 @@ async fn rejects_external_direct_image_url() {
             "reasoning_effort": null,
             "content": [
                 {"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}
+            ],
+            "attachments": []
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn rejects_malformed_inline_image_base64() {
+    let app = TestApp::spawn().await;
+    let (token, session_id) = register_and_create_session(&app).await;
+
+    let (status, _) = post_message(
+        &app,
+        &token,
+        &session_id,
+        json!({
+            "reasoning_effort": null,
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,not valid"}}
             ],
             "attachments": []
         }),
