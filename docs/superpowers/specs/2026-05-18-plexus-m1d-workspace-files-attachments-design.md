@@ -291,9 +291,9 @@ array order, with each marker immediately followed by its generated image block:
 
 ```json
 [
-  { "type": "text", "text": "User uploaded file to device='server', path='.attachments/uploads/a/image1.png'" },
+  { "type": "text", "text": "User uploaded file to device='server', path=\".attachments/uploads/a/image1.png\"" },
   { "type": "image_url", "image_url": { "url": "data:image/png;base64,..." } },
-  { "type": "text", "text": "User uploaded file to device='server', path='.attachments/uploads/b/image2.png'" },
+  { "type": "text", "text": "User uploaded file to device='server', path=\".attachments/uploads/b/image2.png\"" },
   { "type": "image_url", "image_url": { "url": "data:image/png;base64,..." } },
   { "type": "text", "text": "Compare the first image and second image." }
 ]
@@ -338,7 +338,7 @@ Persisted/provider-visible content, excluding the optional runtime block:
   { "type": "text", "text": "Describe this image." },
   {
     "type": "text",
-    "text": "User uploaded file to device='server', path='.attachments/uploads/018f/cat.png'"
+    "text": "User uploaded file to device='server', path=\".attachments/uploads/018f/cat.png\""
   },
   {
     "type": "image_url",

@@ -3,7 +3,7 @@ mod support;
 use axum::http::{Method, StatusCode};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use support::{TestApp, json_request, register_user};
+use support::{TestApp, json_request, register_user, workspace_path};
 use uuid::Uuid;
 
 async fn register_and_create_session(app: &TestApp) -> (String, String) {
@@ -287,6 +287,34 @@ async fn missing_attachment_device_or_file_rejects_whole_message() {
         assert_eq!(status, expected_status);
         assert_eq!(user_message_count(&app, &session_id).await, 0);
     }
+}
+
+#[tokio::test]
+async fn directory_attachment_ref_is_forbidden_and_rejects_whole_message() {
+    let app = TestApp::spawn().await;
+    let (token, user_id) = register_user(&app, "alice@example.com").await;
+    let session_id = create_session(&app, &token).await;
+    tokio::fs::create_dir_all(
+        workspace_path(&app.workspace_root, user_id).join(".attachments/uploads/a/dir"),
+    )
+    .await
+    .unwrap();
+
+    let (status, body) = post_message(
+        &app,
+        &token,
+        &session_id,
+        json!({
+            "reasoning_effort": null,
+            "content": [{"type": "text", "text": "hello"}],
+            "attachments": [{"plexus_device": "server", "path": ".attachments/uploads/a/dir"}]
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "path_outside_workspace");
+    assert_eq!(user_message_count(&app, &session_id).await, 0);
 }
 
 #[tokio::test]
