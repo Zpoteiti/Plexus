@@ -57,6 +57,62 @@ async fn absolute_write_path_inside_user_workspace_is_allowed() {
 }
 
 #[tokio::test]
+async fn absolute_write_path_outside_user_workspace_is_rejected() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let outside = tempfile::tempdir().unwrap();
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    let err = fs
+        .write_file(
+            user_id,
+            outside.path().join("outside.txt").to_str().unwrap(),
+            b"outside".to_vec(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, WorkspaceError::PathOutsideWorkspace(_)));
+}
+
+#[tokio::test]
+async fn empty_write_path_is_rejected() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    let err = fs
+        .write_file(user_id, "", b"empty".to_vec())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, WorkspaceError::PathOutsideWorkspace(_)));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_parent_escape_does_not_create_external_parent() {
+    use std::os::unix::fs::symlink;
+
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let user_root = app.workspace_root.path().join(user_id.to_string());
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), user_root.join("escape")).unwrap();
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    let err = fs
+        .write_file(user_id, "escape/nested/file.txt", b"escape".to_vec())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, WorkspaceError::PathOutsideWorkspace(_)));
+    assert!(!outside.path().join("nested").exists());
+    assert!(!outside.path().join("nested/file.txt").exists());
+}
+
+#[tokio::test]
 async fn path_traversal_is_rejected() {
     let app = TestApp::spawn().await;
     let (_, user_id) = support::register_user(&app, "alice@example.com").await;
