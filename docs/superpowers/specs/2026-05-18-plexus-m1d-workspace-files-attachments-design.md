@@ -1,6 +1,6 @@
 # Plexus M1d Workspace Files and Attachments Sub-Spec
 
-**Status:** Draft for user review
+**Status:** Approved
 **Parent:** [Plexus M1 Living Design Spec](2026-05-12-plexus-m1-living-design.md)
 **Branch:** `rebuild-m1-M1d`
 **Base:** `rebuild-m1`

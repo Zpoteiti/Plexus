@@ -1900,6 +1900,38 @@ The client expansion happens once, at startup, in plexus-client (ADR-104's "work
 - A user who wants a different path (e.g. `D:\projects` on Windows, `/srv/agent` on a Linux server) supplies it explicitly at device-creation time; the server accepts any string that passes the path-validation rules.
 - Documenting once in ADR-097 / API.yaml — no per-OS doc surface.
 
+### ADR-115 · M1d explicit file targets and workspace attachment contract
+
+**Status:** accepted
+**Context:** M1c allowed a narrow browser chat path with inline base64 images and no server workspace integration. M1d introduces server workspace file APIs, file tools, quota, and message attachments. Earlier docs had conflicting assumptions: REST defaulted `plexus_device` to `server`, browser message `content` accepted string shorthand, chat attachments were described as being moved into `.attachments/{msg_id}`, and external image URL ingestion was treated as part of M1d. During M1d design, these assumptions were simplified into one explicit contract.
+
+**Decision:** M1d requires an explicit `plexus_device` everywhere a file target is named. Workspace REST file routes require `?plexus_device=server`; browser message attachments require `"plexus_device": "server"`; agent-visible shared file tools receive required `plexus_device` through merge-v0 schema injection. There is no default. M1d accepts only `server`; non-server values fail clearly until M1f.
+
+Browser message writes use one strict base shape:
+
+```json
+{
+  "reasoning_effort": null,
+  "content": [],
+  "attachments": []
+}
+```
+
+Both arrays are required. The server rejects the request only when both are empty. `content[]` accepts text blocks and direct inline base64 `image_url` blocks. Direct image blocks are persisted and sent to the provider, but are not written to workspace and do not create path markers by themselves. External `http(s)` image URL ingestion is not part of M1d.
+
+`attachments[]` contains references to existing workspace files. Browser uploads first write bytes through `PUT /api/workspace/files/{path}?plexus_device=server`; the message API then validates and reads those paths. Message send does not move, copy, rename, delete, or garbage-collect files. The path-text marker points to the original referenced path. Image attachments produce a marker plus a generated base64 `image_url`; non-image attachments produce only the marker.
+
+If an attachment image has the same decoded bytes as a direct `content[].image_url`, Plexus keeps the direct image block, skips the duplicate generated image block, and inserts the attachment marker immediately before the matching direct image block. Equality is exact decoded-byte equality, not raw base64 string equality or perceptual similarity.
+
+M1d implements tool schema merge v0 only. Shared file tool source schemas remain device-free, and the server registry injects required `plexus_device` with enum `["server"]`. Automatic install-site detection, client advertisements, intrinsic-device enum extension with real device names, multi-site schema collision handling, non-server dispatch, and device attachment reads are M1f work.
+
+**Consequences:**
+- The browser, REST, and tool surfaces all force explicit file target selection.
+- The message API has one strict request shape and no legacy string shorthand.
+- Workspace file placement belongs to workspace write APIs, not chat.
+- Quota enforcement stays in `workspace_fs` mutating operations. Message send only reads existing attachment refs.
+- M1f can expand the same `plexus_device` field by automatic device/install-site detection without changing the M1d request shape.
+
 ---
 
 ## Appendix A · Key Design Principles
