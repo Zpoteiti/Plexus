@@ -18,7 +18,7 @@ info:
     matching REST endpoint over the same underlying abstractions (workspace_fs,
     cron scheduler, etc.). REST and tools are two entrances for two different
     callers (human-via-browser vs. agent-via-LLM) hitting the same service
-    layer. This is not fully implemented in M1b.
+    layer. Some target M1 routes remain future work.
 
     **Parallel with tools (see TOOLS.md):**
 
@@ -89,9 +89,9 @@ tags:
   - name: Sessions
     description: M1c chat sessions + messages + SSE stream
   - name: Workspaces
-    description: Target personal + shared workspace management; not implemented in M1b
+    description: M1d personal server workspace quota plus target shared workspace management
   - name: Workspace Files
-    description: Target file operations mirroring the agent's shared file tools; not implemented in M1b
+    description: M1d server workspace file GET/PUT/DELETE plus target shared file operations
   - name: Devices
     description: Target client device registration and configuration; not implemented in M1b
   - name: Channels
@@ -797,11 +797,11 @@ paths:
         description: |
           Path on the target `plexus_device`. In M1d, callers must pass
           explicit `plexus_device=server`; relative paths resolve to the
-          caller's personal workspace, and absolute paths may name the user's
-          UUID workspace or a shared `name@suffix` workspace (ADR-043,
-          ADR-108). Future M1f `plexus_device=<device-name>` routes will
-          resolve paths by that client against its configured `workspace_path`
-          and `fs_policy`, exactly like shared file tool calls.
+          authenticated user's personal server workspace. Shared workspace and
+          `plexus_device=<device-name>` routing are future M1f/dynamic routing
+          work; those routes will resolve paths by that client against its
+          configured `workspace_path` and `fs_policy`, exactly like shared file
+          tool calls.
         schema: { type: string }
       - $ref: '#/components/parameters/PlexusDevice'
     get:
@@ -813,6 +813,7 @@ paths:
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
     put:
@@ -822,7 +823,7 @@ paths:
         Full-content replace. M1d accepts raw `application/octet-stream`
         bytes. Implicit `mkdir -p` on the parent path (ADR-088). Runs through
         workspace_fs quota checks. The REST route also applies a 64 MiB
-        operational in-memory upload ceiling before workspace_fs receives the
+        request body collection cap before workspace_fs receives the
         bytes.
       requestBody:
         required: true
@@ -831,9 +832,10 @@ paths:
             schema: { type: string, format: binary }
       responses:
         '204': { description: Written. }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Quota lock (SoftLocked), operation exceeds 80% single-op cap, or operation exceeds the 64 MiB REST memory cap (UploadTooLarge).
+          description: Quota lock (SoftLocked), operation exceeds 80% single-op cap, or operation exceeds the 64 MiB REST request body collection cap (UploadTooLarge).
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     patch:
       tags: [Workspace Files]
@@ -872,6 +874,7 @@ paths:
         regardless of quota lock state.
       responses:
         '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 

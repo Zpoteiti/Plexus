@@ -185,6 +185,31 @@ async fn oversized_upload_returns_upload_too_large_code() {
 }
 
 #[tokio::test]
+async fn locked_workspace_put_returns_soft_locked_before_upload_size_check() {
+    let app = TestApp::spawn().await;
+    let (jwt, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+    let workspace = support::workspace_path(&app.workspace_root, user_id);
+    tokio::fs::create_dir_all(&workspace).await.unwrap();
+    tokio::fs::write(workspace.join("existing.bin"), vec![b'x'; 10_001])
+        .await
+        .unwrap();
+
+    let (status, _, body) = support::bytes_request(
+        app.router.clone(),
+        Method::PUT,
+        "/api/workspace/files/large.bin?plexus_device=server",
+        vec![b'x'; 8_001],
+        "application/octet-stream",
+        Some(&jwt),
+    )
+    .await;
+    let body = error_body(&body);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "soft_locked");
+}
+
+#[tokio::test]
 async fn upload_above_axum_default_body_limit_can_succeed() {
     let app = TestApp::spawn().await;
     let (jwt, _) = support::register_user(&app, "alice@example.com").await;

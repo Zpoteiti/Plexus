@@ -43,6 +43,9 @@ pub async fn put_file(
 ) -> Result<StatusCode, ApiError> {
     require_server_device(&query)?;
     let quota = state.workspace_fs().quota(auth.user.id).await?;
+    if quota.locked {
+        return Err(WorkspaceError::SoftLocked.into());
+    }
     let single_op_limit = quota.quota_bytes.saturating_mul(80) / 100;
     let collection_limit = single_op_limit.min(WORKSPACE_REST_UPLOAD_MEMORY_LIMIT_BYTES);
     let body = to_bytes(body, collection_limit as usize)
