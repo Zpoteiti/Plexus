@@ -120,7 +120,6 @@ impl WorkspaceFs {
     ) -> Result<PathBuf, WorkspaceError> {
         let requested = Path::new(path);
         if path.is_empty()
-            || requested.is_absolute()
             || requested
                 .components()
                 .any(|c| matches!(c, Component::ParentDir))
@@ -133,11 +132,27 @@ impl WorkspaceFs {
         let canonical_root = root
             .canonicalize()
             .map_err(|_| WorkspaceError::NotFound(root.clone()))?;
-        let candidate = canonical_root.join(requested);
-        if let Some(parent) = candidate.parent() {
-            fs::create_dir_all(parent).await?;
+        let candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            canonical_root.join(requested)
+        };
+
+        for ancestor in candidate.ancestors() {
+            let canonical_ancestor = match ancestor.canonicalize() {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
+            if !canonical_ancestor.starts_with(&canonical_root) {
+                return Err(WorkspaceError::PathOutsideWorkspace(candidate));
+            }
+            let suffix = candidate
+                .strip_prefix(ancestor)
+                .map_err(|_| WorkspaceError::PathOutsideWorkspace(candidate.clone()))?;
+            return Ok(canonical_ancestor.join(suffix));
         }
-        plexus_common::tools::path::resolve_in_workspace(&root, path)
+
+        Err(WorkspaceError::PathOutsideWorkspace(candidate))
     }
 }
 

@@ -37,6 +37,26 @@ async fn write_read_and_delete_file_under_user_workspace() {
 }
 
 #[tokio::test]
+async fn absolute_write_path_inside_user_workspace_is_allowed() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    let path = app
+        .workspace_root
+        .path()
+        .join(user_id.to_string())
+        .join("absolute/inside.txt");
+    fs.write_file(user_id, path.to_str().unwrap(), b"inside".to_vec())
+        .await
+        .unwrap();
+
+    let bytes = fs.read_file(user_id, "absolute/inside.txt").await.unwrap();
+    assert_eq!(bytes, b"inside");
+}
+
+#[tokio::test]
 async fn path_traversal_is_rejected() {
     let app = TestApp::spawn().await;
     let (_, user_id) = support::register_user(&app, "alice@example.com").await;
