@@ -18,11 +18,11 @@ You ── Browser ── Server ── Client (your laptop)
 
 Heavily inspired by [nanobot](https://github.com/nanobot-ai/nanobot) — a brilliant Python-based personal AI assistant framework. Plexus takes the patterns we learned from studying nanobot (multi-channel support, tool orchestration, memory, skills, cron, security) and re-architects them for distributed, multi-user, multi-machine deployment in Rust.
 
-## Current M1b Status
+## Current M1d Status
 
-The `rebuild-m1-M1b` branch is not a usable end-user agent yet. It currently
-contains the server foundation and the OpenAI-compatible LLM provider
-foundation:
+The `rebuild-m1-M1d` branch is a verified rebuild milestone. It is still not
+the complete end-user distributed agent, but it now contains the server,
+browser-chat, and server-workspace foundation:
 
 - PostgreSQL-backed `plexus-server` startup and admin/auth foundations from
   M1a.
@@ -34,14 +34,26 @@ foundation:
   as `"<redacted>"` in admin responses.
 - Internal non-streaming Chat Completions call mechanics in
   `plexus-server/src/openai.rs` with `stream=false`.
-- Hermetic Rust tests using an in-process fake provider, plus an optional
-  sibling FastAPI mock for local/manual provider smoke testing.
+- Browser web sessions with REST message ingress, persisted history, and SSE
+  replay/live delivery from M1c.
+- Strict M1d browser message request shape with required `content` and
+  `attachments` arrays.
+- Server workspace REST APIs for read/write/edit/delete/list/glob/grep plus
+  quota enforcement through `workspace_fs`.
+- Message attachment refs to existing server workspace files. Image refs expand
+  into path markers plus durable base64 image blocks; non-image refs produce
+  path markers only.
+- Server-side shared file tool schemas and execution with merge-v0
+  `plexus_device=server`.
+- Hermetic Rust tests using in-process fake providers, plus an optional sibling
+  FastAPI mock for local/manual provider smoke testing.
 
-Not implemented in M1b: browser chat, SSE chat delivery, persisted
-conversation workflows, agent orchestration, tool execution, context
-compaction, cron, heartbeat, Discord/Telegram adapters, the production
-frontend, and the standalone client. The sections below describe the target
-product unless they explicitly mention M1b.
+Not implemented after M1d: device WebSocket pairing/routing, standalone client
+execution, dynamic multi-device `plexus_device` routing, file transfer,
+Discord/Telegram adapters, MCP execution, cron, heartbeat, the production
+frontend, and the full ReAct tool loop beyond the server file-tool surface.
+The sections below describe the target product unless they explicitly mention
+the current M1d milestone.
 
 ## Why Plexus?
 
@@ -59,7 +71,7 @@ clients on remote machines expose and execute tools.
 
 ## Target Features
 
-These are intended product capabilities, not all current M1b behavior.
+These are intended product capabilities, not all current M1d behavior.
 
 - **Distributed tool execution** — connect machines as execution nodes
 - **Multi-channel** — web UI, Discord, and Telegram ingress
@@ -74,7 +86,7 @@ These are intended product capabilities, not all current M1b behavior.
 - **Cron jobs** — schedule recurring tasks, one-shot reminders, cross-channel delivery
 - **Built for scale** — DashMap-based routing, concurrent DB pool, designed for 1K users and 500 concurrent sessions
 
-## M1b Development Quick Start
+## M1d Development Quick Start
 
 ### Prerequisites
 
@@ -93,10 +105,10 @@ persistent `plexus` database.
 scripts/reset-postgres18-and-test.sh
 ```
 
-### Mock LLM for M1b development
+### Mock LLM for M1d development
 
 The deterministic OpenAI-compatible mock service lives beside this repository
-at `../Plexus-mock-llm`. It is a local/manual dev target for M1b provider
+at `../Plexus-mock-llm`. It is a local/manual dev target for provider
 validation and non-streaming external-call testing; Plexus Rust tests use an
 in-process fake provider instead.
 
@@ -127,17 +139,19 @@ export ADMIN_TOKEN=your-admin-secret
 export SERVER_PORT=8080
 export PLEXUS_WORKSPACE_ROOT=/var/lib/plexus/workspaces
 
-# Start the M1b server foundation
+# Start the M1d server
 cd plexus-server && cargo run
 ```
 
-The M1b server foundation exposes auth/admin REST behavior and LLM provider
-configuration mechanics. Use an API client or automated tests to register an
-admin and exercise `PATCH /api/admin/config` with the mock values above.
+The M1d server exposes auth/admin REST behavior, LLM provider configuration,
+browser sessions/messages/SSE, and server workspace file APIs. Use an API
+client or automated tests to register an admin, exercise
+`PATCH /api/admin/config` with the mock values above, create a web session, and
+post strict-shape browser messages.
 
-The web UI, browser chat, SSE delivery, device WebSocket flow, standalone
-client, and agent execution loop are later milestones and are not available in
-M1b.
+The production web UI, device WebSocket flow, standalone client, dynamic
+device-routed file/tool execution, Discord/Telegram adapters, MCP execution,
+cron, heartbeat, and the complete agent tool loop are later milestones.
 
 ## Target Architecture
 
@@ -150,7 +164,7 @@ plexus-frontend/   Planned React web UI - chat, settings, admin panel
 
 | Component | Role | Scales to |
 |-----------|------|-----------|
-| **Server** | Current M1b: DB/auth/admin config and LLM provider foundation. Target: agent brain, LLM calls, memory, sessions, browser SSE. | 1K users, 500 concurrent sessions |
+| **Server** | Current M1d: DB/auth/admin config, LLM provider foundation, browser sessions/messages/SSE, server workspace REST, and server file-tool surface. Target: full agent brain, device routing, channels, MCP, cron, heartbeat. | 1K users, 500 concurrent sessions |
 | **Client** | Planned tool execution, file I/O, and shell commands. | Thousands of connections per server |
 | **Frontend** | Planned chat UI, settings, and admin panel. | Embedded in server binary in target release builds |
 
@@ -166,7 +180,7 @@ When later M1 slices are implemented:
 6. The loop continues until the LLM is done or hits its iteration cap.
 
 The target design persists messages, tool results, and memory in PostgreSQL.
-Context compression is planned for later orchestration work, not M1b.
+Context compression is planned for later orchestration work, not M1d.
 
 ## Security
 
