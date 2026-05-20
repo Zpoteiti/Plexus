@@ -1,4 +1,6 @@
-use crate::{chat::ChatRuntime, config::ServerConfig, openai::OpenAiRuntime, routes};
+use crate::{
+    chat::ChatRuntime, config::ServerConfig, openai::OpenAiRuntime, routes, workspace::WorkspaceFs,
+};
 use axum::Router;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -14,6 +16,7 @@ pub struct AppStateInner {
     pub config: ServerConfig,
     pub openai: OpenAiRuntime,
     pub chat: ChatRuntime,
+    pub workspace_fs: WorkspaceFs,
     pub admin_config_lock: Mutex<()>,
 }
 
@@ -27,12 +30,14 @@ impl AppState {
         config: ServerConfig,
         openai: OpenAiRuntime,
     ) -> Self {
+        let workspace_fs = WorkspaceFs::new(config.workspace_root.clone(), pool.clone());
         Self {
             inner: Arc::new(AppStateInner {
                 pool,
                 config,
                 openai,
                 chat: ChatRuntime::default(),
+                workspace_fs,
                 admin_config_lock: Mutex::new(()),
             }),
         }
@@ -52,6 +57,10 @@ impl AppState {
 
     pub fn chat(&self) -> &ChatRuntime {
         &self.inner.chat
+    }
+
+    pub fn workspace_fs(&self) -> &WorkspaceFs {
+        &self.inner.workspace_fs
     }
 
     pub fn admin_config_lock(&self) -> &Mutex<()> {

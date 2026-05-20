@@ -6,27 +6,28 @@ info:
     Target M1 REST + SSE contract for `plexus-server`. Pairs with
     [DECISIONS.md](DECISIONS.md) and [TOOLS.md](TOOLS.md).
 
-    **M1b implementation status:** the current `rebuild-m1-M1b` server
-    implements the auth/me/admin-config foundation, including validated LLM
-    provider identity config. Chat sessions, message ingress, per-session SSE,
-    per-user SSE events, workspace/file/device/channel/cron APIs, agent task
-    spawning, and compaction decisions are target M1 routes for later slices;
-    their paths remain in this spec so the future contract stays visible.
+    **Current implementation status:** the current `rebuild-m1-M1d` server
+    implements the auth/me/admin-config foundation, chat sessions/message
+    ingress/per-session SSE, and M1d server workspace quota + file
+    GET/PUT/DELETE routes. User-device workspace routing, channel/cron APIs,
+    agent task spawning, and compaction decisions are target M1 routes for
+    later slices; their paths remain in this spec so the future contract stays
+    visible.
 
     **Target design principle:** every user-meaningful agent capability has a
     matching REST endpoint over the same underlying abstractions (workspace_fs,
     cron scheduler, etc.). REST and tools are two entrances for two different
     callers (human-via-browser vs. agent-via-LLM) hitting the same service
-    layer. This is not fully implemented in M1b.
+    layer. Some target M1 routes remain future work.
 
     **Parallel with tools (see TOOLS.md):**
 
     | Agent tool | REST equivalent | Notes |
     |---|---|---|
-    | `read_file` | `GET /api/workspace/files/{path}` | Query: `plexus_device` (default `server`) |
-    | `write_file` | `PUT /api/workspace/files/{path}` | Query: `plexus_device`; implicit mkdir -p |
+    | `read_file` | `GET /api/workspace/files/{path}` | Query: explicit `plexus_device=server` in M1d |
+    | `write_file` | `PUT /api/workspace/files/{path}` | Query: explicit `plexus_device=server` in M1d; implicit mkdir -p |
     | `edit_file` | `PATCH /api/workspace/files/{path}` | Query: `plexus_device`; body: old_text/new_text/replace_all |
-    | `delete_file` | `DELETE /api/workspace/files/{path}` | Query: `plexus_device`; always allowed for quota release |
+    | `delete_file` | `DELETE /api/workspace/files/{path}` | Query: explicit `plexus_device=server` in M1d; always allowed for quota release |
     | `delete_folder` | `DELETE /api/workspace/folders/{path}` | Query: `plexus_device`; recursive, no flag |
     | `list_dir` | `GET /api/workspace/list/{path}` | Query: `plexus_device`, recursive, max_entries |
     | `glob` | `GET /api/workspace/glob` | Query: `plexus_device`, pattern, path, head_limit, offset, entry_type |
@@ -88,9 +89,9 @@ tags:
   - name: Sessions
     description: M1c chat sessions + messages + SSE stream
   - name: Workspaces
-    description: Target personal + shared workspace management; not implemented in M1b
+    description: M1d personal server workspace quota plus target shared workspace management
   - name: Workspace Files
-    description: Target file operations mirroring the agent's shared file tools; not implemented in M1b
+    description: M1d server workspace file GET/PUT/DELETE plus target shared file operations
   - name: Devices
     description: Target client device registration and configuration; not implemented in M1b
   - name: Channels
@@ -465,11 +466,23 @@ paths:
                     only when the value is `none`; provider incompatibility is
                     surfaced as a persisted synthetic assistant error.
                 content:
-                  description: OpenAI chat-completions content blocks (text + image_url). Strings are accepted as shorthand for a single text block. Omitted content or an empty string/array is a valid empty user message. M1c accepts only inline base64 `data:image/...;base64,...` image URLs; external image URLs and multipart uploads are deferred to M1d.
-                  oneOf:
-                    - { type: string }
-                    - type: array
-                      items: { $ref: '#/components/schemas/ContentBlock' }
+                  type: array
+                  description: |
+                    Required OpenAI chat-completions content blocks. M1d no
+                    longer accepts string shorthand. Direct image blocks must
+                    use inline base64 `data:image/...;base64,...` URLs; external
+                    image URLs are rejected.
+                  items: { $ref: '#/components/schemas/ContentBlock' }
+                attachments:
+                  type: array
+                  description: |
+                    Required workspace file references. Message send validates
+                    and reads existing files only; it never moves, copies, or
+                    writes attachment files. The request is rejected if both
+                    `content` and `attachments` are empty.
+                  items: { $ref: '#/components/schemas/MessageAttachmentRef' }
+              required: [content, attachments]
+              additionalProperties: false
       responses:
         '202':
           description: Message accepted. `message_id` is stable; queued pending rows keep the same id when drained into visible history.
@@ -482,9 +495,11 @@ paths:
         '400':
           description: |
             Session is not browser-writable, JSON/content shape is invalid, or
-            an image URL is not an inline base64 data URL. `reasoning_effort`
-            is required and must be one of `none`, `minimal`, `low`, `medium`,
-            `high`, or `xhigh`.
+            an image URL is not an inline base64 data URL. Attachment refs must
+            include `plexus_device` and `path`; M1d accepts only
+            `plexus_device="server"`. If present, `reasoning_effort` must be
+            `null` or one of `none`, `minimal`, `low`, `medium`, `high`, or
+            `xhigh`.
 
   /api/sessions/{id}/stream:
     description: Target M1 chat SSE stream route; M1c browser chat slice.
@@ -786,71 +801,64 @@ paths:
   # Implementation choice — the OpenAPI shape is the same either way.
   #
   /api/workspace/files/{path}:
-    description: Target M1 workspace file route; not implemented in M1b.
+    description: |
+      M1d implements GET/PUT/PATCH/DELETE for explicit `plexus_device=server`.
+      Dynamic user-device routing is future M1f.
     parameters:
       - name: path
         in: path
         required: true
         description: |
-          Path on the target `plexus_device`. With `plexus_device=server`,
-          relative paths resolve to the caller's personal workspace and
-          absolute paths may name the user's UUID workspace or a shared
-          `name@suffix` workspace (ADR-043, ADR-108). With
-          `plexus_device=<device-name>`, paths are resolved by that client
-          against its configured `workspace_path` and `fs_policy`, exactly
-          like shared file tool calls.
+          Path on the target `plexus_device`. In M1d, callers must pass
+          explicit `plexus_device=server`; relative paths resolve to the
+          authenticated user's personal server workspace. Shared workspace and
+          `plexus_device=<device-name>` routing are future M1f/dynamic routing
+          work; those routes will resolve paths by that client against its
+          configured `workspace_path` and `fs_policy`, exactly like shared file
+          tool calls.
         schema: { type: string }
       - $ref: '#/components/parameters/PlexusDevice'
     get:
       tags: [Workspace Files]
-      summary: Target route — read file contents (mirrors `read_file` tool; not M1b)
-      parameters:
-        - { name: start_line, in: query, schema: { type: integer, minimum: 1 } }
-        - { name: end_line,   in: query, schema: { type: integer, minimum: 1 } }
+      summary: Read server workspace file contents
       responses:
         '200':
-          description: OK — returns file bytes. Content-Type per detected file type (text/plain, application/json, image/*, application/octet-stream).
+          description: OK — returns raw file bytes as `application/octet-stream`.
           content:
-            '*/*':
+            application/octet-stream:
               schema: { type: string, format: binary }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: Target device is offline or unreachable.
-          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     put:
       tags: [Workspace Files]
-      summary: Target route — write file contents (mirrors `write_file` tool; not M1b)
+      summary: Write server workspace file contents
       description: |
-        Target M1 workspace file route. Not implemented in M1b.
-
-        Full-content replace. Accepts `application/octet-stream` for raw
-        bytes or `application/json` with `{content: string}` for text.
-        Implicit `mkdir -p` on the parent path (ADR-088). Runs through
-        workspace_fs — quota check + SKILL.md validation (ADR-082) apply.
+        Full-content replace. M1d accepts raw `application/octet-stream`
+        bytes. Implicit `mkdir -p` on the parent path (ADR-088). Runs through
+        workspace_fs quota checks. The REST route also applies a 64 MiB
+        request body collection cap before workspace_fs receives the
+        bytes.
       requestBody:
         required: true
         content:
           application/octet-stream:
             schema: { type: string, format: binary }
-          application/json:
-            schema:
-              type: object
-              required: [content]
-              properties:
-                content: { type: string }
       responses:
         '204': { description: Written. }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Quota lock (SoftLocked), operation exceeds 80% single-op cap (UploadTooLarge), or target device is offline/unreachable.
-          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
-        '422':
-          description: Invalid SKILL.md format.
+          description: Quota lock (SoftLocked), operation exceeds 80% single-op cap, or operation exceeds the 64 MiB REST request body collection cap (UploadTooLarge).
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     patch:
       tags: [Workspace Files]
-      summary: Target route — edit file via fuzzy match (mirrors `edit_file` tool; not M1b)
+      summary: Edit a server workspace file by text replacement
+      description: |
+        M1d server workspace edit. `old_text` must be non-empty and must match
+        existing UTF-8 file content. With `replace_all=false`, only the first
+        match is replaced; with `replace_all=true`, all exact matches are
+        replaced.
       requestBody:
         required: true
         content:
@@ -858,8 +866,9 @@ paths:
             schema:
               type: object
               required: [old_text, new_text]
+              additionalProperties: false
               properties:
-                old_text: { type: string, description: Empty + non-existent path = create file. }
+                old_text: { type: string, minLength: 1 }
                 new_text: { type: string }
                 replace_all: { type: boolean, default: false }
       responses:
@@ -871,27 +880,29 @@ paths:
                 type: object
                 properties:
                   replacements: { type: integer }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: Ambiguous (multiple matches + replace_all=false), quota, or target device is offline/unreachable.
+          description: Quota lock or operation exceeds quota.
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
         '422':
-          description: No match, or invalid SKILL.md after edit.
+          description: Invalid SKILL.md after edit, if skill validation is active for the edited path.
           content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
     delete:
       tags: [Workspace Files]
-      summary: Target route — delete a single file (mirrors `delete_file`; not M1b)
+      summary: Delete a single server workspace file
       description: |
-        Target M1 workspace file route. Not implemented in M1b.
-
-        Always allowed regardless of quota lock state. Refunds quota.
+        Deletes a file from the caller's server workspace. Always allowed
+        regardless of quota lock state.
       responses:
         '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: Path is a directory — use `DELETE /api/workspace/folders/{path}` — or target device is offline/unreachable.
 
   /api/workspace/folders/{path}:
-    description: Target M1 workspace folder route; not implemented in M1b.
+    description: M1d server workspace folder route. Dynamic user-device routing is future M1f.
     parameters:
       - name: path
         in: path
@@ -901,15 +912,17 @@ paths:
       - $ref: '#/components/parameters/PlexusDevice'
     delete:
       tags: [Workspace Files]
-      summary: Target route — recursively delete a folder (mirrors `delete_folder`, ADR-086; not M1b)
+      summary: Recursively delete a server workspace folder
       responses:
         '204': { description: Deleted. }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: Path is a file — use `DELETE /api/workspace/files/{path}` — or target device is offline/unreachable.
+          description: Path is a file — use `DELETE /api/workspace/files/{path}`.
 
   /api/workspace/list/{path}:
-    description: Target M1 workspace directory listing route; not implemented in M1b.
+    description: M1d server workspace directory listing route. Dynamic user-device routing is future M1f.
     parameters:
       - name: path
         in: path
@@ -919,36 +932,27 @@ paths:
       - $ref: '#/components/parameters/PlexusDevice'
     get:
       tags: [Workspace Files]
-      summary: Target route — list directory contents (mirrors `list_dir`; not M1b)
-      parameters:
-        - { name: recursive,   in: query, schema: { type: boolean, default: false } }
-        - { name: max_entries, in: query, schema: { type: integer, default: 200, minimum: 1 } }
+      summary: List server workspace directory contents
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  entries:
-                    type: array
-                    items: { $ref: '#/components/schemas/ListDirEntry' }
-                  truncated: { type: boolean }
-                  total: { type: integer }
-        '409':
-          description: Target device is offline or unreachable.
-          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+                type: array
+                items: { $ref: '#/components/schemas/ListDirEntry' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /api/workspace/glob:
-    description: Target M1 workspace glob route; not implemented in M1b.
+    description: M1d server workspace glob route. Dynamic user-device routing is future M1f.
     get:
       tags: [Workspace Files]
-      summary: Target route — find files by glob pattern (mirrors `glob`; not M1b)
+      summary: Find server workspace files by glob pattern
       parameters:
         - $ref: '#/components/parameters/PlexusDevice'
         - { name: pattern, in: query, required: true, schema: { type: string } }
-        - { name: path,    in: query, required: true, schema: { type: string }, description: Base directory on the target `plexus_device`. }
       responses:
         '200':
           description: OK
@@ -957,37 +961,28 @@ paths:
               schema:
                 type: array
                 items: { type: string }
-        '409':
-          description: Target device is offline or unreachable.
-          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   /api/workspace/grep:
-    description: Target M1 workspace grep route; not implemented in M1b.
+    description: M1d server workspace grep route. Dynamic user-device routing is future M1f.
     get:
       tags: [Workspace Files]
-      summary: Target route — content search (mirrors `grep`; not M1b)
+      summary: Search server workspace file contents
       parameters:
         - $ref: '#/components/parameters/PlexusDevice'
-        - { name: pattern, in: query, required: true, schema: { type: string } }
-        - { name: path,    in: query, required: true, schema: { type: string }, description: Base path on the target `plexus_device`. }
-        - name: output_mode
-          in: query
-          schema:
-            type: string
-            enum: [content, files_with_matches, count]
-            default: files_with_matches
-        - { name: case_insensitive, in: query, schema: { type: boolean, default: false } }
-        - { name: context, in: query, schema: { type: integer, default: 0 } }
-        - { name: glob, in: query, schema: { type: string } }
+        - { name: pattern, in: query, required: true, schema: { type: string }, description: Rust regex pattern. }
+        - { name: path, in: query, required: false, schema: { type: string }, description: Optional file or directory path inside the server workspace. Omit to search the whole personal workspace. }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema: { type: object, additionalProperties: true }
-        '409':
-          description: Target device is offline or unreachable.
-          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+              schema:
+                type: array
+                items: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /api/workspace/transfer:
     description: Target M1 workspace file transfer route; not implemented in M1b.
@@ -1633,13 +1628,16 @@ components:
     PlexusDevice:
       name: plexus_device
       in: query
+      required: true
       description: |
-        Install site for file operations. Defaults to `server`, Plexus's
-        built-in server workspace. A user device name routes the operation
-        over `/ws/device`; the client applies its `workspace_path` and
-        `fs_policy`. Offline devices return an error with code
-        `device_unreachable`.
-      schema: { type: string, default: server }
+        Install site for file operations. M1d requires explicit
+        `plexus_device=server`, Plexus's built-in server workspace. Dynamic
+        user-device routing over `/ws/device` is future M1f; then the client
+        will apply its `workspace_path` and `fs_policy`, and offline devices
+        will return an error with code `device_unreachable`.
+      schema:
+        type: string
+        enum: [server]
 
   responses:
     BadRequest:
@@ -1729,7 +1727,7 @@ components:
         may render `none` as "off"; the wire value remains `none`.
 
     ContentBlock:
-      description: OpenAI chat-completions content block. See ADR-059, ADR-101.
+      description: OpenAI chat-completions content block. See ADR-059, ADR-101, ADR-115.
       oneOf:
         - type: object
           required: [type, text]
@@ -1747,11 +1745,10 @@ components:
                 url:
                   type: string
                   description: |
-                    Base64 data URL (`data:image/png;base64,...`). See ADR-059.
-                    M1c accepts inline base64 data URLs only. Target v1 also
-                    writes workspace `.attachments/` copies for agent file
-                    tools; M1c browser inline-image messages may skip that
-                    copy until M1d.
+                    Inline base64 data URL (`data:image/png;base64,...`). M1d
+                    rejects remote image URLs. Workspace attachment
+                    expansion is represented separately by a path-text marker
+                    plus a generated base64 image block.
         - type: object
           required: [type, id, name, input]
           properties:
@@ -1766,6 +1763,21 @@ components:
             tool_use_id: { type: string }
             content: { type: string }
             is_error: { type: boolean, default: false }
+
+    MessageAttachmentRef:
+      type: object
+      required: [plexus_device, path]
+      additionalProperties: false
+      properties:
+        plexus_device:
+          type: string
+          enum: [server]
+          description: |
+            Required file target. M1d accepts only `server`; M1f expands this
+            enum through automatic device/install-site detection.
+        path:
+          type: string
+          description: Existing file path in the authenticated user's server workspace.
 
     Workspace:
       type: object
@@ -1953,10 +1965,12 @@ components:
 
     ListDirEntry:
       type: object
-      required: [name, is_dir]
+      required: [name, path, kind, size]
       properties:
         name: { type: string, description: Entry name (basename). }
-        is_dir: { type: boolean }
+        path: { type: string, description: Relative path from the personal server workspace root. }
+        kind: { type: string, enum: [file, directory, symlink, other] }
+        size: { type: integer, format: int64, description: File byte length; zero for non-files. }
 
     McpServerConfig:
       type: object

@@ -1,7 +1,7 @@
 mod support;
 
 use axum::http::{Method, StatusCode};
-use serde_json::{Value, json};
+use serde_json::json;
 use support::{TestApp, json_request};
 use uuid::Uuid;
 
@@ -64,6 +64,7 @@ async fn post_text_message_persists_runtime_and_content_blocks() {
         &format!("/api/sessions/{session_id}/messages"),
         json!({
             "content": [{"type": "text", "text": "hello"}],
+            "attachments": [],
             "reasoning_effort": "medium"
         }),
         Some(&token),
@@ -83,13 +84,13 @@ async fn post_text_message_persists_runtime_and_content_blocks() {
 }
 
 #[tokio::test]
-async fn post_empty_forms_are_accepted() {
+async fn m1d_rejects_legacy_empty_and_string_forms() {
     let app = TestApp::spawn().await;
     let (token, session_id) = register_and_create_session(&app).await;
     for body in [
         json!({"reasoning_effort": "none"}),
-        json!({"content": "", "reasoning_effort": "minimal"}),
-        json!({"content": [], "reasoning_effort": "xhigh"}),
+        json!({"content": "", "attachments": []}),
+        json!({"content": [], "attachments": []}),
     ] {
         let (status, _) = json_request(
             app.router.clone(),
@@ -99,7 +100,7 @@ async fn post_empty_forms_are_accepted() {
             Some(&token),
         )
         .await;
-        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }
 
@@ -114,6 +115,7 @@ async fn inline_base64_image_is_accepted_but_external_url_is_rejected() {
         &format!("/api/sessions/{session_id}/messages"),
         json!({
             "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}],
+            "attachments": [],
             "reasoning_effort": "medium"
         }),
         Some(&token),
@@ -127,6 +129,7 @@ async fn inline_base64_image_is_accepted_but_external_url_is_rejected() {
         &format!("/api/sessions/{session_id}/messages"),
         json!({
             "content": [{"type": "image_url", "image_url": {"url": "https://example.com/cat.png"}}],
+            "attachments": [],
             "reasoning_effort": "medium"
         }),
         Some(&token),
@@ -158,7 +161,7 @@ async fn browser_post_to_non_web_owned_session_is_bad_request() {
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
-        json!({"content": [{"type": "text", "text": "hello"}]}),
+        json!({"content": [{"type": "text", "text": "hello"}], "attachments": []}),
         Some(&token),
     )
     .await;
@@ -190,6 +193,7 @@ async fn browser_post_to_web_channel_with_internal_session_key_is_bad_request() 
         &format!("/api/sessions/{session_id}/messages"),
         json!({
             "content": [{"type": "text", "text": "hello"}],
+            "attachments": [],
             "reasoning_effort": "medium"
         }),
         Some(&token),

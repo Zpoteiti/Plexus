@@ -62,6 +62,7 @@ async fn post_text(app: &TestApp, token: &str, session_id: Uuid, text: &str) {
         &format!("/api/sessions/{session_id}/messages"),
         json!({
             "content": [{"type": "text", "text": text}],
+            "attachments": [],
             "reasoning_effort": "medium"
         }),
         Some(token),
@@ -77,6 +78,7 @@ async fn post_text_id(app: &TestApp, token: &str, session_id: Uuid, text: &str) 
         &format!("/api/sessions/{session_id}/messages"),
         json!({
             "content": [{"type": "text", "text": text}],
+            "attachments": [],
             "reasoning_effort": "medium"
         }),
         Some(token),
@@ -454,7 +456,7 @@ async fn pending_message_with_unspecified_reasoning_drains_without_provider_reas
         app.router.clone(),
         Method::POST,
         &format!("/api/sessions/{session_id}/messages"),
-        json!({"content": [{"type": "text", "text": "ping"}]}),
+        json!({"content": [{"type": "text", "text": "ping"}], "attachments": []}),
         Some(&token),
     )
     .await;
@@ -571,7 +573,8 @@ async fn image_compatibility_failure_retries_stripped_and_persists_assistant() {
             "content": [
                 {"type": "text", "text": "what is this"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}}
-            ]
+            ],
+            "attachments": []
         }),
         Some(&token),
     )

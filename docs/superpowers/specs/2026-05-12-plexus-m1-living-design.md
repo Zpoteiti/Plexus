@@ -4,7 +4,7 @@
 **Branch:** `rebuild-m1`
 **Authors:** brainstormed in collaborative session 2026-05-12
 **Supersedes:** none
-**Last updated:** 2026-05-14
+**Last updated:** 2026-05-18
 
 ---
 
@@ -32,9 +32,9 @@ before moving on.
 
 | Field | Value |
 |---|---|
-| Overall M1 state | M1b verified; M1c verified |
-| Current focus | `M1d` planning |
-| Next implementation slice | `M1d` |
+| Overall M1 state | M1b verified; M1c verified; M1d verified |
+| Current focus | `M1e` planning |
+| Next implementation slice | `M1e` |
 | Frontend scope | Out of M1; frontend remains M3 |
 | Client scope | Standalone client remains M2, but M1 includes server-side device WebSocket support |
 | Discord/Telegram | Required for M1; live tokens supplied by the user for smoke testing when ready |
@@ -122,9 +122,12 @@ the project needs upgrade-in-place production releases.
 The literal device name `server` is reserved for the built-in install-site name.
 Users cannot create or rename a device to `server`.
 
-File REST APIs and file tools route by `plexus_device`, defaulting to `server`.
-Client-device file operations route over device WebSocket and obey the target
-device's `workspace_path` and `fs_policy`. Offline target devices return
+File REST APIs and file tools require an explicit `plexus_device`. M1d accepts
+only `server`, the built-in server workspace install site; missing values and
+non-server values fail validation. Client-device file operations are future
+M1f work: routing will be based on automatically detected install sites, will
+dispatch over device WebSocket, and will obey the target device's
+`workspace_path` and `fs_policy`. Offline target devices return
 `device_unreachable`.
 
 Workspace transfer keeps explicit source/destination device fields:
@@ -189,7 +192,7 @@ because the chat path needs a provider contract.
 | `M1a` | Verified | Server crate, startup, DB bootstrap, canonical schema application, real auth, basic REST/admin persistence, test harness | M0 | Verified by `cargo test -p plexus-server`, `cargo test --workspace`, `cargo fmt --all -- --check`, and `cargo check --workspace` |
 | `M1b` | Verified | OpenAI-compatible LLM foundation, admin config validation, external FastAPI mock service, hermetic fake-provider test strategy, concurrency semaphore | `M1a` | Verified on 2026-05-13 from branch `rebuild-m1-M1b`: invalid provider config is rejected before DB write, valid fake provider completes non-streaming external call mechanics, sibling mock tests pass |
 | `M1c` | Verified | Browser chat path: UUID-addressed web sessions, editable titles, REST message ingress, session storage, SSE history replay/live stream, minimal SOUL/MEMORY prompt, inline content-block images, fake LLM-backed response loop, and required manual live smoke | `M1a`, `M1b` | Verified on 2026-05-14: automated checks passed and a real MiniMax provider smoke validated admin LLM config, SSE user/assistant flow, persisted history, and replay |
-| `M1d` | Planned | Server workspace/file REST APIs, server-side workspace FS, quota reporting, server-side shared file tools | `M1a` | REST and tool tests create/read/edit/list server workspace files and report quota |
+| `M1d` | Verified | Server workspace/file REST APIs, strict message attachment refs, server-side workspace FS, quota enforcement, server-side shared file tools, merge-v0 `plexus_device=server` schemas | `M1a`, `M1c` | Verified on 2026-05-18: full workspace/all-targets tests passed against local PostgreSQL; focused M1d tests cover REST, message attachments, workspace FS, and tool schemas/execution |
 | `M1e` | Planned | Device token lifecycle, device naming rules, device WebSocket handshake/control frames | `M1a` | Device can be registered, connect over WS, and appear reachable |
 | `M1f` | Planned | Device-routed file and tool execution over WS, offline handling, transfer plumbing | `M1d`, `M1e` | REST/tool call reaches connected test device; offline target returns `device_unreachable` |
 | `M1g` | Planned | Discord and Telegram adapters | `M1b`, `M1c` | Adapter tests pass; live smoke works with user-provided bot tokens |
@@ -226,6 +229,7 @@ Allowed sub-milestone statuses:
 - `Designing`: sub-spec in progress.
 - `Approved`: sub-spec approved; implementation plan next.
 - `Implementing`: code in progress.
+- `Implemented`: code and docs are complete enough for focused compile checks, but final runtime verification or smoke is still pending.
 - `Verified`: automated checks and relevant smoke checks passed.
 - `Blocked`: waiting on user input, credentials, dependency, or design decision.
 - `Deferred`: intentionally moved out of the current sequence.
@@ -303,3 +307,29 @@ writability, SSE replay/live de-duplication, SSE lag reconnect behavior, and
 serialized worker wake/progress races. Follow-up hardening on 2026-05-15 moved
 mid-response browser posts into durable `pending_messages`, drained them at
 safe boundaries, and added startup recovery for queued rows.
+
+M1d verification status from 2026-05-18 on branch `rebuild-m1-M1d`:
+
+- `workspace_fs` now owns server workspace path resolution, quota checks,
+  serialized mutating operations, read/write/edit/delete/delete_folder/list/glob
+  and grep.
+- Workspace REST file routes require explicit `plexus_device=server`; there is
+  no REST default in M1d.
+- Browser message writes use the strict `{ reasoning_effort, content,
+  attachments }` shape, with required `content` and `attachments` arrays and no
+  string shorthand.
+- Browser attachment refs point at existing workspace files and are validated
+  before persistence. Image refs expand into marker + base64 image blocks, with
+  decoded-byte dedupe against direct inline image blocks.
+- Shared file tool source schemas remain device-free. The server registry
+  injects required `plexus_device` enum `["server"]` and dispatches server file
+  tools through `workspace_fs`.
+- Verification used the existing local PostgreSQL test container `plexus` and
+  passed:
+  - `rtk cargo fmt --check`
+  - `rtk cargo clippy -p plexus-common -p plexus-server --all-targets -- -D warnings`
+  - `rtk env PLEXUS_TEST_DATABASE_URL=postgres://plexus:plexus@127.0.0.1:5432/plexus cargo test --workspace --all-targets`
+  - `rtk conda run -n Plexus python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('docs/API.yaml').read_text()); print('API.yaml ok')"`
+  - targeted stale M1d wording scan over `docs/API.yaml`, `docs/TOOLS.md`,
+    `docs/DECISIONS.md`, and the M1/M1d specs
+  - `rtk git diff --check`

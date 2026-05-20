@@ -8,7 +8,7 @@ use axum::{
 use http_body_util::BodyExt;
 use plexus_common::ContentBlock;
 use plexus_server::db::messages;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::time::Duration;
 use support::{TestApp, fake_openai::FakeOpenAi, json_request};
 use tower::ServiceExt;
@@ -47,6 +47,7 @@ async fn register_create_and_post(app: &TestApp, text: &str) -> (String, String)
         &format!("/api/sessions/{session_id}/messages"),
         json!({
             "content": [{"type": "text", "text": text}],
+            "attachments": [],
             "reasoning_effort": "medium"
         }),
         Some(&token),
@@ -114,6 +115,7 @@ async fn post_text(app: &TestApp, token: &str, session_id: Uuid, text: &str) -> 
         &format!("/api/sessions/{session_id}/messages"),
         json!({
             "content": [{"type": "text", "text": text}],
+            "attachments": [],
             "reasoning_effort": "medium"
         }),
         Some(token),
@@ -238,6 +240,7 @@ async fn sse_emits_live_message_after_history_end() {
         &format!("/api/sessions/{session_id}/messages"),
         json!({
             "content": [{"type": "text", "text": "live hello"}],
+            "attachments": [],
             "reasoning_effort": "medium"
         }),
         Some(&token),

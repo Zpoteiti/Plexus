@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use axum::{
     body::Body,
     http::{HeaderMap, Method, Request, StatusCode, header},
@@ -150,6 +152,84 @@ pub async fn json_request_with_headers(
         serde_json::from_slice(&bytes).unwrap()
     };
     (status, headers, body)
+}
+
+pub async fn bytes_request(
+    app: axum::Router,
+    method: Method,
+    path: &str,
+    bytes: impl Into<Vec<u8>>,
+    content_type: &str,
+    auth: Option<&str>,
+) -> (StatusCode, HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::CONTENT_TYPE, content_type);
+    if let Some(token) = auth {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let response = app
+        .oneshot(builder.body(Body::from(bytes.into())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, headers, bytes)
+}
+
+pub async fn empty_request(
+    app: axum::Router,
+    method: Method,
+    path: &str,
+    auth: Option<&str>,
+) -> (StatusCode, Vec<u8>) {
+    let mut builder = Request::builder().method(method).uri(path);
+    if let Some(token) = auth {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let response = app
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
+    (status, bytes)
+}
+
+pub async fn register_user(app: &TestApp, email: &str) -> (String, Uuid) {
+    let (status, body) = json_request(
+        app.router.clone(),
+        Method::POST,
+        "/api/auth/register",
+        serde_json::json!({
+            "email": email,
+            "password": "correct horse battery staple",
+            "name": "Alice"
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    (
+        body["jwt"].as_str().unwrap().to_string(),
+        Uuid::parse_str(body["user"]["id"].as_str().unwrap()).unwrap(),
+    )
 }
 
 pub mod fake_openai;
