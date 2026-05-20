@@ -1,7 +1,7 @@
 mod support;
 
 use plexus_common::WorkspaceError;
-use plexus_server::workspace::WorkspaceFs;
+use plexus_server::workspace::{WorkspaceAttachmentImage, WorkspaceFs};
 use serde_json::json;
 use support::TestApp;
 
@@ -224,6 +224,37 @@ async fn upload_too_large_uses_single_op_cap() {
         .await
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::UploadTooLarge { .. }));
+}
+
+#[tokio::test]
+async fn attachment_image_reader_returns_non_image_without_full_image_payload() {
+    let app = TestApp::spawn().await;
+    let (_, user_id) = support::register_user(&app, "alice@example.com").await;
+    set_quota(&app, 10_000).await;
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    fs.write_file(user_id, "docs/readme.txt", b"not an image".to_vec())
+        .await
+        .unwrap();
+
+    let image = fs
+        .read_attachment_image(user_id, "docs/readme.txt")
+        .await
+        .unwrap();
+
+    assert!(matches!(image, WorkspaceAttachmentImage::NonImage));
+}
+
+#[tokio::test]
+async fn upload_collection_limit_uses_single_op_cap() {
+    let app = TestApp::spawn().await;
+    set_quota(&app, 100).await;
+
+    let fs = WorkspaceFs::new(app.workspace_root.path().to_path_buf(), app.pool.clone());
+    let limit = fs.upload_collection_limit(64 * 1024 * 1024).await.unwrap();
+
+    assert_eq!(limit.max_bytes, 80);
+    assert_eq!(limit.quota_bytes, 100);
 }
 
 #[tokio::test]

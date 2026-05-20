@@ -1,7 +1,7 @@
 use crate::{
     chat::content::{decode_data_image_url, sha256_hex},
     error::ApiError,
-    workspace::WorkspaceFs,
+    workspace::{WorkspaceAttachmentImage, WorkspaceFs},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use plexus_common::{ContentBlock, ImageUrlBlock};
@@ -24,6 +24,9 @@ pub async fn assemble_user_content(
     raw_attachments: &Value,
 ) -> Result<Vec<ContentBlock>, ApiError> {
     let attachments = parse_attachments(raw_attachments)?;
+    if attachments.is_empty() {
+        return Ok(user_content);
+    }
     let direct_hashes = direct_image_hashes(&user_content)?;
     let mut prefix = Vec::new();
     let mut markers_before_direct: BTreeMap<usize, Vec<ContentBlock>> = BTreeMap::new();
@@ -40,13 +43,15 @@ pub async fn assemble_user_content(
             ));
         }
 
-        let bytes = workspace.read_file(user_id, &attachment.path).await?;
         let marker = ContentBlock::text(format!(
             "User uploaded file to device='server', path={:?}",
             attachment.path
         ));
 
-        let Some(mime) = sniff_image_mime(&bytes) else {
+        let WorkspaceAttachmentImage::Image { mime, bytes } = workspace
+            .read_attachment_image(user_id, &attachment.path)
+            .await?
+        else {
             prefix.push(marker);
             continue;
         };
@@ -112,18 +117,29 @@ fn direct_image_hashes(user_content: &[ContentBlock]) -> Result<Vec<(usize, Stri
         .collect()
 }
 
-fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
-        return Some("image/png");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::PgPool;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn empty_attachments_return_content_without_hashing_direct_images() {
+        let pool = PgPool::connect_lazy("postgres://plexus:plexus@127.0.0.1:5432/unused")
+            .expect("lazy pool");
+        let workspace = WorkspaceFs::new(tempdir().unwrap().path().to_path_buf(), pool);
+        let content = vec![ContentBlock::ImageUrl {
+            image_url: ImageUrlBlock {
+                url: "data:image/png;base64,not valid".to_string(),
+            },
+        }];
+
+        let assembled =
+            assemble_user_content(&workspace, Uuid::nil(), content, &Value::Array(Vec::new()))
+                .await
+                .unwrap();
+
+        assert_eq!(assembled.len(), 1);
+        assert!(matches!(assembled[0], ContentBlock::ImageUrl { .. }));
     }
-    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        return Some("image/jpeg");
-    }
-    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return Some("image/gif");
-    }
-    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes[8..12] == *b"WEBP" {
-        return Some("image/webp");
-    }
-    None
 }

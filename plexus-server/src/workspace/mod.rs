@@ -1,3 +1,3 @@
 pub mod fs;
 
-pub use fs::{DirEntry, QuotaState, WorkspaceFs};
+pub use fs::{DirEntry, QuotaState, WorkspaceAttachmentImage, WorkspaceFs};

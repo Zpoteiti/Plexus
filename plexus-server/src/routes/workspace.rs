@@ -73,17 +73,15 @@ pub async fn put_file(
     body: Body,
 ) -> Result<StatusCode, ApiError> {
     require_server_device(query.plexus_device.as_deref())?;
-    let quota = state.workspace_fs().quota(auth.user.id).await?;
-    if quota.locked {
-        return Err(WorkspaceError::SoftLocked.into());
-    }
-    let single_op_limit = quota.quota_bytes.saturating_mul(80) / 100;
-    let collection_limit = single_op_limit.min(WORKSPACE_REST_UPLOAD_MEMORY_LIMIT_BYTES);
-    let body = to_bytes(body, collection_limit as usize)
+    let upload_limit = state
+        .workspace_fs()
+        .upload_collection_limit(WORKSPACE_REST_UPLOAD_MEMORY_LIMIT_BYTES)
+        .await?;
+    let body = to_bytes(body, upload_limit.max_bytes as usize)
         .await
         .map_err(|_| WorkspaceError::UploadTooLarge {
-            actual_bytes: collection_limit.saturating_add(1),
-            quota_bytes: quota.quota_bytes,
+            actual_bytes: upload_limit.max_bytes.saturating_add(1),
+            quota_bytes: upload_limit.quota_bytes,
         })?;
 
     state

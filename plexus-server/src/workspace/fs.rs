@@ -6,8 +6,8 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
 };
-use tokio::fs;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::{fs, io::AsyncReadExt};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -22,6 +22,18 @@ pub struct QuotaState {
     pub quota_bytes: u64,
     pub bytes_used: u64,
     pub locked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadCollectionLimit {
+    pub max_bytes: u64,
+    pub quota_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceAttachmentImage {
+    NonImage,
+    Image { mime: &'static str, bytes: Vec<u8> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -53,6 +65,17 @@ impl WorkspaceFs {
         })
     }
 
+    pub async fn upload_collection_limit(
+        &self,
+        memory_limit_bytes: u64,
+    ) -> Result<UploadCollectionLimit, WorkspaceError> {
+        let quota_bytes = self.quota_bytes().await?;
+        Ok(UploadCollectionLimit {
+            max_bytes: single_op_limit(quota_bytes).min(memory_limit_bytes),
+            quota_bytes,
+        })
+    }
+
     pub async fn read_file(&self, user_id: Uuid, path: &str) -> Result<Vec<u8>, WorkspaceError> {
         let full = self.resolve_existing(user_id, path).await?;
         let meta = final_target_metadata_or_not_found(path, &self.personal_root(user_id)).await?;
@@ -60,6 +83,29 @@ impl WorkspaceFs {
             return Err(WorkspaceError::PathOutsideWorkspace(full));
         }
         Ok(fs::read(full).await?)
+    }
+
+    pub async fn read_attachment_image(
+        &self,
+        user_id: Uuid,
+        path: &str,
+    ) -> Result<WorkspaceAttachmentImage, WorkspaceError> {
+        let full = self.resolve_existing(user_id, path).await?;
+        let meta = final_target_metadata_or_not_found(path, &self.personal_root(user_id)).await?;
+        if !meta.is_file() {
+            return Err(WorkspaceError::PathOutsideWorkspace(full));
+        }
+
+        let mut file = fs::File::open(full).await?;
+        let mut header = [0_u8; IMAGE_SNIFF_BYTES];
+        let read = file.read(&mut header).await?;
+        let Some(mime) = sniff_image_mime(&header[..read]) else {
+            return Ok(WorkspaceAttachmentImage::NonImage);
+        };
+
+        let mut bytes = header[..read].to_vec();
+        file.read_to_end(&mut bytes).await?;
+        Ok(WorkspaceAttachmentImage::Image { mime, bytes })
     }
 
     pub async fn write_file(
@@ -268,7 +314,7 @@ impl WorkspaceFs {
         if quota.locked {
             return Err(WorkspaceError::SoftLocked);
         }
-        if new_bytes > quota.quota_bytes.saturating_mul(80) / 100 {
+        if new_bytes > single_op_limit(quota.quota_bytes) {
             return Err(WorkspaceError::UploadTooLarge {
                 actual_bytes: new_bytes,
                 quota_bytes: quota.quota_bytes,
@@ -336,6 +382,28 @@ impl WorkspaceFs {
 
         Err(WorkspaceError::PathOutsideWorkspace(candidate))
     }
+}
+
+const IMAGE_SNIFF_BYTES: usize = 12;
+
+fn single_op_limit(quota_bytes: u64) -> u64 {
+    quota_bytes.saturating_mul(80) / 100
+}
+
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes[8..12] == *b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 async fn final_target_metadata_or_not_found(
