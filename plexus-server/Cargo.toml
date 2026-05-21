@@ -12,6 +12,7 @@ plexus-common = { path = "../plexus-common" }
 axum.workspace = true
 async-stream.workspace = true
 cookie.workspace = true
+futures-util.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 serde.workspace = true
@@ -34,3 +35,4 @@ tower.workspace = true
 http-body-util.workspace = true
 url.workspace = true
 tempfile.workspace = true
+tokio-tungstenite.workspace = true

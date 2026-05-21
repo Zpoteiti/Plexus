@@ -1,5 +1,6 @@
 use crate::{
-    chat::ChatRuntime, config::ServerConfig, openai::OpenAiRuntime, routes, workspace::WorkspaceFs,
+    chat::ChatRuntime, config::ServerConfig, devices::DeviceRuntime, openai::OpenAiRuntime, routes,
+    workspace::WorkspaceFs,
 };
 use axum::Router;
 use sqlx::PgPool;
@@ -17,6 +18,7 @@ pub struct AppStateInner {
     pub openai: OpenAiRuntime,
     pub chat: ChatRuntime,
     pub workspace_fs: WorkspaceFs,
+    pub devices: DeviceRuntime,
     pub admin_config_lock: Mutex<()>,
 }
 
@@ -31,6 +33,7 @@ impl AppState {
         openai: OpenAiRuntime,
     ) -> Self {
         let workspace_fs = WorkspaceFs::new(config.workspace_root.clone(), pool.clone());
+        let devices = DeviceRuntime::new();
         Self {
             inner: Arc::new(AppStateInner {
                 pool,
@@ -38,6 +41,7 @@ impl AppState {
                 openai,
                 chat: ChatRuntime::default(),
                 workspace_fs,
+                devices,
                 admin_config_lock: Mutex::new(()),
             }),
         }
@@ -61,6 +65,10 @@ impl AppState {
 
     pub fn workspace_fs(&self) -> &WorkspaceFs {
         &self.inner.workspace_fs
+    }
+
+    pub fn devices(&self) -> &DeviceRuntime {
+        &self.inner.devices
     }
 
     pub fn admin_config_lock(&self) -> &Mutex<()> {
