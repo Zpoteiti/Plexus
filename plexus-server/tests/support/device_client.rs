@@ -49,6 +49,10 @@ impl DeviceClient {
         self.ws.send(Message::Text(text.into())).await.unwrap();
     }
 
+    pub async fn send_binary(&mut self, bytes: Vec<u8>) {
+        self.ws.send(Message::Binary(bytes.into())).await.unwrap();
+    }
+
     pub async fn recv_frame(&mut self) -> WsFrame {
         loop {
             match self.next_message().await {

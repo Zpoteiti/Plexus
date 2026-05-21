@@ -12,6 +12,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use plexus_common::{
+    ErrorCode,
     protocol::{DeviceConfig, FsPolicy, HelloAckFrame, PingFrame, WsFrame},
     version::PROTOCOL_VERSION,
 };
@@ -121,10 +122,7 @@ async fn run_socket(state: AppState, mut socket: WebSocket, token: Option<String
     });
 
     let (heartbeat_interval, heartbeat_missed_limit) = state.devices().heartbeat_config().await;
-    let mut heartbeat = tokio::time::interval_at(
-        tokio::time::Instant::now() + heartbeat_interval,
-        heartbeat_interval,
-    );
+    let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now(), heartbeat_interval);
     let mut awaiting_pong: Option<Uuid> = None;
     let mut missed: u8 = 0;
 
@@ -158,9 +156,44 @@ async fn run_socket(state: AppState, mut socket: WebSocket, token: Option<String
                             awaiting_pong = None;
                             missed = 0;
                         }
+                        Ok(WsFrame::Pong(_)) => {
+                            send_error(
+                                &state,
+                                &row.token,
+                                ErrorCode::MalformedFrame,
+                                "unexpected pong",
+                            )
+                            .await;
+                        }
                         Ok(WsFrame::Error(_)) => {}
-                        _ => {}
+                        Ok(_) => {
+                            send_error(
+                                &state,
+                                &row.token,
+                                ErrorCode::UnknownType,
+                                "unsupported client frame",
+                            )
+                            .await;
+                        }
+                        Err(_) => {
+                            send_error(
+                                &state,
+                                &row.token,
+                                ErrorCode::MalformedFrame,
+                                "malformed JSON frame",
+                            )
+                            .await;
+                        }
                     },
+                    Message::Binary(_) => {
+                        send_error(
+                            &state,
+                            &row.token,
+                            ErrorCode::MalformedFrame,
+                            "binary frames are unsupported",
+                        )
+                        .await;
+                    }
                     Message::Close(_) => break,
                     _ => {}
                 }
@@ -175,6 +208,20 @@ async fn run_socket(state: AppState, mut socket: WebSocket, token: Option<String
         .unregister_if_current(&row.token, generation)
         .await;
     let _ = writer.await;
+}
+
+async fn send_error(state: &AppState, token: &str, code: ErrorCode, message: &'static str) {
+    let _ = state
+        .devices()
+        .send(
+            token,
+            WsFrame::Error(plexus_common::protocol::ErrorFrame {
+                id: None,
+                code,
+                message: message.to_string(),
+            }),
+        )
+        .await;
 }
 
 pub fn device_config_from_row(row: &DeviceRow) -> DeviceConfig {

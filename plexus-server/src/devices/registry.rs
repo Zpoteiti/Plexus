@@ -142,7 +142,10 @@ impl DeviceRuntime {
         (state.heartbeat_interval, state.heartbeat_missed_limit)
     }
 
+    #[doc(hidden)]
     pub async fn set_heartbeat_for_tests(&self, interval: Duration, missed_limit: u8) {
+        assert!(!interval.is_zero(), "heartbeat interval must be non-zero");
+        assert!(missed_limit > 0, "heartbeat missed limit must be non-zero");
         let mut state = self.inner.lock().await;
         state.heartbeat_interval = interval;
         state.heartbeat_missed_limit = missed_limit;
