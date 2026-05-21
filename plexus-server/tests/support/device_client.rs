@@ -1,6 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use plexus_common::protocol::{HelloCaps, HelloFrame, PongFrame, WsFrame};
 use tokio::net::TcpStream;
+use tokio::time::{Duration, timeout};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
     tungstenite::{Message, client::IntoClientRequest},
@@ -50,7 +51,7 @@ impl DeviceClient {
 
     pub async fn recv_frame(&mut self) -> WsFrame {
         loop {
-            match self.ws.next().await.unwrap().unwrap() {
+            match self.next_message().await {
                 Message::Text(text) => return serde_json::from_str(&text).unwrap(),
                 Message::Ping(payload) => self.ws.send(Message::Pong(payload)).await.unwrap(),
                 other => panic!("unexpected websocket message: {other:?}"),
@@ -60,7 +61,7 @@ impl DeviceClient {
 
     pub async fn recv_close_code(&mut self) -> u16 {
         loop {
-            match self.ws.next().await.unwrap().unwrap() {
+            match self.next_message().await {
                 Message::Close(Some(frame)) => return frame.code.into(),
                 Message::Close(None) => return 1005,
                 Message::Text(_) => continue,
@@ -71,5 +72,13 @@ impl DeviceClient {
 
     pub async fn reply_pong(&mut self, id: Uuid) {
         self.send(WsFrame::Pong(PongFrame { id })).await;
+    }
+
+    async fn next_message(&mut self) -> Message {
+        timeout(Duration::from_secs(5), self.ws.next())
+            .await
+            .expect("timed out waiting for websocket message")
+            .expect("websocket stream ended")
+            .expect("websocket read failed")
     }
 }

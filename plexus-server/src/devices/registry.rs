@@ -1,6 +1,6 @@
 use crate::db::devices::DeviceRow;
 use plexus_common::protocol::{ConfigUpdateFrame, WsFrame};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
@@ -12,6 +12,12 @@ pub enum CloseReason {
     HeartbeatTimeout,
 }
 
+#[derive(Debug, Clone)]
+pub enum DeviceCommand {
+    Frame(WsFrame),
+    Close(CloseReason),
+}
+
 #[derive(Clone)]
 pub struct ConnHandle {
     pub token: String,
@@ -19,7 +25,7 @@ pub struct ConnHandle {
     pub device_name: String,
     pub connected_at: OffsetDateTime,
     pub last_seen: OffsetDateTime,
-    pub tx: mpsc::Sender<WsFrame>,
+    pub tx: mpsc::Sender<DeviceCommand>,
 }
 
 #[derive(Clone)]
@@ -33,10 +39,22 @@ pub struct DeviceRuntime {
     inner: Arc<Mutex<RegistryState>>,
 }
 
-#[derive(Default)]
 struct RegistryState {
     next_generation: u64,
     by_token: HashMap<String, RegistryEntry>,
+    heartbeat_interval: Duration,
+    heartbeat_missed_limit: u8,
+}
+
+impl Default for RegistryState {
+    fn default() -> Self {
+        Self {
+            next_generation: 0,
+            by_token: HashMap::new(),
+            heartbeat_interval: Duration::from_secs(crate::devices::HEARTBEAT_INTERVAL_SECS),
+            heartbeat_missed_limit: crate::devices::HEARTBEAT_MISSED_LIMIT,
+        }
+    }
 }
 
 impl DeviceRuntime {
@@ -92,7 +110,7 @@ impl DeviceRuntime {
         let Some(handle) = handle else {
             return false;
         };
-        if handle.tx.send(frame).await.is_ok() {
+        if handle.tx.send(DeviceCommand::Frame(frame)).await.is_ok() {
             return true;
         }
         self.remove_stale_sender(token, &handle.tx).await;
@@ -112,13 +130,25 @@ impl DeviceRuntime {
         let Some(handle) = self.get(token).await else {
             return;
         };
-        let frame = crate::devices::ws::close_command_frame(reason);
-        if handle.tx.send(frame).await.is_err() {
-            self.remove_stale_sender(token, &handle.tx).await;
+        match handle.tx.send(DeviceCommand::Close(reason)).await {
+            Ok(()) | Err(_) => {
+                self.remove_stale_sender(token, &handle.tx).await;
+            }
         }
     }
 
-    async fn remove_stale_sender(&self, token: &str, tx: &mpsc::Sender<WsFrame>) {
+    pub async fn heartbeat_config(&self) -> (Duration, u8) {
+        let state = self.inner.lock().await;
+        (state.heartbeat_interval, state.heartbeat_missed_limit)
+    }
+
+    pub async fn set_heartbeat_for_tests(&self, interval: Duration, missed_limit: u8) {
+        let mut state = self.inner.lock().await;
+        state.heartbeat_interval = interval;
+        state.heartbeat_missed_limit = missed_limit;
+    }
+
+    async fn remove_stale_sender(&self, token: &str, tx: &mpsc::Sender<DeviceCommand>) {
         let mut state = self.inner.lock().await;
         if state
             .by_token
@@ -135,7 +165,7 @@ mod tests {
     use super::*;
     use plexus_common::protocol::{PingFrame, WsFrame};
 
-    fn handle(token: &str, name: &str) -> (ConnHandle, mpsc::Receiver<WsFrame>) {
+    fn handle(token: &str, name: &str) -> (ConnHandle, mpsc::Receiver<DeviceCommand>) {
         let (tx, rx) = mpsc::channel(8);
         let now = OffsetDateTime::now_utc();
         (
@@ -198,6 +228,33 @@ mod tests {
         drop(rx);
         runtime.register(h).await;
         runtime.close("t", CloseReason::Unauthorized).await;
+        assert!(!runtime.is_online("t").await);
+    }
+
+    #[tokio::test]
+    async fn send_wraps_frame_command() {
+        let runtime = DeviceRuntime::new();
+        let (h, mut rx) = handle("t", "devbox");
+        runtime.register(h).await;
+        let id = Uuid::now_v7();
+        let ok = runtime.send("t", WsFrame::Ping(PingFrame { id })).await;
+        assert!(ok);
+        assert!(matches!(
+            rx.recv().await,
+            Some(DeviceCommand::Frame(WsFrame::Ping(frame))) if frame.id == id
+        ));
+    }
+
+    #[tokio::test]
+    async fn close_sends_close_command_and_marks_offline() {
+        let runtime = DeviceRuntime::new();
+        let (h, mut rx) = handle("t", "devbox");
+        runtime.register(h).await;
+        runtime.close("t", CloseReason::Unauthorized).await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(DeviceCommand::Close(CloseReason::Unauthorized))
+        ));
         assert!(!runtime.is_online("t").await);
     }
 }

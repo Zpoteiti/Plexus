@@ -12,11 +12,11 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use plexus_common::{
-    ErrorCode,
-    protocol::{DeviceConfig, ErrorFrame, FsPolicy, HelloAckFrame, WsFrame},
+    protocol::{DeviceConfig, FsPolicy, HelloAckFrame, PingFrame, WsFrame},
     version::PROTOCOL_VERSION,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 pub async fn device_ws(
     State(state): State<AppState>,
@@ -71,7 +71,7 @@ async fn run_socket(state: AppState, mut socket: WebSocket, token: Option<String
         return;
     }
 
-    let (tx, mut rx) = mpsc::channel::<WsFrame>(32);
+    let (tx, mut rx) = mpsc::channel::<crate::devices::registry::DeviceCommand>(32);
     let now = time::OffsetDateTime::now_utc();
     let handle = crate::devices::ConnHandle {
         token: row.token.clone(),
@@ -85,35 +85,96 @@ async fn run_socket(state: AppState, mut socket: WebSocket, token: Option<String
     if let Some(old) = old {
         let _ = old
             .tx
-            .send(close_command_frame(crate::devices::CloseReason::Replaced))
+            .send(crate::devices::registry::DeviceCommand::Close(
+                crate::devices::CloseReason::Replaced,
+            ))
             .await;
     }
 
     let (mut sender, mut receiver) = socket.split();
+    let (close_sent_tx, mut close_sent_rx) = oneshot::channel();
     let writer = tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
-            let text = serde_json::to_string(&frame).unwrap();
-            if sender.send(Message::Text(text.into())).await.is_err() {
-                break;
+        let mut close_sent_tx = Some(close_sent_tx);
+        while let Some(command) = rx.recv().await {
+            match command {
+                crate::devices::registry::DeviceCommand::Frame(frame) => {
+                    let text = serde_json::to_string(&frame).unwrap();
+                    if sender.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                crate::devices::registry::DeviceCommand::Close(reason) => {
+                    let (code, body) = close_payload(reason);
+                    let _ = sender
+                        .send(Message::Close(Some(CloseFrame {
+                            code,
+                            reason: body.into(),
+                        })))
+                        .await;
+                    if let Some(close_sent_tx) = close_sent_tx.take() {
+                        let _ = close_sent_tx.send(());
+                    }
+                    break;
+                }
             }
         }
     });
 
-    while let Some(Ok(message)) = receiver.next().await {
-        match message {
-            Message::Text(text) => match serde_json::from_str::<WsFrame>(&text) {
-                Ok(WsFrame::Pong(_)) | Ok(WsFrame::Error(_)) => {}
-                _ => {}
-            },
-            Message::Close(_) => break,
-            _ => {}
+    let (heartbeat_interval, heartbeat_missed_limit) = state.devices().heartbeat_config().await;
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + heartbeat_interval,
+        heartbeat_interval,
+    );
+    let mut awaiting_pong: Option<Uuid> = None;
+    let mut missed: u8 = 0;
+
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                if awaiting_pong.is_some() {
+                    missed += 1;
+                    if missed >= heartbeat_missed_limit {
+                        state
+                            .devices()
+                            .close(&row.token, crate::devices::CloseReason::HeartbeatTimeout)
+                            .await;
+                        break;
+                    }
+                }
+                let id = Uuid::now_v7();
+                awaiting_pong = Some(id);
+                let _ = state
+                    .devices()
+                    .send(&row.token, WsFrame::Ping(PingFrame { id }))
+                    .await;
+            }
+            msg = receiver.next() => {
+                let Some(Ok(message)) = msg else {
+                    break;
+                };
+                match message {
+                    Message::Text(text) => match serde_json::from_str::<WsFrame>(&text) {
+                        Ok(WsFrame::Pong(pong)) if Some(pong.id) == awaiting_pong => {
+                            awaiting_pong = None;
+                            missed = 0;
+                        }
+                        Ok(WsFrame::Error(_)) => {}
+                        _ => {}
+                    },
+                    Message::Close(_) => break,
+                    _ => {}
+                }
+            }
+            _ = &mut close_sent_rx => {
+                break;
+            }
         }
     }
-    writer.abort();
     state
         .devices()
         .unregister_if_current(&row.token, generation)
         .await;
+    let _ = writer.await;
 }
 
 pub fn device_config_from_row(row: &DeviceRow) -> DeviceConfig {
@@ -136,21 +197,14 @@ fn fs_policy_from_row(value: &str) -> FsPolicy {
     }
 }
 
-pub fn close_command_frame(reason: crate::devices::CloseReason) -> WsFrame {
-    let (code, message) = match reason {
-        crate::devices::CloseReason::Replaced => {
-            (ErrorCode::ClientShuttingDown, "connection replaced")
+fn close_payload(reason: crate::devices::CloseReason) -> (u16, String) {
+    match reason {
+        crate::devices::CloseReason::Replaced => (1000, String::new()),
+        crate::devices::CloseReason::Unauthorized => {
+            (4401, r#"{"code":"unauthorized"}"#.to_string())
         }
-        crate::devices::CloseReason::Unauthorized => (ErrorCode::Unauthorized, "unauthorized"),
-        crate::devices::CloseReason::HeartbeatTimeout => {
-            (ErrorCode::DeviceUnreachable, "heartbeat timeout")
-        }
-    };
-    WsFrame::Error(ErrorFrame {
-        id: None,
-        code,
-        message: message.to_string(),
-    })
+        crate::devices::CloseReason::HeartbeatTimeout => (4408, String::new()),
+    }
 }
 
 async fn close(socket: &mut WebSocket, code: u16, reason: &'static str) {
