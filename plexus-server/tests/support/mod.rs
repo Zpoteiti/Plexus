@@ -11,6 +11,7 @@ use serde_json::Value;
 use sqlx::{Connection, Executor, PgConnection, PgPool};
 use std::{env, path::PathBuf};
 use tempfile::TempDir;
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 use url::Url;
 use uuid::Uuid;
@@ -61,6 +62,16 @@ impl TestApp {
             admin_url,
             workspace_root,
         }
+    }
+
+    pub async fn spawn_server(&self) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = self.router.clone();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("ws://{addr}")
     }
 }
 
@@ -232,4 +243,5 @@ pub async fn register_user(app: &TestApp, email: &str) -> (String, Uuid) {
     )
 }
 
+pub mod device_client;
 pub mod fake_openai;

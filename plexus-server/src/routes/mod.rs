@@ -41,6 +41,7 @@ pub fn router() -> Router<AppState> {
             "/api/devices",
             get(devices::list_devices).post(devices::create_device),
         )
+        .route("/ws/device", get(crate::devices::ws::device_ws))
         .route(
             "/api/devices/{name}/config",
             axum::routing::patch(devices::patch_device),
