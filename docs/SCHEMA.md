@@ -207,7 +207,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_messages_session_key_received
 CREATE TABLE IF NOT EXISTS devices (
     token              TEXT         PRIMARY KEY,
     user_id            UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name               TEXT         NOT NULL CHECK (lower(name) <> 'server'),
+    name               TEXT         NOT NULL CHECK (name ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND name <> 'server'),
     workspace_path     TEXT         NOT NULL,
     fs_policy          TEXT         NOT NULL CHECK (fs_policy IN ('sandbox', 'unrestricted'))
                                     DEFAULT 'sandbox',
@@ -221,13 +221,13 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
 ```
 
-- `token` is the PK *and* the credential (ADR-091). Stored plaintext — it IS the credential. WS handshake `Authorization: Bearer <token>` is matched directly against this column.
-- `name` is the user-facing friendly label. UNIQUE per user, so the URL `PATCH /api/devices/laptop/config` resolves to `(user_id, "laptop")` without ever touching the token. The literal name `server` is reserved for Plexus's built-in server install site and is rejected for user devices.
+- `token` is the PK *and* the credential (ADR-091). Stored plaintext — it IS the credential. WS handshake `Authorization: Bearer <token>` is matched directly against this column. REST returns the plaintext token only from `POST /api/devices` and `POST /api/devices/{name}/regenerate-token`; `GET /api/devices` returns full device details plus `token_hint`, never the plaintext token.
+- `name` is the REST/tool-routing canonical slug. It is UNIQUE per user, so the URL `PATCH /api/devices/laptop/config` resolves to `(user_id, "laptop")` without ever touching the token. Stored names match `^[a-z0-9]+(-[a-z0-9]+)*$`, are at most 64 characters, and use only lowercase ASCII letters, digits, and hyphens. The literal name `server` is reserved for Plexus's built-in server install site and is rejected for user devices.
 - `ssrf_whitelist` — JSONB array of `host` or `host:port` strings, exceptions to the client-site `web_fetch` block-list (ADR-052). Capability declaration only — does not stop `exec curl` (ADR-073).
-- `mcp_servers` — JSONB map of `<server_name>: McpServerConfig` (see API.yaml). Pushed to the live device via `config_update` frame on change (ADR-050, PROTOCOL.md §3.6).
+- `mcp_servers` — JSONB map of `<server_name>: McpServerConfig` (see API.yaml), stored as the full unredacted config including `env` secrets. REST responses redact every `mcp_servers.*.env.*` value as `"<redacted>"`; writes reject that marker so clients cannot accidentally persist a redacted response over real secrets. Device WebSocket `hello_ack` and `config_update` use the stored unredacted DB value. Config changes are pushed to the live device via `config_update` frame (ADR-050, PROTOCOL.md §3.6).
 - **Online state is in-memory only** — no `online` / `last_seen_at` columns; the connected-WS map (`DashMap<token, ConnHandle>`) is the source of truth. The `Device` API response computes them on demand. Three device states per ADR-110: state-1 (online, in-map), state-2 (offline-but-paired, row exists, not in map — listed in `plexus_device` enum so the agent can still attempt and fail loudly), state-3 (deleted — row gone, in-memory entry gone, live WS force-closed, tool registry invalidated; complete wipe with no soft-delete tombstone).
 - **No inbound FKs reference `devices`** from other tables. State-3 transition is a single-row DELETE; cascades from `users.id` are the only path that takes multiple device rows out at once (account deletion).
-- `workspace_path` default is the literal string `~/plexus/workspace` on every OS (ADR-111) when omitted from `POST /api/devices`. The client expands `~` against its own home dir at startup; the server stores and returns the unexpanded form.
+- `workspace_path` default is the literal string `~/plexus/workspace` on every OS (ADR-111) when omitted from `POST /api/devices`. Explicit overrides are stored verbatim. The client expands `~` against its own home dir at startup; the server stores and returns the unexpanded form.
 
 ---
 

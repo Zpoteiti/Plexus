@@ -186,6 +186,12 @@ updates persisted config and, when the device is online, sends a
 `config_update` frame through the connection registry. If that send fails, the
 server treats the registry entry as stale and removes it.
 
+`mcp_servers` stores the full unredacted `McpServerConfig`, including `env`
+secrets. REST responses redact every `mcp_servers.*.env.*` value as
+`"<redacted>"`; create/update requests reject that marker so a client cannot
+round-trip a redacted response and overwrite stored secrets. Device WebSocket
+`hello_ack` and `config_update` use the stored unredacted DB value.
+
 ---
 
 ## 7. REST API

@@ -1018,6 +1018,11 @@ paths:
     get:
       tags: [Devices]
       summary: Target route — list user's devices (not M1b)
+      description: |
+        Returns all device details for the authenticated user in one array.
+        M1e does not paginate this route and does not implement
+        `GET /api/devices/{name}`. Responses include `token_hint` for user
+        confirmation and never include the plaintext token.
       responses:
         '200':
           description: OK
@@ -1040,10 +1045,11 @@ paths:
                 name:
                   type: string
                   description: |
-                    Friendly label (e.g. "laptop"). Unique within the
-                    user's devices. Validated per ADR-109. The literal
-                    name `server` is reserved for Plexus's built-in server
-                    install site and is rejected for user-created devices.
+                    Raw device name to normalize into the stored canonical
+                    slug. The stored value is unique within the user's
+                    devices, uses lowercase ASCII letters, digits, and
+                    hyphens, is at most 64 characters, and must not be
+                    `server`.
                 workspace_path:
                   type: string
                   description: |
@@ -1061,7 +1067,13 @@ paths:
                 ssrf_whitelist:
                   type: array
                   items: { type: string }
-                mcp_servers: { type: object, additionalProperties: true }
+                mcp_servers:
+                  type: object
+                  additionalProperties: true
+                  description: |
+                    Map of MCP server configs. Stored with full env secrets.
+                    Requests reject the redaction marker `"<redacted>"` in
+                    any `mcp_servers.*.env.*` value.
       responses:
         '201':
           description: |
@@ -1074,29 +1086,21 @@ paths:
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/Device'
-                  - type: object
-                    required: [token]
-                    properties:
-                      token:
-                        type: string
-                        description: Bearer token the device sends at WebSocket handshake. Shown once.
+                type: object
+                required: [token, device]
+                properties:
+                  token:
+                    type: string
+                    description: Bearer token the device sends at WebSocket handshake. Shown once.
+                  device: { $ref: '#/components/schemas/Device' }
 
-  /api/devices/{name}:
+  /api/devices/{name}/config:
     description: Target M1 device management route; not implemented in M1b.
     parameters:
       - name: name
         in: path
         required: true
         schema: { type: string }
-    get:
-      tags: [Devices]
-      summary: Target route — get a device (not M1b)
-      responses:
-        '200':
-          description: OK
-          content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } }
     patch:
       tags: [Devices]
       summary: Target route — update device config (fs_policy, timeouts, SSRF, MCPs; not M1b)
@@ -1109,7 +1113,9 @@ paths:
         confirmation in the UI (ADR-051); this endpoint accepts the
         flip but the UI is expected to enforce confirmation before
         calling it. If `name` is provided, it renames the device after
-        ADR-109 validation; `server` remains reserved and is rejected.
+        canonical M1e slug validation; `server` remains reserved and is
+        rejected. Requests reject the redaction marker `"<redacted>"` in
+        any `mcp_servers.*.env.*` value.
       requestBody:
         content:
           application/json:
@@ -1118,21 +1124,36 @@ paths:
               properties:
                 name:
                   type: string
-                  description: Optional friendly-label rename. Must be unique within the user's devices and must not be `server`.
+                  description: Optional rename. Normalized to a canonical per-user slug and must not be `server`.
                 fs_policy: { type: string, enum: [sandbox, unrestricted] }
                 shell_timeout_max: { type: integer }
                 ssrf_whitelist:
                   type: array
                   items: { type: string }
-                mcp_servers: { type: object, additionalProperties: true }
+                mcp_servers:
+                  type: object
+                  additionalProperties: true
+                  description: |
+                    Map of MCP server configs. Stored with full env secrets.
+                    REST responses redact every `env` value as `"<redacted>"`;
+                    writes reject that marker.
                 workspace_path: { type: string }
       responses:
         '200':
           description: Updated.
           content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } }
+
+  /api/devices/{name}:
+    description: Target M1 device management route; not implemented in M1b.
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
     delete:
       tags: [Devices]
       summary: Target route — remove a device (revokes its token; not M1b)
+      description: Deletes the device row and closes any active WebSocket connection.
       responses:
         '204': { description: Removed. }
 
@@ -1149,9 +1170,10 @@ paths:
       description: |
         Target M1 device route. Not implemented in M1b.
 
-        Invalidates the old token, returns a new one (shown once). The
-        connected device will be disconnected on its next handshake
-        attempt; user must update client config with the new token.
+        Invalidates the old token, returns a new one exactly once, and
+        preserves the existing device config. Any active connection for the
+        old token is closed; the user must update client config with the new
+        token.
       responses:
         '200':
           description: New token.
@@ -1159,9 +1181,10 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [token]
+                required: [token, device]
                 properties:
                   token: { type: string }
+                  device: { $ref: '#/components/schemas/Device' }
 
   #
   # --- Channels ---
@@ -1843,42 +1866,41 @@ components:
 
     Device:
       type: object
-      required: [name, user_id, fs_policy, workspace_path, state, created_at]
+      required: [name, fs_policy, workspace_path, shell_timeout_max, ssrf_whitelist, mcp_servers, online, token_hint, created_at]
       properties:
         name:
           type: string
-          description: Unique per-user friendly label. ADR-109 validation; `server` is reserved.
-        user_id: { type: string }
+          description: |
+            Canonical per-user slug used in REST paths and tool routing.
+            Matches `^[a-z0-9]+(-[a-z0-9]+)*$`, is at most 64 characters,
+            and must not be `server`.
         workspace_path:
           type: string
           description: |
             May contain a leading `~`; the client expands at startup.
             Default `~/plexus/workspace` (ADR-111) on every OS when not
-            supplied at create time.
+            supplied at create time. Explicit overrides are stored verbatim.
         fs_policy: { type: string, enum: [sandbox, unrestricted] }
         shell_timeout_max: { type: integer, description: Seconds. }
         ssrf_whitelist:
           type: array
           items: { type: string }
-        mcp_servers: { type: object, additionalProperties: true }
-        state:
-          type: string
-          enum: [online, offline]
+        mcp_servers:
+          type: object
+          additionalProperties: true
           description: |
-            Device state per ADR-110. `online` (state 1) means a live WS
-            connection. `offline` (state 2) means the row exists and the
-            token is still valid but no WS is connected. The frontend
-            renders state-2 devices as greyed-out. The third state
-            (deleted, ADR-110) is a complete wipe — row gone, in-memory
-            entry gone, live WS force-closed, tool registry invalidated —
-            and never appears in any API response. Triggered only by
-            `DELETE /api/devices/{name}` or `DELETE /api/me`. Token
-            regeneration is NOT a state-3 trigger.
+            MCP server configs with every `mcp_servers.*.env.*` value
+            redacted as `"<redacted>"` in REST responses. The database stores
+            the full unredacted config; device WebSocket config uses the
+            stored unredacted value.
         online:
           type: boolean
-          deprecated: true
-          description: Equals `state == "online"`. Kept for v1 compatibility; prefer `state`.
-        last_seen_at: { type: string, format: date-time }
+          description: |
+            Derived from the in-memory device WebSocket registry. There are no
+            `online` or `last_seen_at` columns in the database.
+        token_hint:
+          type: string
+          description: Confirmation hint such as `plexus_dev_...abcd`; plaintext tokens are not returned by list/update/delete responses.
         created_at: { type: string, format: date-time }
 
     DiscordConfig:
