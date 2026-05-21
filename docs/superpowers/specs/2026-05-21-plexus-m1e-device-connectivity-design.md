@@ -17,8 +17,8 @@ as reachable while the WebSocket remains healthy.
 
 The success proof is intentionally connection-scoped:
 
-- device rows can be created, listed, read, updated, regenerated, and deleted
-  through authenticated REST APIs;
+- device rows can be created, listed with full details, updated, regenerated,
+  and deleted through authenticated REST APIs;
 - device tokens authenticate the WebSocket handshake without ever appearing in
   REST path segments;
 - a valid device connection receives `hello_ack` with its persisted
@@ -74,6 +74,11 @@ and avoids localization, URL escaping, and Unicode lookalike issues for the
 first device-routing implementation.
 
 Workspace names and skill folder names are not changed by this sub-spec.
+
+M1e also intentionally omits `GET /api/devices/{name}`. The list route
+returns full device details for all of the user's devices, and the expected
+per-user device count is small. Mutating routes still use `{name}` because they
+need a single resource target.
 
 ---
 
@@ -193,7 +198,6 @@ M1e implements:
 ```text
 POST   /api/devices
 GET    /api/devices
-GET    /api/devices/{name}
 PATCH  /api/devices/{name}/config
 POST   /api/devices/{name}/regenerate-token
 DELETE /api/devices/{name}
@@ -206,11 +210,13 @@ DELETE /api/devices/{name}
 - generates a new `plexus_dev_...` token;
 - returns the created device plus the plaintext token exactly once.
 
-`GET /api/devices` and `GET /api/devices/{name}`:
+`GET /api/devices`:
 
-- return device metadata and config;
-- include derived online status from the in-memory registry;
-- never return the plaintext token.
+- returns every device for the authenticated user;
+- returns full device details, including config fields and derived online status;
+- does not paginate in M1e because per-user device count is expected to be small;
+- returns `token_hint` such as `plexus_dev_...abcd` for user confirmation;
+- never returns the plaintext token.
 
 `PATCH /api/devices/{name}/config`:
 
@@ -383,7 +389,8 @@ M1e uses automated tests first. The test client is an in-process helper under
 REST tests:
 
 - create device returns canonical name, config defaults, and token once;
-- list/get do not return token;
+- list returns full device details for every device;
+- list returns `token_hint` and does not return plaintext token;
 - explicit `workspace_path` override is stored verbatim;
 - slug normalization accepts `MacBook Pro` as `macbook-pro`;
 - non-ASCII names reject;
