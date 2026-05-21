@@ -352,7 +352,9 @@ pongs, approximately 70 seconds. The exact implementation may use a monotonic
 deadline rather than a counter, but the external behavior should match
 `docs/PROTOCOL.md`.
 
-Either side may send `ping`. M1e responds to client `ping` with `pong`.
+Client-initiated `ping` is optional and not required by M1e. If a client
+sends `ping`, M1e responds with `pong` because `docs/PROTOCOL.md` permits
+either side to run a liveness probe.
 
 ---
 
