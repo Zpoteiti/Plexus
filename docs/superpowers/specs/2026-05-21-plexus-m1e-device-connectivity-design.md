@@ -278,7 +278,6 @@ M1e handles these text frames:
 
 - `hello` during handshake;
 - `pong` as heartbeat response;
-- `ping` by echoing `pong`;
 - outgoing `config_update` after REST config changes;
 - `error` by logging and keeping the connection open unless the socket closes.
 
@@ -352,9 +351,9 @@ pongs, approximately 70 seconds. The exact implementation may use a monotonic
 deadline rather than a counter, but the external behavior should match
 `docs/PROTOCOL.md`.
 
-Client-initiated `ping` is optional and not required by M1e. If a client
-sends `ping`, M1e responds with `pong` because `docs/PROTOCOL.md` permits
-either side to run a liveness probe.
+M1e does not require or define client-initiated `ping`. The client is a
+stateless executor and only replies to server pings with `pong`; server-side
+online state remains authoritative.
 
 ---
 

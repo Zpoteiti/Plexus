@@ -74,10 +74,11 @@ In-flight tool calls at the time of disconnect do NOT resume on reconnect. The s
 ```
 
 - Server sends `ping` every **30 seconds**.
-- Client must respond within 30s of the next `ping` deadline.
+- Client must respond with `pong` echoing the `ping.id` before the next
+  `ping` deadline.
+- The client does not initiate application-level `ping` in v1. It is a
+  stateless executor; server-side online state is authoritative.
 - After **2 missed pongs (~70s)** the server closes the connection (WS code `4408`) and marks the device offline. Any in-flight tool calls fail with `device_unreachable` (§3.4).
-
-Either side MAY send `ping` for liveness checks; the responder always echoes `id`.
 
 ---
 
@@ -95,8 +96,7 @@ All control frames are **WebSocket text frames** carrying a single JSON object w
 | `transfer_begin` | Open a file-transfer slot (client → server direction) | id, src_path, dst_device, dst_path, total_bytes, sha256, mime? |
 | `transfer_progress` | Optional progress update | id, bytes_sent |
 | `transfer_end` | Close a transfer slot | id, ok, error?, sha256? |
-| `pong` | Heartbeat reply | id (echoes ping) |
-| `ping` | Liveness probe | id |
+| `pong` | Heartbeat reply | id (echoes server ping) |
 | `error` | Out-of-band error report | id?, code, message |
 
 ### 2.2 Server → client
@@ -110,7 +110,6 @@ All control frames are **WebSocket text frames** carrying a single JSON object w
 | `transfer_progress` | Optional progress update | id, bytes_sent |
 | `transfer_end` | Close a transfer slot | same fields |
 | `ping` | Liveness probe | id |
-| `pong` | Heartbeat reply | id (echoes ping) |
 | `error` | Out-of-band error report | id?, code, message |
 
 The `error` frame is for protocol-level issues (malformed JSON, unknown frame type) that are not tied to a specific tool call. Tool failures travel as `tool_result` with `is_error: true` per ADR-031.
