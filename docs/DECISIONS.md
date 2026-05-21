@@ -974,7 +974,7 @@ All three live in `plexus-client/src/mcp/`. The worker stitches them together fo
 **Context:** Devices need bidirectional, low-latency dispatch (server pushes tool calls, client pushes results, both sides push file bytes for `message`-with-files and `file_transfer`). Browser already uses REST + SSE (ADR-003); devices need WebSocket because they sit behind NAT and tool dispatch is bidirectional.
 **Decision:** A single WebSocket connection per device carries both control plane (JSON text frames) and bulk plane (binary frames). The full wire spec lives in `docs/PROTOCOL.md`; this ADR fixes the headline choices that other decisions reference:
 
-- **Endpoint:** `GET /ws/device` with `Authorization: Bearer <PLEXUS_DEVICE_TOKEN>` (or `?token=` query for clients that can't set headers on WS).
+- **Endpoint:** `GET /ws/device` with `Authorization: Bearer <PLEXUS_DEVICE_TOKEN>`. Device tokens are never accepted in URL query parameters.
 - **Frame types (text/JSON):** `hello`, `hello_ack`, `tool_call`, `tool_result`, `register_mcp`, `config_update`, `transfer_begin`, `transfer_progress`, `transfer_end`, `ping`, `pong`, `error`.
 - **Correlation:** every request carries a UUID v7 `id`; responses echo it. Not strict JSON-RPC.
 - **Parallel tool dispatch.** Server may issue multiple `tool_call` frames before any `tool_result` arrives; client spawns a tokio task per call. Matches the agent's parallel-tool pattern.

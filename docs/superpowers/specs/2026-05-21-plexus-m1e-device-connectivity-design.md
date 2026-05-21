@@ -253,11 +253,8 @@ GET /ws/device
 Authorization: Bearer <PLEXUS_DEVICE_TOKEN>
 ```
 
-Fallback for clients that cannot set headers during upgrade:
-
-```text
-GET /ws/device?token=<PLEXUS_DEVICE_TOKEN>
-```
+Device tokens are accepted only in the `Authorization` header. M1e does not
+support `?token=` because URLs commonly land in logs and debugging tools.
 
 The server uses `plexus_common::protocol::WsFrame` and
 `plexus_common::version::PROTOCOL_VERSION`. M1e must not define duplicate frame
@@ -265,7 +262,7 @@ types in `plexus-server`.
 
 Handshake:
 
-1. Extract the device token from the bearer header or `token` query parameter.
+1. Extract the device token from the bearer header.
 2. Look up the device row by `devices.token`.
 3. If lookup fails, close with `4401` and `{"code":"unauthorized"}`.
 4. Wait for a text `hello` frame.

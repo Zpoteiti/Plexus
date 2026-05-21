@@ -15,9 +15,9 @@ GET /ws/device
 Authorization: Bearer <PLEXUS_DEVICE_TOKEN>
 ```
 
-Or (for clients that can't set headers on WS upgrade): `GET /ws/device?token=<...>`.
-
-The token is the device row's primary key (ADR-091, ADR-097). No additional handshake credentials.
+The token is the device row's primary key (ADR-091, ADR-097). It is
+accepted only in the `Authorization` header, never in the URL. No additional
+handshake credentials.
 
 ### 1.2 Handshake
 
