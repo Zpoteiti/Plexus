@@ -136,7 +136,7 @@ Modify `Cargo.toml` workspace dependencies:
 tokio = { version = "1", features = ["fs", "process", "macros", "rt-multi-thread", "time", "sync", "test-util"] }
 axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
-tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 ```
 
 Modify `plexus-server/Cargo.toml`:
