@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_messages_session_key_received
 CREATE TABLE IF NOT EXISTS devices (
     token              TEXT         PRIMARY KEY,
     user_id            UUID         NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name               TEXT         NOT NULL CHECK (lower(name) <> 'server'),
+    name               TEXT         NOT NULL CHECK (name ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND name <> 'server'),
     workspace_path     TEXT         NOT NULL,
     fs_policy          TEXT         NOT NULL CHECK (fs_policy IN ('sandbox', 'unrestricted'))
                                     DEFAULT 'sandbox',

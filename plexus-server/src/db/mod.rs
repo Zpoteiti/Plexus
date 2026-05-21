@@ -1,5 +1,6 @@
 use sqlx::{PgPool, postgres::PgPoolOptions};
 
+pub mod devices;
 pub mod messages;
 pub mod pending_messages;
 pub mod sessions;
