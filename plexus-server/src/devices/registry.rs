@@ -31,4 +31,12 @@ impl DeviceRuntime {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub async fn is_online(&self, token: &str) -> bool {
+        self.inner.lock().await.contains_key(token)
+    }
+
+    pub async fn send_config_update(&self, _row: &crate::db::devices::DeviceRow) {}
+
+    pub async fn close(&self, _token: &str, _reason: CloseReason) {}
 }

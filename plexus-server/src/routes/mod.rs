@@ -6,6 +6,7 @@ use axum::{
 
 pub mod admin;
 pub mod auth;
+pub mod devices;
 pub mod me;
 pub mod sessions;
 mod validation;
@@ -36,6 +37,19 @@ pub fn router() -> Router<AppState> {
             get(sessions::list_messages).post(sessions::post_message),
         )
         .route("/api/sessions/{id}/stream", get(sessions::stream_session))
+        .route(
+            "/api/devices",
+            get(devices::list_devices).post(devices::create_device),
+        )
+        .route(
+            "/api/devices/{name}/config",
+            axum::routing::patch(devices::patch_device),
+        )
+        .route(
+            "/api/devices/{name}/regenerate-token",
+            post(devices::regenerate_token),
+        )
+        .route("/api/devices/{name}", delete(devices::delete_device))
         .route("/api/workspace/quota", get(workspace::quota))
         .route(
             "/api/workspace/files/{*path}",
