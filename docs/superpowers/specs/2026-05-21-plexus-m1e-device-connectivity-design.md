@@ -276,9 +276,12 @@ Handshake:
    close with retryable `1013` and `{"code":"io_error"}`.
 5. Wait for a text `hello` frame.
 6. If `hello.version` differs from `PROTOCOL_VERSION`, close with `4409`.
-7. Send `hello_ack` with the same `id`, the stored `device_name`, `user_id`,
+7. Re-check the token before accepting the handshake, so regeneration or
+   deletion during a pending `hello` closes with `4401` instead of registering a
+   revoked credential.
+8. Send `hello_ack` with the same `id`, the stored `device_name`, `user_id`,
    and current `DeviceConfig`.
-8. Register the connection as online.
+9. Register the connection as online.
 
 M1e handles these text frames:
 

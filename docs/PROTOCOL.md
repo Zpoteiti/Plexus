@@ -56,7 +56,7 @@ Server responds with `hello_ack` containing the device's **server-side configura
 }
 ```
 
-If the token is invalid or revoked, the server closes with WS code `4401` and a JSON close-reason payload `{"code":"unauthorized"}`. No `error` frame.
+If the token is invalid or revoked, the server closes with WS code `4401` and a JSON close-reason payload `{"code":"unauthorized"}`. No `error` frame. The server rechecks the token after receiving `hello` and before `hello_ack`, so a token revoked during an in-flight handshake cannot become an online connection.
 
 ### 1.3 Reconnect
 

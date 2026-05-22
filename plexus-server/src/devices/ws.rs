@@ -40,17 +40,12 @@ async fn run_socket(state: AppState, mut socket: WebSocket, token: Option<String
         close(&mut socket, 4401, r#"{"code":"unauthorized"}"#).await;
         return;
     };
-    let row = match devices::find_by_token(state.pool(), &token).await {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            close(&mut socket, 4401, r#"{"code":"unauthorized"}"#).await;
-            return;
-        }
-        Err(_) => {
-            close(&mut socket, 1013, r#"{"code":"io_error"}"#).await;
-            return;
-        }
-    };
+    if load_device_or_close(&state, &mut socket, &token)
+        .await
+        .is_none()
+    {
+        return;
+    }
 
     let Some(Ok(Message::Text(text))) = socket.next().await else {
         close(&mut socket, 1002, "expected hello").await;
@@ -64,6 +59,10 @@ async fn run_socket(state: AppState, mut socket: WebSocket, token: Option<String
         close(&mut socket, 4409, r#"{"code":"version_unsupported"}"#).await;
         return;
     }
+
+    let Some(row) = load_device_or_close(&state, &mut socket, &token).await else {
+        return;
+    };
 
     let ack = WsFrame::HelloAck(HelloAckFrame {
         id: hello.id,
@@ -212,6 +211,24 @@ async fn run_socket(state: AppState, mut socket: WebSocket, token: Option<String
         .unregister_if_current(&row.token, generation)
         .await;
     let _ = writer.await;
+}
+
+async fn load_device_or_close(
+    state: &AppState,
+    socket: &mut WebSocket,
+    token: &str,
+) -> Option<DeviceRow> {
+    match devices::find_by_token(state.pool(), token).await {
+        Ok(Some(row)) => Some(row),
+        Ok(None) => {
+            close(socket, 4401, r#"{"code":"unauthorized"}"#).await;
+            None
+        }
+        Err(_) => {
+            close(socket, 1013, r#"{"code":"io_error"}"#).await;
+            None
+        }
+    }
 }
 
 async fn send_error(state: &AppState, token: &str, code: ErrorCode, message: &'static str) {

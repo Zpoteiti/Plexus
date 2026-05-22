@@ -104,6 +104,30 @@ async fn token_lookup_error_closes_retryable_1013() {
 }
 
 #[tokio::test]
+async fn regenerated_token_during_pending_hello_closes_4401() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+    let token = create_device(&app, &jwt).await;
+    let base = app.spawn_server().await;
+
+    let mut client = DeviceClient::connect(&base, Some(&token)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (status, _) = support::json_request(
+        app.router.clone(),
+        Method::POST,
+        "/api/devices/devbox/regenerate-token",
+        json!({}),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    client.send_hello(PROTOCOL_VERSION).await;
+    assert_eq!(client.recv_close_code().await, 4401);
+}
+
+#[tokio::test]
 async fn protocol_mismatch_closes_4409() {
     let app = TestApp::spawn().await;
     let (jwt, _) = support::register_user(&app, "alice@example.com").await;
@@ -274,11 +298,15 @@ async fn binary_post_handshake_frame_returns_malformed_error() {
 
     client.send_binary(vec![0, 1, 2]).await;
 
-    match client.recv_frame().await {
-        WsFrame::Error(error) => {
-            assert_eq!(error.code, ErrorCode::MalformedFrame);
-            assert!(error.message.contains("binary"));
+    loop {
+        match client.recv_frame().await {
+            WsFrame::Error(error) => {
+                assert_eq!(error.code, ErrorCode::MalformedFrame);
+                assert!(error.message.contains("binary"));
+                break;
+            }
+            WsFrame::Ping(ping) => client.reply_pong(ping.id).await,
+            other => panic!("expected error, got {other:?}"),
         }
-        other => panic!("expected error, got {other:?}"),
     }
 }
