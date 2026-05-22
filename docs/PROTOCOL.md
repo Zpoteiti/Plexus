@@ -376,6 +376,7 @@ Standard WS close codes 1000–1015, plus Plexus-specific:
 |---|---|---|
 | `1000` | — | Normal close (e.g. client shutdown). |
 | `1001` | — | Going away (server restart). Reconnect with backoff. |
+| `1013` | `{"code":"io_error"}` | Temporary server/backend unavailable during handshake. Reconnect with backoff. |
 | `4401` | `{"code":"unauthorized"}` | Token invalid / revoked. **Exit, do NOT retry** (ADR-104). |
 | `4408` | — | Heartbeat timeout. Reconnect with backoff. |
 | `4409` | `{"code":"version_unsupported", "server_version":"...", "protocol_version":"...", "client_minimum":"...", "upgrade_url":"..."}` | Protocol version mismatch. **Exit code 78, do NOT retry** (ADR-104, ADR-107). Client renders a stderr error using the payload fields and points the user at `upgrade_url`. |

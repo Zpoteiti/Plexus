@@ -270,12 +270,15 @@ Handshake:
 
 1. Extract the device token from the bearer header.
 2. Look up the device row by `devices.token`.
-3. If lookup fails, close with `4401` and `{"code":"unauthorized"}`.
-4. Wait for a text `hello` frame.
-5. If `hello.version` differs from `PROTOCOL_VERSION`, close with `4409`.
-6. Send `hello_ack` with the same `id`, the stored `device_name`, `user_id`,
+3. If the token is absent from the table, close with `4401` and
+   `{"code":"unauthorized"}`.
+4. If the token lookup fails because the server cannot reach its backend,
+   close with retryable `1013` and `{"code":"io_error"}`.
+5. Wait for a text `hello` frame.
+6. If `hello.version` differs from `PROTOCOL_VERSION`, close with `4409`.
+7. Send `hello_ack` with the same `id`, the stored `device_name`, `user_id`,
    and current `DeviceConfig`.
-7. Register the connection as online.
+8. Register the connection as online.
 
 M1e handles these text frames:
 
@@ -369,6 +372,7 @@ Close codes:
 4408 heartbeat timeout
 4409 version unsupported
 1000 old connection replaced by newer connection
+1013 temporary server/backend unavailable; retry with backoff
 ```
 
 `4401` is used for invalid/revoked tokens, regeneration of an active token, and

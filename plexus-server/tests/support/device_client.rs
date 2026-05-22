@@ -64,10 +64,16 @@ impl DeviceClient {
     }
 
     pub async fn recv_close_code(&mut self) -> u16 {
+        self.recv_close().await.0
+    }
+
+    pub async fn recv_close(&mut self) -> (u16, String) {
         loop {
             match self.next_message().await {
-                Message::Close(Some(frame)) => return frame.code.into(),
-                Message::Close(None) => return 1005,
+                Message::Close(Some(frame)) => {
+                    return (frame.code.into(), frame.reason.to_string());
+                }
+                Message::Close(None) => return (1005, String::new()),
                 Message::Text(_) => continue,
                 other => panic!("unexpected websocket message: {other:?}"),
             }

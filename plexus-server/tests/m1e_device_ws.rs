@@ -89,6 +89,21 @@ async fn query_token_without_header_closes_4401() {
 }
 
 #[tokio::test]
+async fn token_lookup_error_closes_retryable_1013() {
+    let app = TestApp::spawn().await;
+    let (jwt, _) = support::register_user(&app, "alice@example.com").await;
+    let token = create_device(&app, &jwt).await;
+    let base = app.spawn_server().await;
+
+    app.pool.close().await;
+
+    let mut client = DeviceClient::connect(&base, Some(&token)).await;
+    let (code, reason) = client.recv_close().await;
+    assert_eq!(code, 1013);
+    assert_eq!(reason, r#"{"code":"io_error"}"#);
+}
+
+#[tokio::test]
 async fn protocol_mismatch_closes_4409() {
     let app = TestApp::spawn().await;
     let (jwt, _) = support::register_user(&app, "alice@example.com").await;

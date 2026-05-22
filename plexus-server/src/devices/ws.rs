@@ -42,8 +42,12 @@ async fn run_socket(state: AppState, mut socket: WebSocket, token: Option<String
     };
     let row = match devices::find_by_token(state.pool(), &token).await {
         Ok(Some(row)) => row,
-        Ok(None) | Err(_) => {
+        Ok(None) => {
             close(&mut socket, 4401, r#"{"code":"unauthorized"}"#).await;
+            return;
+        }
+        Err(_) => {
+            close(&mut socket, 1013, r#"{"code":"io_error"}"#).await;
             return;
         }
     };
